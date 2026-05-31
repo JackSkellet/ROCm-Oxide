@@ -23,6 +23,11 @@ pub fn constant(_attr: TokenStream, item: TokenStream) -> TokenStream {
     export_static("constant", item)
 }
 
+#[proc_macro_attribute]
+pub fn shared(_attr: TokenStream, item: TokenStream) -> TokenStream {
+    export_static("shared", item)
+}
+
 fn export_static(attribute: &str, item: TokenStream) -> TokenStream {
     let Some(name) = find_static_name(item.clone()) else {
         return compile_error(&format!("#[{attribute}] can only be applied to a static item"));

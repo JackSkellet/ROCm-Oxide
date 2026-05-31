@@ -243,6 +243,33 @@ fn main() -> Result<()> {
     assert_eq!(partials, expected);
     println!("ok: dynamic launch-sized LDS handled a block reduction kernel");
 
+    let static_lds_resource = kernels
+        .resource("static_lds_reverse")
+        .expect("generated resource metadata should include static_lds_reverse");
+    assert_eq!(static_lds_resource.group_segment_fixed_size, Some(1024));
+    assert!(!static_lds_resource.uses_dynamic_shared_mem);
+    let static_n = 512usize;
+    let static_config = LaunchConfig::for_num_elems_with_block_size(static_n, 256);
+    let static_kernel = kernels
+        .module()
+        .kernel_with_metadata(c"static_lds_reverse", static_lds_resource.launch_metadata())?;
+    let static_active = static_kernel.occupancy_for_config(static_config)?;
+    assert!(static_active.blocks_per_multiprocessor > 0);
+    let static_input = (0..static_n as u32).collect::<Vec<_>>();
+    let d_static_input = DeviceBuffer::from_slice(&static_input)?;
+    let d_static_out = DeviceBuffer::<u32>::new(static_n)?;
+    unsafe {
+        kernels.static_lds_reverse(static_config, &d_static_out, &d_static_input, static_n)?;
+    }
+    rocm_oxide::hip::synchronize()?;
+    let static_out = d_static_out.copy_to_vec()?;
+    let expected_static = static_input
+        .chunks(256)
+        .flat_map(|chunk| chunk.iter().rev().copied())
+        .collect::<Vec<_>>();
+    assert_eq!(static_out, expected_static);
+    println!("ok: static LDS marker produced a block-local reverse kernel");
+
     let params = DeviceBuffer::from_slice(&[generated::AffineParams {
         scale: 3.0,
         bias: -7.0,

@@ -3,10 +3,13 @@
 #![allow(improper_ctypes_definitions)]
 
 use rocm_oxide_device as gpu;
-use rocm_oxide_kernel::{device_global, kernel};
+use rocm_oxide_kernel::{device_global, kernel, shared};
 
 #[device_global]
 pub static mut ADD_ONE_DELTA: f32 = 1.0;
+
+#[shared]
+pub static mut STATIC_LDS_U32: [u32; 256] = [0; 256];
 
 #[repr(C)]
 #[derive(Clone, Copy)]
@@ -88,6 +91,37 @@ pub unsafe extern "C" fn lds_block_sum(
     if local == 0 {
         let sum = unsafe { scratch.read() };
         unsafe { partials.write_unchecked(block_id, sum) };
+    }
+}
+
+// rocm-oxide: len(out)=n
+// rocm-oxide: len(input)=n
+#[kernel]
+pub unsafe extern "C" fn static_lds_reverse(
+    out: gpu::DeviceSliceMut<u32>,
+    input: gpu::DeviceSlice<u32>,
+    n: usize,
+) {
+    let local = gpu::thread_idx_x() as usize;
+    let block_dim = gpu::block_dim_x() as usize;
+    if block_dim != 256 {
+        return;
+    }
+
+    let block_base = gpu::block_idx_x() as usize * block_dim;
+    let global = block_base + local;
+    let value = if global < n {
+        unsafe { input.read_unchecked(global) }
+    } else {
+        0
+    };
+    let scratch = core::ptr::addr_of_mut!(STATIC_LDS_U32).cast::<u32>();
+    unsafe { scratch.add(local).write(value) };
+    gpu::workgroup_barrier();
+
+    if global < n {
+        let reversed = unsafe { scratch.add(block_dim - 1 - local).read() };
+        unsafe { out.write_unchecked(global, reversed) };
     }
 }
 

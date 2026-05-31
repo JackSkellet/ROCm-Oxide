@@ -14,10 +14,10 @@ features on top of stronger contracts.
   - [x] reject obvious mutable-buffer aliasing before launch
   - [x] convert simple kernels before large demo kernels
   - [x] convert image, upscaling, stress, and raytrace kernels
-- [x] Constant/global memory source markers:
-  - [x] add a marker such as `#[device_global]` or `#[constant]`
+- [x] Constant/global/shared memory source markers:
+  - [x] add markers such as `#[device_global]`, `#[constant]`, and `#[shared]`
   - [x] lower marked globals with ROCm address-space awareness
-  - [x] connect marked globals to typed host views
+  - [x] connect host-visible marked globals to typed host views
 - [x] Math intrinsic lowering:
   - [x] map common `f32`/`f64` math calls to AMDGPU/ROCm-supported lowering
   - [x] add tests for `sqrt`, `rsqrt`, `sin`, `cos`, `atan`, min/max, and NaN behavior
@@ -39,9 +39,9 @@ Local probes on 2026-05-31:
 - HIP/runtime: `7.2.53211-364a905`; AMD LLVM/clang: `22.0.0git`.
 - Device limits from `rocminfo`: wavefront size 32, max workgroup size 1024,
   max waves per CU 32, 64 KB group/LDS segment.
-- Current generated artifact: 14 kernels, 18 buffer contracts, max VGPR 33, max
-  SGPR 26, max kernarg 368 bytes, static LDS 0, one dynamic-LDS kernel, and no
-  dynamic stack users.
+- Current generated artifact: 15 kernels, 20 buffer contracts, max VGPR 33, max
+  SGPR 26, max kernarg 368 bytes, max static LDS 1024 bytes, one
+  dynamic-LDS kernel, and no dynamic stack users.
 - Current scoped atomic IR emits global-memory `atomicrmw` with explicit
   `syncscope("workgroup")` or `syncscope("agent")` where requested. System scope
   intentionally uses the AMDGPU backend default because the local LLVM backend
@@ -51,7 +51,7 @@ Local probes on 2026-05-31:
 
 ### P0: Backend Correctness
 
-- [ ] Scope-specific atomic lowering:
+- [x] Scope-specific atomic lowering:
   - [x] preserve source-level workgroup/device/system scope markers through IR
   - [x] lower workgroup/device scope to AMDGPU LLVM `syncscope` and keep system
         scope on the backend default
@@ -64,15 +64,16 @@ Local probes on 2026-05-31:
   - [x] validate requested `shared_mem_bytes` against device and kernel limits
   - [x] report static and dynamic LDS in generated metadata and host bindings
   - [x] expose ergonomic typed workgroup scratch helpers in device/host code
-- [ ] LDS/shared-memory static and ISA verification:
-  - [ ] add a static LDS kernel once address-space-safe Rust syntax is settled
-  - [ ] verify LDS IR and ISA for dynamic plus static cases
-  - [ ] feed LDS pressure into occupancy planning
+- [x] LDS/shared-memory static and ISA verification:
+  - [x] add a static LDS kernel once address-space-safe Rust syntax is settled
+  - [x] verify LDS IR and ISA for dynamic plus static cases
+  - [x] feed LDS pressure into occupancy planning
 - [ ] Occupancy and resource model:
   - [x] expose per-kernel VGPR, SGPR, LDS, private segment, kernarg, and wavefront metadata at runtime
   - [x] switch `performance_probe` to the generated runtime resource table
   - [x] wrap HIP occupancy APIs for launch planning
   - [x] add benchmark output that flags occupancy limiters and spills
+  - [ ] turn resource/occupancy facts into generated launch-shape recommendations
 
 ### P1: Runtime Orchestration
 

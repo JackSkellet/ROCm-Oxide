@@ -223,8 +223,9 @@ execution ergonomics on ROCm:
 - `Kernel::occupancy_max_potential_block_size`,
   `Kernel::occupancy_max_active_blocks_per_multiprocessor`, and
   `Kernel::occupancy_for_config` wrappers over HIP occupancy planning APIs
-- `#[device_global]` and `#[constant]` markers for Rust-authored device globals,
-  with generated typed host accessors and ROCm address-space lowering
+- `#[device_global]`, `#[constant]`, and `#[shared]` markers for Rust-authored
+  device globals, with generated typed host accessors where host-visible and
+  ROCm address-space lowering
 - generated-kernel performance probes without GUI/readback timing noise
 
 `cargo rocm-oxide inspect` prints per-kernel code-object resources such as VGPR,
@@ -299,7 +300,8 @@ kernel allowlist, so helper functions can remain ordinary device functions.
 [crates/rocm-oxide-device](/home/jack/Documents/GitKraken_Projects/ROCm-Oxide/crates/rocm-oxide-device/src/lib.rs)
 now wraps the raw AMDGPU intrinsics used by kernels. It provides thread/block
 IDs, dispatch-packet-derived block/grid dimensions, global IDs, wavefront
-metadata, barriers, dynamic launch-sized LDS pointers, ballot/reduction helpers,
+metadata, barriers, dynamic launch-sized LDS pointers, workgroup
+synchronization for static `#[shared]` LDS kernels, ballot/reduction helpers,
 typed device slices, math helpers for `sqrt`, `rsqrt`, `sin`, `cos`, `atan`,
 min/max, scoped `u32` atomics for workgroup/device/system intent, and the basic
 relaxed `u32` atomic compatibility helpers so device code does not need to call
@@ -316,9 +318,9 @@ This roadmap is grounded in the current local probe target:
 - AMD LLVM/clang: `22.0.0git`.
 - Device limits seen through `rocminfo`: wavefront size 32, max workgroup size
   1024, max waves per CU 32, and 64 KB group/LDS segment.
-- Current generated artifact: 14 kernels, 18 buffer contracts, max VGPR 33, max
-  SGPR 26, max kernarg 368 bytes, static LDS 0, one dynamic-LDS kernel, and no
-  dynamic stack users.
+- Current generated artifact: 15 kernels, 20 buffer contracts, max VGPR 33, max
+  SGPR 26, max kernarg 368 bytes, max static LDS 1024 bytes, one
+  dynamic-LDS kernel, and no dynamic stack users.
 - Current scoped atomic IR reaches global-memory `atomicrmw` with explicit
   `syncscope("workgroup")` or `syncscope("agent")` where requested. System scope
   uses the AMDGPU backend default because this LLVM build rejects explicit
@@ -326,13 +328,14 @@ This roadmap is grounded in the current local probe target:
 
 ### P0: Backend Correctness
 
-- Scope-specific atomic verification: preserve the workgroup/device
+- Scope-specific atomic verification: implemented workgroup/device
   `syncscope` lowering, keep the system-scope backend default documented, verify
   the transformed IR plus disassembled ISA, and keep runtime coverage across
   default/coarse device, fine-grained device, and mapped host-visible memory.
-- LDS/shared-memory follow-up: extend the new dynamic-LDS reduction and
-  per-kernel validation path to static LDS cases, ISA checks, and occupancy
-  planning.
+- LDS/shared-memory follow-up: static `#[shared]` lowering now emits
+  addrspace(3) LDS storage, verifies dynamic and static LDS IR plus DS
+  load/store ISA, and feeds static/dynamic LDS pressure into launch validation
+  and HIP occupancy checks.
 - Occupancy and resource model: build on the generated runtime resource table,
   preserve the new HIP occupancy wrappers and benchmark limiter flags, then use
   that data to guide heavier launch-planning work.

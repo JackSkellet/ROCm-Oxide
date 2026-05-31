@@ -112,6 +112,11 @@ fn run() -> Result<(), String> {
                 .arg(&obj),
             "lower LLVM IR with ROCm llc",
         )?;
+        if crate_kernels.contains_key("lds_block_sum")
+            || crate_kernels.contains_key("static_lds_reverse")
+        {
+            verify_lds_artifacts(&kernel_ir, &obj, &tools.llvm_objdump)?;
+        }
         if crate_kernels.contains_key("scoped_atomics") {
             verify_scoped_atomic_artifacts(&kernel_ir, &obj, &tools.llvm_objdump)?;
         }
@@ -982,6 +987,7 @@ struct DeviceGlobal {
 enum DeviceGlobalKind {
     Global,
     Constant,
+    Shared,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -1306,6 +1312,9 @@ fn device_global_attribute_kind(line: &str) -> Option<DeviceGlobalKind> {
         | "#[::rocm_oxide_kernel::device_global]" => Some(DeviceGlobalKind::Global),
         "#[constant]" | "#[rocm_oxide_kernel::constant]" | "#[::rocm_oxide_kernel::constant]" => {
             Some(DeviceGlobalKind::Constant)
+        }
+        "#[shared]" | "#[rocm_oxide_kernel::shared]" | "#[::rocm_oxide_kernel::shared]" => {
+            Some(DeviceGlobalKind::Shared)
         }
         _ => None,
     }
@@ -1811,7 +1820,7 @@ fn rewrite_kernel_body(
         if produces_address_space_pointer(&current)
             && let Some(result) = assigned_value(&current)
             && let Some(address_space) = pointer_address_space(&current)
-            && matches!(address_space.as_str(), "1" | "4")
+            && matches!(address_space.as_str(), "1" | "3" | "4")
         {
             pointer_addrspaces.insert(result, address_space);
         }
@@ -1903,8 +1912,20 @@ fn rewrite_atomic_syncscope(line: &str, scope: AtomicSyncScope) -> String {
 }
 
 fn rewrite_pointer_operand(line: &str, name: &str, address_space: &str) -> String {
-    let needle = format!("ptr %{name}");
     let replacement = format!("ptr addrspace({address_space}) %{name}");
+    let mut rewritten =
+        rewrite_pointer_operand_with_needle(line, &format!("ptr %{name}"), &replacement);
+    for existing_address_space in ["0", "1", "3", "4", "5"] {
+        rewritten = rewrite_pointer_operand_with_needle(
+            &rewritten,
+            &format!("ptr addrspace({existing_address_space}) %{name}"),
+            &replacement,
+        );
+    }
+    rewritten
+}
+
+fn rewrite_pointer_operand_with_needle(line: &str, needle: &str, replacement: &str) -> String {
     let mut output = String::with_capacity(line.len() + replacement.len());
     let mut cursor = 0usize;
 
@@ -1957,23 +1978,47 @@ fn rewrite_marked_globals(line: &str, device_globals: &BTreeMap<String, DeviceGl
             &format!("ptr @{}", global.name),
             &format!("ptr addrspace({}) @{}", global.kind.address_space(), global.name),
         );
+        for address_space in ["0", "1", "3", "4", "5"] {
+            rewritten = rewritten.replace(
+                &format!("ptr addrspace({address_space}) @{}", global.name),
+                &format!("ptr addrspace({}) @{}", global.kind.address_space(), global.name),
+            );
+        }
     }
     rewritten
 }
 
 fn rewrite_marked_global_definition(line: &str, global: &DeviceGlobal) -> String {
     let trimmed = line.trim_start();
-    if !trimmed.starts_with(&format!("@{} =", global.name)) || line.contains("addrspace(") {
+    if !trimmed.starts_with(&format!("@{} =", global.name)) {
         return line.to_string();
+    }
+    if let Some(start) = line.find("addrspace(")
+        && let Some(relative_end) = line[start..].find(')')
+    {
+        let end = start + relative_end + 1;
+        let mut rewritten = line.to_string();
+        rewritten.replace_range(
+            start..end,
+            &format!("addrspace({})", global.kind.address_space()),
+        );
+        return rewrite_shared_global_initializer(&rewritten, global);
     }
     for keyword in [" global ", " constant "] {
         if let Some(pos) = line.find(keyword) {
             let mut rewritten = line.to_string();
             rewritten.insert_str(pos + 1, &format!("addrspace({}) ", global.kind.address_space()));
-            return rewritten;
+            return rewrite_shared_global_initializer(&rewritten, global);
         }
     }
-    line.to_string()
+    rewrite_shared_global_initializer(line, global)
+}
+
+fn rewrite_shared_global_initializer(line: &str, global: &DeviceGlobal) -> String {
+    if global.kind != DeviceGlobalKind::Shared {
+        return line.to_string();
+    }
+    line.replace(" zeroinitializer", " undef")
 }
 
 fn produces_address_space_pointer(line: &str) -> bool {
@@ -2138,6 +2183,104 @@ fn annotate_dynamic_shared_mem_from_ir(
     }
 
     Ok(())
+}
+
+fn verify_lds_artifacts(kernel_ir: &Path, object: &Path, llvm_objdump: &Path) -> Result<(), String> {
+    let ir = fs::read_to_string(kernel_ir)
+        .map_err(|err| format!("failed to read {}: {err}", kernel_ir.display()))?;
+    verify_lds_ir(&ir)?;
+
+    let output = Command::new(llvm_objdump)
+        .arg("-d")
+        .arg(object)
+        .output()
+        .map_err(|err| format!("failed to run {} -d: {err}", llvm_objdump.display()))?;
+    if !output.status.success() {
+        return Err(format!(
+            "{} -d {} failed:\n{}",
+            llvm_objdump.display(),
+            object.display(),
+            String::from_utf8_lossy(&output.stderr)
+        ));
+    }
+    verify_lds_isa(&String::from_utf8_lossy(&output.stdout))
+}
+
+fn verify_lds_ir(ir: &str) -> Result<(), String> {
+    if let Some(body) = llvm_function_body(ir, "lds_block_sum") {
+        let dynamic_symbols = dynamic_shared_symbols(ir);
+        let has_dynamic_symbol = dynamic_symbols.iter().any(|symbol| {
+            body.contains(&format!("@{symbol}")) && body.contains("ptr addrspace(3)")
+        });
+        if dynamic_symbols.is_empty() || !has_dynamic_symbol {
+            return Err(format!(
+                "lds_block_sum IR did not preserve dynamic LDS in addrspace(3)\n  dynamic symbols: {}\n  body has addrspace(3): {}",
+                dynamic_symbols
+                    .iter()
+                    .map(String::as_str)
+                    .collect::<Vec<_>>()
+                    .join(", "),
+                body.contains("ptr addrspace(3)")
+            ));
+        }
+    }
+
+    if let Some(body) = llvm_function_body(ir, "static_lds_reverse") {
+        let definition = ir
+            .lines()
+            .find(|line| line.trim_start().starts_with("@STATIC_LDS_U32 ="))
+            .ok_or_else(|| "static_lds_reverse IR missing STATIC_LDS_U32 definition".to_string())?;
+        let has_shared_definition = definition.contains("addrspace(3)")
+            && definition.contains(" global ")
+            && definition.contains(" undef")
+            && !definition.contains("zeroinitializer");
+        let has_shared_store = body
+            .lines()
+            .any(|line| line.contains("store ") && line.contains("ptr addrspace(3)"));
+        let has_shared_load = body
+            .lines()
+            .any(|line| line.contains("load ") && line.contains("ptr addrspace(3)"));
+        let references_symbol = body.contains("@STATIC_LDS_U32");
+        if !has_shared_definition || !references_symbol || !has_shared_store || !has_shared_load {
+            return Err(format!(
+                "static_lds_reverse IR did not preserve static LDS in addrspace(3)\n  shared definition: {has_shared_definition}\n  references symbol: {references_symbol}\n  addrspace(3) store: {has_shared_store}\n  addrspace(3) load: {has_shared_load}\n  definition: {}",
+                definition.trim()
+            ));
+        }
+    }
+
+    Ok(())
+}
+
+fn verify_lds_isa(disassembly: &str) -> Result<(), String> {
+    for symbol in ["lds_block_sum", "static_lds_reverse"] {
+        let Some(body) = disassembly_symbol_body(disassembly, symbol) else {
+            continue;
+        };
+        let has_store = has_lds_store(&body);
+        let has_load = has_lds_load(&body);
+        if !has_store || !has_load {
+            let lds_lines = body
+                .lines()
+                .filter(|line| line.contains("ds_"))
+                .map(str::trim)
+                .collect::<Vec<_>>();
+            return Err(format!(
+                "{symbol} ISA did not contain expected LDS DS load/store instructions\n  LDS store: {has_store}\n  LDS load: {has_load}\n  DS lines:\n{}",
+                lds_lines.join("\n")
+            ));
+        }
+    }
+
+    Ok(())
+}
+
+fn has_lds_store(body: &str) -> bool {
+    body.contains("ds_store") || body.contains("ds_write")
+}
+
+fn has_lds_load(body: &str) -> bool {
+    body.contains("ds_load") || body.contains("ds_read")
 }
 
 fn verify_scoped_atomic_artifacts(
@@ -2698,7 +2841,10 @@ fn write_bindings(
     out.push_str("        DEVICE_KERNEL_RESOURCES.iter().find(|resource| resource.name == name)\n");
     out.push_str("    }\n\n");
 
-    for global in device_globals.values() {
+    for global in device_globals
+        .values()
+        .filter(|global| global.kind.has_host_binding())
+    {
         out.push_str(&generate_device_global_binding(global));
         out.push('\n');
     }
@@ -3063,6 +3209,7 @@ impl DeviceGlobalKind {
         match self {
             Self::Global => "global",
             Self::Constant => "constant",
+            Self::Shared => "shared",
         }
     }
 
@@ -3070,7 +3217,12 @@ impl DeviceGlobalKind {
         match self {
             Self::Global => "1",
             Self::Constant => "4",
+            Self::Shared => "3",
         }
+    }
+
+    fn has_host_binding(self) -> bool {
+        !matches!(self, Self::Shared)
     }
 }
 
@@ -3140,7 +3292,7 @@ mod tests {
         discover_kernels_in_source, generate_device_global_binding,
         generate_device_struct_binding, generate_kernel_binding, generate_kernel_resource_binding,
         parse_inline_path_dependency, parse_kernel_resource_rows, parse_package_name, transform_ir,
-        verify_scoped_atomic_ir, verify_scoped_atomic_isa,
+        verify_lds_ir, verify_lds_isa, verify_scoped_atomic_ir, verify_scoped_atomic_isa,
     };
     use std::collections::{BTreeMap, BTreeSet};
     use std::fs;
@@ -3428,18 +3580,21 @@ pub unsafe extern "C" fn lds_block_sum(out: *mut f32) {}
     fn discovers_marked_device_globals() {
         let globals = discover_device_globals_in_source(
             r#"
-use rocm_oxide_kernel::{constant, device_global};
+use rocm_oxide_kernel::{constant, device_global, shared};
 
 #[device_global]
 pub static mut ADD_ONE_DELTA: f32 = 1.0;
 
 #[constant]
 pub static LUT: [u32; 4] = [1, 2, 3, 4];
+
+#[shared]
+pub static mut STATIC_LDS_U32: [u32; 256] = [0; 256];
 "#,
         )
         .expect("source should parse");
 
-        assert_eq!(globals.len(), 2);
+        assert_eq!(globals.len(), 3);
         assert_eq!(globals[0].name, "ADD_ONE_DELTA");
         assert_eq!(globals[0].ty, "f32");
         assert_eq!(globals[0].kind, DeviceGlobalKind::Global);
@@ -3448,6 +3603,10 @@ pub static LUT: [u32; 4] = [1, 2, 3, 4];
         assert_eq!(globals[1].ty, "[u32; 4]");
         assert_eq!(globals[1].kind, DeviceGlobalKind::Constant);
         assert!(!globals[1].mutable);
+        assert_eq!(globals[2].name, "STATIC_LDS_U32");
+        assert_eq!(globals[2].ty, "[u32; 256]");
+        assert_eq!(globals[2].kind, DeviceGlobalKind::Shared);
+        assert!(globals[2].mutable);
 
         let binding = generate_device_global_binding(&globals[0]);
         assert!(binding.contains("pub fn global_add_one_delta"));
@@ -3462,12 +3621,16 @@ target triple = "amdgcn-amd-amdhsa"
 
 @ADD_ONE_DELTA = local_unnamed_addr global float 1.0
 @LUT = local_unnamed_addr constant [4 x i32] [i32 1, i32 2, i32 3, i32 4]
+@STATIC_LDS_U32 = local_unnamed_addr global [1024 x i8] zeroinitializer
 
 define void @use_globals(ptr noundef %out) unnamed_addr #0 {
 start:
   %delta = load float, ptr @ADD_ONE_DELTA, align 4
   %slot = getelementptr inbounds [4 x i32], ptr @LUT, i64 0, i64 1
   %value = load i32, ptr %slot, align 4
+  %scratch = getelementptr inbounds i32, ptr @STATIC_LDS_U32, i64 2
+  store i32 %value, ptr %scratch, align 4
+  %scratch_value = load i32, ptr %scratch, align 4
   store float %delta, ptr %out, align 4
   ret void
 }
@@ -3486,6 +3649,8 @@ pub unsafe extern "C" fn use_globals(out: *mut f32) {}
 pub static mut ADD_ONE_DELTA: f32 = 1.0;
 #[constant]
 pub static LUT: [u32; 4] = [1, 2, 3, 4];
+#[shared]
+pub static mut STATIC_LDS_U32: [u32; 256] = [0; 256];
 "#,
         )
         .expect("globals should parse")
@@ -3501,9 +3666,14 @@ pub static LUT: [u32; 4] = [1, 2, 3, 4];
         ));
         assert!(output
             .contains("@LUT = local_unnamed_addr addrspace(4) constant [4 x i32]"));
+        assert!(output
+            .contains("@STATIC_LDS_U32 = local_unnamed_addr addrspace(3) global [1024 x i8] undef"));
         assert!(output.contains("load float, ptr addrspace(1) @ADD_ONE_DELTA"));
         assert!(output.contains("getelementptr inbounds [4 x i32], ptr addrspace(4) @LUT"));
         assert!(output.contains("load i32, ptr addrspace(4) %slot"));
+        assert!(output.contains("getelementptr inbounds i32, ptr addrspace(3) @STATIC_LDS_U32"));
+        assert!(output.contains("store i32 %value, ptr addrspace(3) %scratch"));
+        assert!(output.contains("load i32, ptr addrspace(3) %scratch"));
     }
 
     #[test]
@@ -3619,6 +3789,78 @@ pub unsafe extern "C" fn scoped(counters: *mut u32) {}
             "%sys = load atomic i32, ptr addrspace(1) %counters acquire, align 4"
         ));
         assert!(!output.contains("__rocm_oxide_atomic_scope_"));
+    }
+
+    #[test]
+    fn verifies_lds_ir_for_dynamic_and_static_cases() {
+        let ir = r#"
+@anon.dynamic = external local_unnamed_addr addrspace(3) global [0 x i8], align 4
+@STATIC_LDS_U32 = addrspace(3) global [1024 x i8] undef, align 4
+
+define protected amdgpu_kernel void @lds_block_sum(ptr addrspace(1) %out) {
+start:
+  %scratch = getelementptr inbounds i8, ptr addrspace(3) @anon.dynamic, i64 0
+  store i32 1, ptr addrspace(3) %scratch, align 4
+  %value = load i32, ptr addrspace(3) %scratch, align 4
+  ret void
+}
+
+define protected amdgpu_kernel void @static_lds_reverse(ptr addrspace(1) %out) {
+start:
+  %scratch = getelementptr inbounds i32, ptr addrspace(3) @STATIC_LDS_U32, i64 1
+  store i32 7, ptr addrspace(3) %scratch, align 4
+  %value = load i32, ptr addrspace(3) %scratch, align 4
+  ret void
+}
+"#;
+
+        verify_lds_ir(ir).expect("LDS IR should verify");
+    }
+
+    #[test]
+    fn rejects_static_lds_ir_without_addrspace_three() {
+        let ir = r#"
+@STATIC_LDS_U32 = addrspace(1) global [1024 x i8] zeroinitializer, align 4
+
+define protected amdgpu_kernel void @static_lds_reverse(ptr addrspace(1) %out) {
+start:
+  %scratch = getelementptr inbounds i32, ptr addrspace(1) @STATIC_LDS_U32, i64 1
+  store i32 7, ptr addrspace(1) %scratch, align 4
+  %value = load i32, ptr addrspace(1) %scratch, align 4
+  ret void
+}
+"#;
+
+        let err = verify_lds_ir(ir).expect_err("static LDS must live in addrspace(3)");
+        assert!(err.contains("static_lds_reverse IR did not preserve static LDS"));
+        assert!(err.contains("shared definition: false"));
+    }
+
+    #[test]
+    fn verifies_lds_isa_for_dynamic_and_static_cases() {
+        let disassembly = r#"
+0000000000002400 <lds_block_sum>:
+  ds_store_b32 v4, v5
+  ds_load_b32 v3, v4
+
+000000000000a100 <static_lds_reverse>:
+  ds_store_b32 v2, v3
+  ds_load_b32 v2, v2 offset:1020
+"#;
+
+        verify_lds_isa(disassembly).expect("LDS ISA should verify");
+    }
+
+    #[test]
+    fn rejects_lds_isa_without_static_load() {
+        let disassembly = r#"
+000000000000a100 <static_lds_reverse>:
+  ds_store_b32 v2, v3
+"#;
+
+        let err = verify_lds_isa(disassembly).expect_err("static LDS should load from LDS");
+        assert!(err.contains("static_lds_reverse ISA did not contain expected LDS"));
+        assert!(err.contains("LDS load: false"));
     }
 
     #[test]
