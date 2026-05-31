@@ -44,7 +44,7 @@ Local probes on 2026-05-31:
   pools are available; direct host access to device-resident managed memory,
   pageable-memory access, and registered host-pointer reuse are not reported on
   this dGPU.
-- Current generated artifact: 15 kernels, 20 buffer contracts, max VGPR 33, max
+- Current generated artifact: 16 kernels, 22 buffer contracts, max VGPR 33, max
   SGPR 26, max kernarg 368 bytes, max static LDS 1024 bytes, one
   dynamic-LDS kernel, and no dynamic stack users.
 - Current scoped atomic IR emits global-memory `atomicrmw` with explicit
@@ -97,7 +97,11 @@ Local probes on 2026-05-31:
 
 ### P1: Compiler Completeness
 
-- [ ] Direct exported generic-kernel monomorphization without wrapper functions.
+- [x] Direct exported generic-kernel monomorphization without wrapper functions:
+  - [x] accept `#[kernel(monomorphize(...))]` on generic device kernels
+  - [x] emit concrete exported entry points from the proc macro
+  - [x] discover monomorphized entry points and generate typed host bindings
+  - [x] verify with a real `generic_copy_u32` HSACO kernel and showcase launch
 - [ ] ROCm code-object artifact linking layer:
   - [ ] support linking multiple generated objects
   - [ ] preserve and merge kernel metadata

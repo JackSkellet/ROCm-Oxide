@@ -327,7 +327,16 @@ fn inspect_metadata(path: &Path) -> Result<(), String> {
         println!("per-kernel resources:");
         println!(
             "{:<30} {:>5} {:>5} {:>5} {:>7} {:>6} {:>7} {:>8} {:>5} {:>5}",
-            "kernel", "vgpr", "sgpr", "wave", "lds", "dynlds", "private", "kernarg", "spill", "stack"
+            "kernel",
+            "vgpr",
+            "sgpr",
+            "wave",
+            "lds",
+            "dynlds",
+            "private",
+            "kernarg",
+            "spill",
+            "stack"
         );
         for row in resources {
             println!(
@@ -718,7 +727,10 @@ fn create_core_probe_crate() -> Result<PathBuf, String> {
         .duration_since(UNIX_EPOCH)
         .map_err(|err| format!("system clock before Unix epoch: {err}"))?
         .as_nanos();
-    let root = env::temp_dir().join(format!("rocm-oxide-core-probe-{}-{suffix}", std::process::id()));
+    let root = env::temp_dir().join(format!(
+        "rocm-oxide-core-probe-{}-{suffix}",
+        std::process::id()
+    ));
     fs::create_dir_all(root.join("src"))
         .map_err(|err| format!("failed to create {}: {err}", root.display()))?;
     fs::write(
@@ -741,16 +753,16 @@ fn cargo_command() -> Command {
 fn build_device_crate(device_crate: &Path, arch: &str) -> Result<(), String> {
     let mut command = cargo_command();
     command
-            .arg("rustc")
-            .arg("-Z")
-            .arg("build-std=core")
-            .arg("--target")
-            .arg(TARGET)
-            .arg("--release")
-            .arg("--")
-            .arg("--emit=llvm-ir")
-            .current_dir(device_crate)
-            .env("RUSTFLAGS", format!("-C target-cpu={arch}"));
+        .arg("rustc")
+        .arg("-Z")
+        .arg("build-std=core")
+        .arg("--target")
+        .arg(TARGET)
+        .arg("--release")
+        .arg("--")
+        .arg("--emit=llvm-ir")
+        .current_dir(device_crate)
+        .env("RUSTFLAGS", format!("-C target-cpu={arch}"));
     sanitize_rust_env(&mut command);
     run_command(&mut command, "compile Rust device crate to AMDGPU LLVM IR")
         .map_err(with_core_build_hint)
@@ -1094,6 +1106,7 @@ fn discover_kernels_in_source_at(source: &str, path: &Path) -> Result<Vec<Kernel
     let mut expect_function = false;
     let mut signature = String::new();
     let mut pending_contracts = Vec::new();
+    let mut pending_monomorphizations = Vec::new();
     let mut signature_start_line = 0usize;
 
     for (line_index, line) in source.lines().enumerate() {
@@ -1103,8 +1116,9 @@ fn discover_kernels_in_source_at(source: &str, path: &Path) -> Result<Vec<Kernel
             continue;
         }
 
-        if is_kernel_attribute(trimmed) {
+        if let Some(monomorphizations) = parse_kernel_attribute(trimmed)? {
             expect_function = true;
+            pending_monomorphizations = monomorphizations;
             signature_start_line = line_index + 1;
             continue;
         }
@@ -1119,11 +1133,16 @@ fn discover_kernels_in_source_at(source: &str, path: &Path) -> Result<Vec<Kernel
                     line: signature_start_line,
                     signature: signature.clone(),
                 };
-                let mut kernel = parse_kernel_decl(&signature, span)?;
-                kernel.contracts = std::mem::take(&mut pending_contracts);
-                validate_contracts(&kernel)?;
-                kernels.push(kernel);
+                let mut parsed_kernels =
+                    parse_kernel_decls(&signature, span, &pending_monomorphizations)?;
+                let contracts = std::mem::take(&mut pending_contracts);
+                for kernel in &mut parsed_kernels {
+                    kernel.contracts = contracts.clone();
+                    validate_contracts(kernel)?;
+                }
+                kernels.extend(parsed_kernels);
                 signature.clear();
+                pending_monomorphizations.clear();
                 expect_function = false;
             } else if !trimmed.starts_with("#[") && !trimmed.is_empty() {
                 continue;
@@ -1403,13 +1422,80 @@ fn parse_device_struct(source: &str, span: SourceSpan) -> Result<DeviceStruct, S
 }
 
 fn is_kernel_attribute(line: &str) -> bool {
-    matches!(
-        line,
-        "#[kernel]" | "#[rocm_oxide_kernel::kernel]" | "#[::rocm_oxide_kernel::kernel]"
-    )
+    parse_kernel_attribute(line).is_ok_and(|value| value.is_some())
 }
 
-fn parse_kernel_decl(signature: &str, span: SourceSpan) -> Result<KernelDecl, String> {
+fn parse_kernel_attribute(line: &str) -> Result<Option<Vec<Vec<String>>>, String> {
+    let Some(inner) = line
+        .strip_prefix("#[")
+        .and_then(|rest| rest.strip_suffix(']'))
+    else {
+        return Ok(None);
+    };
+    let inner = inner.trim();
+    for name in [
+        "kernel",
+        "rocm_oxide_kernel::kernel",
+        "::rocm_oxide_kernel::kernel",
+    ] {
+        if inner == name {
+            return Ok(Some(Vec::new()));
+        }
+        if let Some(rest) = inner.strip_prefix(name) {
+            let rest = rest.trim_start();
+            if rest.starts_with('(') {
+                let close = find_matching_delimiter(rest, 0, '(', ')')?;
+                if rest[close + 1..].trim().is_empty() {
+                    return Ok(Some(parse_kernel_monomorphizations(&rest[1..close])?));
+                }
+            }
+        }
+    }
+    Ok(None)
+}
+
+fn parse_kernel_monomorphizations(source: &str) -> Result<Vec<Vec<String>>, String> {
+    let mut rest = source.trim();
+    if rest.is_empty() {
+        return Ok(Vec::new());
+    }
+
+    let mut monomorphizations = Vec::new();
+    while !rest.is_empty() {
+        let Some(after_keyword) = rest.strip_prefix("monomorphize") else {
+            return Err(format!(
+                "unsupported #[kernel] argument `{rest}`; expected monomorphize(...)"
+            ));
+        };
+        let after_keyword = after_keyword.trim_start();
+        if !after_keyword.starts_with('(') {
+            return Err("expected monomorphize(...) in #[kernel]".to_string());
+        }
+        let close = find_matching_delimiter(after_keyword, 0, '(', ')')?;
+        let concrete_types = split_top_level(&after_keyword[1..close], ',')
+            .into_iter()
+            .map(|ty| ty.trim().to_string())
+            .filter(|ty| !ty.is_empty())
+            .collect::<Vec<_>>();
+        if concrete_types.is_empty() {
+            return Err("monomorphize(...) must include at least one type".to_string());
+        }
+        monomorphizations.push(concrete_types);
+        rest = after_keyword[close + 1..].trim_start();
+        if let Some(next) = rest.strip_prefix(',') {
+            rest = next.trim_start();
+        } else if !rest.is_empty() {
+            return Err(format!("unexpected #[kernel] argument tail `{rest}`"));
+        }
+    }
+    Ok(monomorphizations)
+}
+
+fn parse_kernel_decls(
+    signature: &str,
+    span: SourceSpan,
+    monomorphizations: &[Vec<String>],
+) -> Result<Vec<KernelDecl>, String> {
     let fn_pos = signature
         .find("fn ")
         .ok_or_else(|| format!("{}: malformed #[kernel] signature", span))?
@@ -1420,17 +1506,23 @@ fn parse_kernel_decl(signature: &str, span: SourceSpan) -> Result<KernelDecl, St
         .ok_or_else(|| format!("{}: malformed #[kernel] signature", span))?
         + name_start;
     let raw_name = signature[name_start..name_end].trim();
-    if raw_name.contains('<') {
-        return Err(format!(
-            "{}: generic #[kernel] functions are not exported directly yet; add a monomorphic wrapper such as `fn {}_f32(...)` that calls the generic helper",
-            span,
-            raw_name.split('<').next().unwrap_or(raw_name)
-        ));
-    }
-    let name = raw_name.to_string();
+    let (name, generic_params) = parse_kernel_name(raw_name, &span)?;
     if name.is_empty() {
         return Err(format!(
             "{}: missing function name in #[kernel] signature",
+            span
+        ));
+    }
+
+    if !generic_params.is_empty() && monomorphizations.is_empty() {
+        return Err(format!(
+            "{}: generic #[kernel] functions require #[kernel(monomorphize(Ty, ...))] so rocm-oxide-build can emit concrete AMDGPU entry points",
+            span
+        ));
+    }
+    if generic_params.is_empty() && !monomorphizations.is_empty() {
+        return Err(format!(
+            "{}: #[kernel(monomorphize(...))] requires a generic function",
             span
         ));
     }
@@ -1440,19 +1532,64 @@ fn parse_kernel_decl(signature: &str, span: SourceSpan) -> Result<KernelDecl, St
         .find(')')
         .ok_or_else(|| format!("{}: malformed #[kernel] argument list", span))?
         + args_start;
-    let args = signature[args_start..args_end]
-        .split(',')
+    let raw_args = split_top_level(&signature[args_start..args_end], ',')
+        .into_iter()
         .map(str::trim)
         .filter(|arg| !arg.is_empty())
-        .map(parse_kernel_arg)
-        .collect::<Result<Vec<_>, _>>()?;
+        .collect::<Vec<_>>();
 
-    Ok(KernelDecl {
-        name,
-        args,
-        contracts: Vec::new(),
-        span,
-    })
+    if generic_params.is_empty() {
+        let args = raw_args
+            .into_iter()
+            .map(parse_kernel_arg)
+            .collect::<Result<Vec<_>, _>>()?;
+        return Ok(vec![KernelDecl {
+            name,
+            args,
+            contracts: Vec::new(),
+            span,
+        }]);
+    }
+
+    monomorphizations
+        .iter()
+        .map(|concrete_types| {
+            if concrete_types.len() != generic_params.len() {
+                return Err(format!(
+                    "{}: kernel `{}` expects {} generic argument(s), but monomorphize(...) supplied {}",
+                    span,
+                    name,
+                    generic_params.len(),
+                    concrete_types.len()
+                ));
+            }
+            let args = raw_args
+                .iter()
+                .copied()
+                .map(|arg| parse_kernel_arg_with_types(arg, &generic_params, concrete_types))
+                .collect::<Result<Vec<_>, _>>()?;
+            Ok(KernelDecl {
+                name: monomorphized_kernel_name(&name, concrete_types),
+                args,
+                contracts: Vec::new(),
+                span: span.clone(),
+            })
+        })
+        .collect()
+}
+
+fn parse_kernel_name(raw_name: &str, span: &SourceSpan) -> Result<(String, Vec<String>), String> {
+    let raw_name = raw_name.trim();
+    if let Some(generic_start) = raw_name.find('<') {
+        let generic_end = raw_name
+            .rfind('>')
+            .ok_or_else(|| format!("{}: malformed generic #[kernel] signature", span))?;
+        let name = raw_name[..generic_start].trim().to_string();
+        let generic_params = parse_generic_params(&raw_name[generic_start + 1..generic_end])?;
+        Ok((name, generic_params))
+    } else {
+        Ok((raw_name.to_string(), Vec::new()))
+    }
 }
 
 fn parse_kernel_arg(arg: &str) -> Result<KernelArg, String> {
@@ -1461,8 +1598,26 @@ fn parse_kernel_arg(arg: &str) -> Result<KernelArg, String> {
         .ok_or_else(|| format!("malformed kernel argument: {arg}"))?;
     let name = name.trim().to_string();
     let ty = ty.trim().to_string();
+    kernel_arg_from_parts(name, ty)
+}
+
+fn parse_kernel_arg_with_types(
+    arg: &str,
+    generic_params: &[String],
+    concrete_types: &[String],
+) -> Result<KernelArg, String> {
+    let (name, ty) = arg
+        .split_once(':')
+        .ok_or_else(|| format!("malformed kernel argument: {arg}"))?;
+    kernel_arg_from_parts(
+        name.trim().to_string(),
+        substitute_generic_types(ty.trim(), generic_params, concrete_types),
+    )
+}
+
+fn kernel_arg_from_parts(name: String, ty: String) -> Result<KernelArg, String> {
     if name.is_empty() || ty.is_empty() {
-        return Err(format!("malformed kernel argument: {arg}"));
+        return Err("malformed kernel argument".to_string());
     }
 
     let kind = if let Some(inner) = ty.strip_prefix("*mut ") {
@@ -1617,6 +1772,132 @@ fn tokenize_len_expr(expr: &str) -> Result<Vec<String>, String> {
         tokens.push(current);
     }
     Ok(tokens)
+}
+
+fn parse_generic_params(source: &str) -> Result<Vec<String>, String> {
+    split_top_level(source, ',')
+        .into_iter()
+        .filter(|param| !param.trim().is_empty())
+        .map(|param| {
+            let trimmed = param.trim();
+            if trimmed.starts_with('\'') || trimmed.starts_with("const ") {
+                return Err(format!(
+                    "unsupported generic kernel parameter `{trimmed}`; only type parameters are supported"
+                ));
+            }
+            let name = trimmed
+                .split(|ch: char| ch == ':' || ch == '=' || ch.is_whitespace())
+                .next()
+                .unwrap_or("")
+                .trim();
+            if is_identifier(name) {
+                Ok(name.to_string())
+            } else {
+                Err(format!("unsupported generic kernel parameter `{trimmed}`"))
+            }
+        })
+        .collect()
+}
+
+fn monomorphized_kernel_name(base: &str, concrete_types: &[String]) -> String {
+    let suffix = concrete_types
+        .iter()
+        .map(|ty| sanitize_type_suffix(ty))
+        .collect::<Vec<_>>()
+        .join("_");
+    format!("{base}_{suffix}")
+}
+
+fn sanitize_type_suffix(ty: &str) -> String {
+    let mut out = String::new();
+    let mut previous_underscore = false;
+    for ch in ty.chars() {
+        if ch.is_ascii_alphanumeric() {
+            out.push(ch);
+            previous_underscore = false;
+        } else if !previous_underscore {
+            out.push('_');
+            previous_underscore = true;
+        }
+    }
+    out.trim_matches('_').to_string()
+}
+
+fn substitute_generic_types(
+    source: &str,
+    generic_params: &[String],
+    concrete_types: &[String],
+) -> String {
+    let mut output = String::new();
+    let mut chars = source.char_indices().peekable();
+    while let Some((start, ch)) = chars.next() {
+        if ch == '_' || ch.is_ascii_alphabetic() {
+            let mut end = start + ch.len_utf8();
+            while let Some((next_index, next)) = chars.peek().copied() {
+                if next == '_' || next.is_ascii_alphanumeric() {
+                    chars.next();
+                    end = next_index + next.len_utf8();
+                } else {
+                    break;
+                }
+            }
+            let ident = &source[start..end];
+            if let Some(index) = generic_params.iter().position(|param| param == ident) {
+                output.push_str(&concrete_types[index]);
+            } else {
+                output.push_str(ident);
+            }
+        } else {
+            output.push(ch);
+        }
+    }
+    output
+}
+
+fn find_matching_delimiter(
+    source: &str,
+    open_index: usize,
+    open: char,
+    close: char,
+) -> Result<usize, String> {
+    let mut depth = 0usize;
+    for (index, ch) in source[open_index..].char_indices() {
+        let absolute = open_index + index;
+        if ch == open {
+            depth += 1;
+        } else if ch == close {
+            depth = depth.saturating_sub(1);
+            if depth == 0 {
+                return Ok(absolute);
+            }
+        }
+    }
+    Err(format!("missing matching `{close}`"))
+}
+
+fn split_top_level(source: &str, delimiter: char) -> Vec<&str> {
+    let mut parts = Vec::new();
+    let mut start = 0usize;
+    let mut paren = 0usize;
+    let mut angle = 0usize;
+    let mut bracket = 0usize;
+    for (index, ch) in source.char_indices() {
+        match ch {
+            '(' => paren += 1,
+            ')' => paren = paren.saturating_sub(1),
+            '<' => angle += 1,
+            '>' => angle = angle.saturating_sub(1),
+            '[' => bracket += 1,
+            ']' => bracket = bracket.saturating_sub(1),
+            _ if ch == delimiter && paren == 0 && angle == 0 && bracket == 0 => {
+                parts.push(&source[start..index]);
+                start = index + ch.len_utf8();
+            }
+            _ => {}
+        }
+    }
+    parts.push(&source[start..]);
+    parts
 }
 
 fn is_identifier(value: &str) -> bool {
@@ -1797,9 +2078,9 @@ fn rewrite_kernel_body(
             continue;
         }
         if current.contains(" phi ptr ")
-            && let Some(address_space) = pointer_addrspaces.iter().find_map(|(name, space)| {
-                contains_ssa_value(&current, name).then(|| space.clone())
-            })
+            && let Some(address_space) = pointer_addrspaces
+                .iter()
+                .find_map(|(name, space)| contains_ssa_value(&current, name).then(|| space.clone()))
         {
             current = current.replacen(
                 " phi ptr ",
@@ -1807,9 +2088,10 @@ fn rewrite_kernel_body(
                 1,
             );
         }
-        if let Some(address_space) = pointer_addrspaces.values().find(|space| {
-            current.contains(&format!(" load ptr, ptr addrspace({space})"))
-        }) {
+        if let Some(address_space) = pointer_addrspaces
+            .values()
+            .find(|space| current.contains(&format!(" load ptr, ptr addrspace({space})")))
+        {
             current = current.replacen(
                 " load ptr,",
                 &format!(" load ptr addrspace({address_space}),"),
@@ -1867,8 +2149,7 @@ fn atomic_scope_marker(line: &str) -> Option<AtomicSyncScope> {
 }
 
 fn is_atomic_scope_marker_declaration(line: &str) -> bool {
-    line.trim_start().starts_with("declare ")
-        && line.contains("@__rocm_oxide_atomic_scope_")
+    line.trim_start().starts_with("declare ") && line.contains("@__rocm_oxide_atomic_scope_")
 }
 
 fn is_atomic_instruction(line: &str) -> bool {
@@ -1890,7 +2171,14 @@ fn rewrite_atomic_syncscope(line: &str, scope: AtomicSyncScope) -> String {
         return line.to_string();
     };
 
-    for ordering in ["unordered", "monotonic", "acquire", "release", "acq_rel", "seq_cst"] {
+    for ordering in [
+        "unordered",
+        "monotonic",
+        "acquire",
+        "release",
+        "acq_rel",
+        "seq_cst",
+    ] {
         for needle in [format!(" {ordering},"), format!(" {ordering} ")] {
             if let Some(pos) = line.find(&needle) {
                 let mut rewritten = line.to_string();
@@ -1976,12 +2264,20 @@ fn rewrite_marked_globals(line: &str, device_globals: &BTreeMap<String, DeviceGl
         rewritten = rewrite_marked_global_definition(&rewritten, global);
         rewritten = rewritten.replace(
             &format!("ptr @{}", global.name),
-            &format!("ptr addrspace({}) @{}", global.kind.address_space(), global.name),
+            &format!(
+                "ptr addrspace({}) @{}",
+                global.kind.address_space(),
+                global.name
+            ),
         );
         for address_space in ["0", "1", "3", "4", "5"] {
             rewritten = rewritten.replace(
                 &format!("ptr addrspace({address_space}) @{}", global.name),
-                &format!("ptr addrspace({}) @{}", global.kind.address_space(), global.name),
+                &format!(
+                    "ptr addrspace({}) @{}",
+                    global.kind.address_space(),
+                    global.name
+                ),
             );
         }
     }
@@ -2007,7 +2303,10 @@ fn rewrite_marked_global_definition(line: &str, global: &DeviceGlobal) -> String
     for keyword in [" global ", " constant "] {
         if let Some(pos) = line.find(keyword) {
             let mut rewritten = line.to_string();
-            rewritten.insert_str(pos + 1, &format!("addrspace({}) ", global.kind.address_space()));
+            rewritten.insert_str(
+                pos + 1,
+                &format!("addrspace({}) ", global.kind.address_space()),
+            );
             return rewrite_shared_global_initializer(&rewritten, global);
         }
     }
@@ -2134,7 +2433,10 @@ fn validate_code_object(
     Ok(())
 }
 
-fn read_code_object_metadata(hsaco: &Path, llvm_readelf: &Path) -> Result<CodeObjectMetadata, String> {
+fn read_code_object_metadata(
+    hsaco: &Path,
+    llvm_readelf: &Path,
+) -> Result<CodeObjectMetadata, String> {
     let output = Command::new(llvm_readelf)
         .arg("-n")
         .arg(hsaco)
@@ -2185,7 +2487,11 @@ fn annotate_dynamic_shared_mem_from_ir(
     Ok(())
 }
 
-fn verify_lds_artifacts(kernel_ir: &Path, object: &Path, llvm_objdump: &Path) -> Result<(), String> {
+fn verify_lds_artifacts(
+    kernel_ir: &Path,
+    object: &Path,
+    llvm_objdump: &Path,
+) -> Result<(), String> {
     let ir = fs::read_to_string(kernel_ir)
         .map_err(|err| format!("failed to read {}: {err}", kernel_ir.display()))?;
     verify_lds_ir(&ir)?;
@@ -2327,9 +2633,7 @@ fn verify_scoped_atomic_ir(ir: &str) -> Result<(), String> {
     let has_agent = atomic_lines
         .iter()
         .any(|line| line.contains("syncscope(\"agent\")"));
-    let has_system_default = atomic_lines
-        .iter()
-        .any(|line| !line.contains("syncscope("));
+    let has_system_default = atomic_lines.iter().any(|line| !line.contains("syncscope("));
 
     if !has_workgroup || !has_agent || !has_system_default {
         return Err(format!(
@@ -2421,9 +2725,7 @@ fn disassembly_symbol_body(text: &str, name: &str) -> Option<String> {
 
 fn dynamic_shared_symbols(text: &str) -> BTreeSet<String> {
     text.lines()
-        .filter(|line| {
-            line.contains("external") && line.contains("addrspace(3) global [0 x i8]")
-        })
+        .filter(|line| line.contains("external") && line.contains("addrspace(3) global [0 x i8]"))
         .filter_map(|line| line.trim_start().strip_prefix('@'))
         .filter_map(|line| line.split_once(' ').map(|(name, _)| name.to_string()))
         .collect()
@@ -2676,11 +2978,11 @@ fn write_metadata(
             "      \"name\": \"{}\",\n",
             json_escape(&global.name)
         ));
-        out.push_str(&format!("      \"type\": \"{}\",\n", json_escape(&global.ty)));
         out.push_str(&format!(
-            "      \"kind\": \"{}\",\n",
-            global.kind.as_str()
+            "      \"type\": \"{}\",\n",
+            json_escape(&global.ty)
         ));
+        out.push_str(&format!("      \"kind\": \"{}\",\n", global.kind.as_str()));
         out.push_str(&format!(
             "      \"mutable\": {},\n",
             if global.mutable { "true" } else { "false" }
@@ -2822,7 +3124,9 @@ fn write_bindings(
         "        Ok(Self { module: std::sync::Arc::new(device.load_code_object_file(hsaco)?) })\n",
     );
     out.push_str("    }\n\n");
-    out.push_str("    pub fn load_embedded(device: &rocm_oxide::Device) -> rocm_oxide::Result<Self> {\n");
+    out.push_str(
+        "    pub fn load_embedded(device: &rocm_oxide::Device) -> rocm_oxide::Result<Self> {\n",
+    );
     out.push_str(
         "        Ok(Self { module: std::sync::Arc::new(device.load_code_object(DEVICE_HSACO_BYTES)?) })\n",
     );
@@ -2830,9 +3134,7 @@ fn write_bindings(
     out.push_str("    pub fn module(&self) -> &rocm_oxide::Module {\n");
     out.push_str("        self.module.as_ref()\n");
     out.push_str("    }\n\n");
-    out.push_str(
-        "    pub const fn resources(&self) -> &'static [rocm_oxide::KernelResource] {\n",
-    );
+    out.push_str("    pub const fn resources(&self) -> &'static [rocm_oxide::KernelResource] {\n");
     out.push_str("        DEVICE_KERNEL_RESOURCES\n");
     out.push_str("    }\n\n");
     out.push_str(
@@ -3296,10 +3598,10 @@ mod tests {
         ArgKind, CodeObjectMetadata, DeviceGlobalKind, KernelObjectMetadata,
         annotate_dynamic_shared_mem_from_ir, compiler_step, discover_device_crate_bundle,
         discover_device_globals_in_source, discover_device_structs_in_source,
-        discover_kernels_in_source, generate_device_global_binding,
-        generate_device_struct_binding, generate_kernel_binding, generate_kernel_resource_binding,
-        parse_inline_path_dependency, parse_kernel_resource_rows, parse_package_name, transform_ir,
-        verify_lds_ir, verify_lds_isa, verify_scoped_atomic_ir, verify_scoped_atomic_isa,
+        discover_kernels_in_source, generate_device_global_binding, generate_device_struct_binding,
+        generate_kernel_binding, generate_kernel_resource_binding, parse_inline_path_dependency,
+        parse_kernel_resource_rows, parse_package_name, transform_ir, verify_lds_ir,
+        verify_lds_isa, verify_scoped_atomic_ir, verify_scoped_atomic_isa,
     };
     use std::collections::{BTreeMap, BTreeSet};
     use std::fs;
@@ -3385,10 +3687,8 @@ start:
   ret void
 }
 "#;
-        let path = std::env::temp_dir().join(format!(
-            "rocm-oxide-dynamic-lds-{}.ll",
-            std::process::id()
-        ));
+        let path =
+            std::env::temp_dir().join(format!("rocm-oxide-dynamic-lds-{}.ll", std::process::id()));
         fs::write(&path, input).expect("temp IR should be writable");
         let mut metadata = CodeObjectMetadata::default();
         metadata
@@ -3434,8 +3734,8 @@ pub unsafe extern "C" fn vector_add(out: *mut f32, input: *const f32, n: usize) 
 "#,
         );
         let kernels = decls.keys().cloned().collect::<BTreeSet<_>>();
-        let output =
-            transform_ir(input, &kernels, &decls, &BTreeMap::new()).expect("transform should succeed");
+        let output = transform_ir(input, &kernels, &decls, &BTreeMap::new())
+            .expect("transform should succeed");
         assert!(output.contains("define protected amdgpu_kernel void @vector_add"));
         assert!(output.contains("ptr addrspace(1) noundef writeonly %out"));
         assert!(output.contains("ptr addrspace(1) noundef readonly %input"));
@@ -3665,16 +3965,16 @@ pub static mut STATIC_LDS_U32: [u32; 256] = [0; 256];
         .map(|global| (global.name.clone(), global))
         .collect::<BTreeMap<_, _>>();
         let kernels = decls.keys().cloned().collect::<BTreeSet<_>>();
-        let output = transform_ir(input, &kernels, &decls, &globals)
-            .expect("transform should succeed");
+        let output =
+            transform_ir(input, &kernels, &decls, &globals).expect("transform should succeed");
 
+        assert!(
+            output.contains("@ADD_ONE_DELTA = local_unnamed_addr addrspace(1) global float 1.0")
+        );
+        assert!(output.contains("@LUT = local_unnamed_addr addrspace(4) constant [4 x i32]"));
         assert!(output.contains(
-            "@ADD_ONE_DELTA = local_unnamed_addr addrspace(1) global float 1.0"
+            "@STATIC_LDS_U32 = local_unnamed_addr addrspace(3) global [1024 x i8] undef"
         ));
-        assert!(output
-            .contains("@LUT = local_unnamed_addr addrspace(4) constant [4 x i32]"));
-        assert!(output
-            .contains("@STATIC_LDS_U32 = local_unnamed_addr addrspace(3) global [1024 x i8] undef"));
         assert!(output.contains("load float, ptr addrspace(1) @ADD_ONE_DELTA"));
         assert!(output.contains("getelementptr inbounds [4 x i32], ptr addrspace(4) @LUT"));
         assert!(output.contains("load i32, ptr addrspace(4) %slot"));
@@ -3744,8 +4044,8 @@ pub unsafe extern "C" fn pointer_ops(out: *mut u32, fallback: *mut u32, cond: bo
 "#,
         );
         let kernels = decls.keys().cloned().collect::<BTreeSet<_>>();
-        let output =
-            transform_ir(input, &kernels, &decls, &BTreeMap::new()).expect("transform should succeed");
+        let output = transform_ir(input, &kernels, &decls, &BTreeMap::new())
+            .expect("transform should succeed");
         assert!(output.contains(
             "%selected = select i1 %cond, ptr addrspace(1) %gep, ptr addrspace(1) %fallback"
         ));
@@ -3784,17 +4084,17 @@ pub unsafe extern "C" fn scoped(counters: *mut u32) {}
 "#,
         );
         let kernels = decls.keys().cloned().collect::<BTreeSet<_>>();
-        let output =
-            transform_ir(input, &kernels, &decls, &BTreeMap::new()).expect("transform should succeed");
+        let output = transform_ir(input, &kernels, &decls, &BTreeMap::new())
+            .expect("transform should succeed");
         assert!(output.contains(
             "%wg = atomicrmw add ptr addrspace(1) %counters, i32 1 syncscope(\"workgroup\") monotonic, align 4"
         ));
         assert!(output.contains(
             "%dev = atomicrmw add ptr addrspace(1) %counters, i32 1 syncscope(\"agent\") monotonic, align 4"
         ));
-        assert!(output.contains(
-            "%sys = load atomic i32, ptr addrspace(1) %counters acquire, align 4"
-        ));
+        assert!(
+            output.contains("%sys = load atomic i32, ptr addrspace(1) %counters acquire, align 4")
+        );
         assert!(!output.contains("__rocm_oxide_atomic_scope_"));
     }
 
@@ -3899,7 +4199,8 @@ start:
 }
 "#;
 
-        let err = verify_scoped_atomic_ir(ir).expect_err("system scope should stay backend default");
+        let err =
+            verify_scoped_atomic_ir(ir).expect_err("system scope should stay backend default");
         assert!(err.contains("system backend default: false"));
     }
 
@@ -3944,8 +4245,33 @@ pub unsafe extern "C" fn copy_generic<T>(out: *mut T, input: *const T, n: usize)
         )
         .expect_err("generic kernels should get an actionable diagnostic");
         assert!(err.contains("<source>:2"));
-        assert!(err.contains("generic #[kernel] functions are not exported directly yet"));
-        assert!(err.contains("monomorphic wrapper"));
+        assert!(err.contains("generic #[kernel] functions require"));
+        assert!(err.contains("monomorphize"));
+    }
+
+    #[test]
+    fn discovers_monomorphized_generic_kernels() {
+        let kernels = discover_kernels_in_source(
+            r#"
+// rocm-oxide: len(out)=n
+// rocm-oxide: len(input)=n
+#[kernel(monomorphize(f32), monomorphize(u32))]
+pub unsafe extern "C" fn copy_generic<T: Copy>(out: *mut T, input: *const T, n: usize) {}
+"#,
+        )
+        .expect("generic kernel specializations should parse");
+        let names = kernels
+            .iter()
+            .map(|kernel| kernel.name.as_str())
+            .collect::<Vec<_>>();
+        assert_eq!(names, ["copy_generic_f32", "copy_generic_u32"]);
+        assert_eq!(kernels[0].args[0].kind, ArgKind::MutPtr("f32".to_string()));
+        assert_eq!(
+            kernels[0].args[1].kind,
+            ArgKind::ConstPtr("f32".to_string())
+        );
+        assert_eq!(kernels[1].args[0].kind, ArgKind::MutPtr("u32".to_string()));
+        assert_eq!(kernels[0].contracts.len(), 2);
     }
 
     #[test]

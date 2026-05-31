@@ -105,7 +105,7 @@ not the product.
   - [x] generic helper monomorphization tests with diagnostics for exported generic kernels
   - [x] closure/captured environment ABI support through `repr(C)` environment structs
   - [x] cross-crate kernel discovery and bundling for local path dependencies
-  - [ ] direct exported generic-kernel monomorphization without wrapper functions
+  - [x] direct exported generic-kernel monomorphization without wrapper functions
 
 ## Lower-Priority Or Vendor-Specific
 

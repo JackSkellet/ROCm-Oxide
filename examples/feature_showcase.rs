@@ -165,6 +165,24 @@ fn main() -> Result<()> {
     assert_eq!(out[4096], a[4096] + b[4096]);
     println!("ok: Rust-authored AMDGPU vector_add launched from generated host bindings");
 
+    let generic_input = (0..n)
+        .map(|i| (i as u32).rotate_left(5))
+        .collect::<Vec<_>>();
+    let d_generic_input = DeviceBuffer::from_slice(&generic_input)?;
+    let d_generic_out = DeviceBuffer::<u32>::new(n)?;
+    unsafe {
+        kernels.generic_copy_u32(
+            LaunchConfig::for_num_elems_with_block_size(n, block_x),
+            &d_generic_out,
+            &d_generic_input,
+            n,
+        )?;
+    }
+    rocm_oxide::hip::synchronize()?;
+    let generic_out = d_generic_out.copy_to_vec()?;
+    assert_eq!(generic_out[2048], generic_input[2048]);
+    println!("ok: generic #[kernel] monomorphized without a handwritten wrapper");
+
     let completion = unsafe {
         kernels.vector_add_operation(
             LaunchConfig::for_num_elems_with_block_size(n, block_x),

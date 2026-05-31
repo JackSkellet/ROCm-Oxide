@@ -45,6 +45,21 @@ pub unsafe extern "C" fn vector_add(
     }
 }
 
+// rocm-oxide: len(out)=n
+// rocm-oxide: len(input)=n
+#[kernel(monomorphize(u32))]
+pub unsafe extern "C" fn generic_copy<T: Copy>(
+    out: gpu::DeviceSliceMut<T>,
+    input: gpu::DeviceSlice<T>,
+    n: usize,
+) {
+    let i = gpu::global_id_x();
+    if i < n {
+        let value = unsafe { input.read_unchecked(i) };
+        unsafe { out.write_unchecked(i, value) };
+    }
+}
+
 // rocm-oxide: len(partials)=partial_count
 // rocm-oxide: len(input)=n
 #[kernel]

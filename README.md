@@ -311,6 +311,26 @@ pub unsafe extern "C" fn vector_add(
 
 The macro exports a stable symbol name. The build tool uses the marker as the
 kernel allowlist, so helper functions can remain ordinary device functions.
+Generic kernels can be exported without a handwritten monomorphic wrapper by
+listing concrete instantiations on the marker:
+
+```rust
+#[kernel(monomorphize(u32))]
+pub unsafe extern "C" fn generic_copy<T: Copy>(
+    out: gpu::DeviceSliceMut<T>,
+    input: gpu::DeviceSlice<T>,
+    n: usize,
+) {
+    let i = gpu::global_id_x();
+    if i < n {
+        let value = unsafe { input.read_unchecked(i) };
+        unsafe { out.write_unchecked(i, value) };
+    }
+}
+```
+
+The macro emits the concrete exported entry point, and `rocm-oxide-build`
+generates the typed host binding for that monomorphized kernel.
 
 [crates/rocm-oxide-device](/home/jack/Documents/GitKraken_Projects/ROCm-Oxide/crates/rocm-oxide-device/src/lib.rs)
 now wraps the raw AMDGPU intrinsics used by kernels. It provides thread/block
@@ -342,7 +362,7 @@ This roadmap is grounded in the current local probe target:
   are reported available; direct host access to device-resident managed memory,
   pageable-memory access, and registered host-pointer reuse are not reported on
   this dGPU.
-- Current generated artifact: 15 kernels, 20 buffer contracts, max VGPR 33, max
+- Current generated artifact: 16 kernels, 22 buffer contracts, max VGPR 33, max
   SGPR 26, max kernarg 368 bytes, max static LDS 1024 bytes, one
   dynamic-LDS kernel, and no dynamic stack users.
 - Current scoped atomic IR reaches global-memory `atomicrmw` with explicit
@@ -378,7 +398,9 @@ This roadmap is grounded in the current local probe target:
 
 ### P1: Compiler Completeness
 
-- Direct exported generic-kernel monomorphization without wrapper functions.
+- Direct exported generic-kernel monomorphization without wrapper functions:
+  `#[kernel(monomorphize(...))]` now emits concrete entry points and generated
+  typed host bindings.
 - ROCm code-object artifact linking: link multiple generated objects, preserve
   metadata, and investigate HIP library enumeration/loading APIs.
 - Toolchain discovery hardening: validate `ROCM_PATH`/`HIP_PATH`, `/opt/rocm`,
