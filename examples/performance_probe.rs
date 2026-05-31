@@ -1,6 +1,7 @@
 use rocm_oxide::{Device, DeviceBuffer, Event, LaunchConfig, Result, Stream};
 use std::collections::BTreeMap;
 use std::env;
+use std::ffi::CString;
 use std::fs;
 use std::path::PathBuf;
 
@@ -13,6 +14,9 @@ const VECTOR_N: usize = 1 << 20;
 const WIDTH: usize = 1024;
 const HEIGHT: usize = 576;
 const PIXELS: usize = WIDTH * HEIGHT;
+const HIGH_VGPR_PRESSURE: u32 = 32;
+const HIGH_SGPR_PRESSURE: u32 = 24;
+const LOW_WAVES_PER_MULTIPROCESSOR: u32 = 16;
 
 fn main() -> Result<()> {
     let args = Args::parse().map_err(rocm_oxide::Error::InvalidLaunch)?;
@@ -23,10 +27,10 @@ fn main() -> Result<()> {
 
     println!("ROCm-Oxide GPU performance probe on {}", device.arch());
     println!(
-        "{:<30} {:>10} {:>10} {:>12}",
-        "kernel", "gpu ms", "est FPS", "notes"
+        "{:<30} {:>10} {:>10} {:>14}  {}",
+        "kernel", "gpu ms", "est FPS", "occupancy", "flags"
     );
-    println!("{:-<68}", "");
+    println!("{:-<92}", "");
 
     probe_vector_add(&kernels, &resources, &mut samples)?;
     probe_affine_transform(&kernels, &resources, &mut samples)?;
@@ -62,12 +66,14 @@ fn probe_vector_add(
     })?;
     record_sample(
         samples,
+        kernels,
         resources,
         "vector_add",
         "vector_add 1M f32",
         ms,
         "typed binding",
-    );
+        config,
+    )?;
     Ok(())
 }
 
@@ -90,12 +96,14 @@ fn probe_affine_transform(
     })?;
     record_sample(
         samples,
+        kernels,
         resources,
         "affine_transform",
         "affine repr(C) 1M",
         ms,
         "env struct",
-    );
+        config,
+    )?;
     Ok(())
 }
 
@@ -113,6 +121,7 @@ fn probe_stress_3d(
         })?;
         record_sample(
             samples,
+            kernels,
             resources,
             "stress_3d",
             &format!("stress_3d steps={steps}"),
@@ -122,7 +131,8 @@ fn probe_stress_3d(
             } else {
                 "3D stress"
             },
-        );
+            config,
+        )?;
     }
     Ok(())
 }
@@ -141,12 +151,14 @@ fn probe_stress_pattern(
         })?;
         record_sample(
             samples,
+            kernels,
             resources,
             "stress_pattern",
             "stress_pattern",
             ms,
             &format!("steps={steps}"),
-        );
+            config,
+        )?;
     }
     Ok(())
 }
@@ -171,12 +183,14 @@ fn probe_raytrace_world(
     })?;
     record_sample(
         samples,
+        kernels,
         resources,
         "raytrace_world",
         "raytrace_world 1024x576",
         ms,
         "camera scene",
-    );
+        config,
+    )?;
     Ok(())
 }
 
@@ -210,33 +224,148 @@ fn iterations_for_ms_probe(steps: u32) -> usize {
     }
 }
 
-fn print_row(name: &str, ms: f32, notes: &str) {
+fn print_row(name: &str, ms: f32, occupancy: Option<&OccupancyReport>, flags: &[String]) {
+    let occupancy = occupancy
+        .map(OccupancyReport::summary)
+        .unwrap_or_else(|| "-".to_string());
+    let flags = if flags.is_empty() {
+        "ok".to_string()
+    } else {
+        flags.join(",")
+    };
     println!(
-        "{:<30} {:>10.3} {:>10.1} {:>12}",
+        "{:<30} {:>10.3} {:>10.1} {:>14}  {}",
         name,
         ms,
         1000.0 / ms.max(0.001),
-        notes
+        occupancy,
+        flags
     );
 }
 
 fn record_sample(
     samples: &mut Vec<ProbeSample>,
+    kernels: &generated::DeviceKernels,
     resources: &KernelResources,
     kernel: &str,
     label: &str,
     ms: f32,
     notes: &str,
-) {
-    print_row(label, ms, notes);
+    config: LaunchConfig,
+) -> Result<()> {
+    let resources = resources.by_kernel.get(kernel).copied();
+    let occupancy = resources
+        .map(|resource| query_occupancy(kernels, kernel, resource, config))
+        .transpose()?;
+    let limiters = detect_limiters(resources.as_ref(), occupancy.as_ref());
+    print_row(label, ms, occupancy.as_ref(), &limiters);
     samples.push(ProbeSample {
         kernel: kernel.to_string(),
         label: label.to_string(),
         gpu_ms: ms,
         est_fps: 1000.0 / ms.max(0.001),
         notes: notes.to_string(),
-        resources: resources.by_kernel.get(kernel).cloned(),
+        occupancy,
+        limiters,
+        resources,
     });
+    Ok(())
+}
+
+fn query_occupancy(
+    kernels: &generated::DeviceKernels,
+    kernel: &str,
+    resources: rocm_oxide::KernelResource,
+    config: LaunchConfig,
+) -> Result<OccupancyReport> {
+    let name = CString::new(kernel).map_err(|_| {
+        rocm_oxide::Error::InvalidLaunch(format!("kernel name `{kernel}` contains a NUL byte"))
+    })?;
+    let kernel = kernels
+        .module()
+        .kernel_with_metadata(name.as_c_str(), resources.launch_metadata())?;
+    let active = kernel.occupancy_for_config(config)?;
+    let potential = kernel.occupancy_max_potential_block_size(config.shared_mem_bytes, 0)?;
+    let block_threads = config.block.x * config.block.y * config.block.z;
+    let waves_per_block = resources
+        .wavefront_size
+        .filter(|wavefront| *wavefront > 0)
+        .map(|wavefront| block_threads.div_ceil(wavefront));
+    let waves_per_multiprocessor =
+        waves_per_block.map(|waves| waves * active.blocks_per_multiprocessor);
+
+    Ok(OccupancyReport {
+        block_threads,
+        dynamic_shared_mem_bytes: config.shared_mem_bytes,
+        active_blocks_per_multiprocessor: active.blocks_per_multiprocessor,
+        waves_per_block,
+        waves_per_multiprocessor,
+        suggested_min_grid_size: potential.min_grid_size,
+        suggested_block_size: potential.block_size,
+    })
+}
+
+fn detect_limiters(
+    resources: Option<&rocm_oxide::KernelResource>,
+    occupancy: Option<&OccupancyReport>,
+) -> Vec<String> {
+    let mut limiters = Vec::new();
+
+    if let Some(resources) = resources {
+        if resources.sgpr_spill_count.unwrap_or(0) > 0
+            || resources.vgpr_spill_count.unwrap_or(0) > 0
+        {
+            limiters.push(format!(
+                "spills:{}/{}",
+                resources.sgpr_spill_count.unwrap_or(0),
+                resources.vgpr_spill_count.unwrap_or(0)
+            ));
+        }
+        if let Some(bytes) = resources
+            .private_segment_fixed_size
+            .filter(|bytes| *bytes > 0)
+        {
+            limiters.push(format!("private:{bytes}B"));
+        }
+        if let Some(bytes) = resources
+            .group_segment_fixed_size
+            .filter(|bytes| *bytes > 0)
+        {
+            limiters.push(format!("static-lds:{bytes}B"));
+        }
+        if resources.uses_dynamic_shared_mem {
+            limiters.push("dynamic-lds".to_string());
+        }
+        if let Some(vgpr) = resources
+            .vgpr_count
+            .filter(|vgpr| *vgpr >= HIGH_VGPR_PRESSURE)
+        {
+            limiters.push(format!("vgpr:{vgpr}"));
+        }
+        if let Some(sgpr) = resources
+            .sgpr_count
+            .filter(|sgpr| *sgpr >= HIGH_SGPR_PRESSURE)
+        {
+            limiters.push(format!("sgpr:{sgpr}"));
+        }
+    }
+
+    if let Some(occupancy) = occupancy {
+        if occupancy.active_blocks_per_multiprocessor <= 1 {
+            limiters.push(format!(
+                "active-blocks:{}",
+                occupancy.active_blocks_per_multiprocessor
+            ));
+        }
+        if let Some(waves) = occupancy
+            .waves_per_multiprocessor
+            .filter(|waves| *waves < LOW_WAVES_PER_MULTIPROCESSOR)
+        {
+            limiters.push(format!("waves-per-mp:{waves}"));
+        }
+    }
+
+    limiters
 }
 
 #[derive(Debug, Default)]
@@ -277,7 +406,29 @@ struct ProbeSample {
     gpu_ms: f32,
     est_fps: f32,
     notes: String,
+    occupancy: Option<OccupancyReport>,
+    limiters: Vec<String>,
     resources: Option<rocm_oxide::KernelResource>,
+}
+
+#[derive(Debug, Clone)]
+struct OccupancyReport {
+    block_threads: u32,
+    dynamic_shared_mem_bytes: u32,
+    active_blocks_per_multiprocessor: u32,
+    waves_per_block: Option<u32>,
+    waves_per_multiprocessor: Option<u32>,
+    suggested_min_grid_size: u32,
+    suggested_block_size: u32,
+}
+
+impl OccupancyReport {
+    fn summary(&self) -> String {
+        match self.waves_per_multiprocessor {
+            Some(waves) => format!("{}blk/{}wv", self.active_blocks_per_multiprocessor, waves),
+            None => format!("{}blk", self.active_blocks_per_multiprocessor),
+        }
+    }
 }
 
 #[derive(Debug, Default)]
@@ -306,7 +457,7 @@ fn write_json_report(path: &PathBuf, arch: &str, samples: &[ProbeSample]) -> std
 
     let mut out = String::new();
     out.push_str("{\n");
-    out.push_str("  \"format\": \"rocm-oxide-performance-probe-v1\",\n");
+    out.push_str("  \"format\": \"rocm-oxide-performance-probe-v2\",\n");
     out.push_str(&format!("  \"arch\": \"{}\",\n", json_escape(arch)));
     out.push_str(&format!(
         "  \"metadata\": \"{}\",\n",
@@ -343,6 +494,16 @@ fn write_sample_json(out: &mut String, sample: &ProbeSample) {
         "      \"notes\": \"{}\",\n",
         json_escape(&sample.notes)
     ));
+    out.push_str("      \"occupancy\": ");
+    if let Some(occupancy) = &sample.occupancy {
+        write_occupancy_json(out, occupancy);
+        out.push_str(",\n");
+    } else {
+        out.push_str("null,\n");
+    }
+    out.push_str("      \"limiters\": ");
+    write_json_string_array(out, &sample.limiters);
+    out.push_str(",\n");
     out.push_str("      \"resources\": ");
     if let Some(resources) = &sample.resources {
         write_resource_json(out, resources);
@@ -351,6 +512,46 @@ fn write_sample_json(out: &mut String, sample: &ProbeSample) {
         out.push_str("null\n");
     }
     out.push_str("    }");
+}
+
+fn write_occupancy_json(out: &mut String, occupancy: &OccupancyReport) {
+    out.push_str("{\n");
+    out.push_str(&format!(
+        "        \"block_threads\": {}",
+        occupancy.block_threads
+    ));
+    write_json_u32(
+        out,
+        "dynamic_shared_mem_bytes",
+        Some(occupancy.dynamic_shared_mem_bytes),
+        false,
+    );
+    write_json_u32(
+        out,
+        "active_blocks_per_multiprocessor",
+        Some(occupancy.active_blocks_per_multiprocessor),
+        false,
+    );
+    write_json_u32(out, "waves_per_block", occupancy.waves_per_block, false);
+    write_json_u32(
+        out,
+        "waves_per_multiprocessor",
+        occupancy.waves_per_multiprocessor,
+        false,
+    );
+    write_json_u32(
+        out,
+        "suggested_min_grid_size",
+        Some(occupancy.suggested_min_grid_size),
+        false,
+    );
+    write_json_u32(
+        out,
+        "suggested_block_size",
+        Some(occupancy.suggested_block_size),
+        false,
+    );
+    out.push_str("\n      }");
 }
 
 fn write_resource_json(out: &mut String, resources: &rocm_oxide::KernelResource) {
@@ -402,6 +603,17 @@ fn write_resource_json(out: &mut String, resources: &rocm_oxide::KernelResource)
         out.push_str(&format!(",\n        \"uses_dynamic_stack\": {value}"));
     }
     out.push_str("\n      }");
+}
+
+fn write_json_string_array(out: &mut String, values: &[String]) {
+    out.push('[');
+    for (index, value) in values.iter().enumerate() {
+        if index > 0 {
+            out.push_str(", ");
+        }
+        out.push_str(&format!("\"{}\"", json_escape(value)));
+    }
+    out.push(']');
 }
 
 fn write_json_u32(out: &mut String, key: &str, value: Option<u32>, first: bool) {

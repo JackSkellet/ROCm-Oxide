@@ -235,9 +235,11 @@ occupancy planning.
 
 `cargo run --example performance_probe -- --json target/performance_probe.json`
 reports HIP-event GPU time for generated Rust kernels and can write benchmark
-snapshots with the same per-kernel resource counters. The `stress_pattern` rows
-are exact-loop synthetic load, while `stress_3d` and raytrace rows are
-scene-dependent and may saturate when rays hit early.
+snapshots with the same per-kernel resource counters. Rows now include HIP
+occupancy-derived active blocks/waves per HIP multiprocessor plus flags for
+spills, private memory, LDS use, low occupancy, and high register pressure. The
+`stress_pattern` rows are exact-loop synthetic load, while `stress_3d` and
+raytrace rows are scene-dependent and may saturate when rays hit early.
 
 `rocm-oxide-build` now has two inspection commands:
 
@@ -327,8 +329,8 @@ This roadmap is grounded in the current local probe target:
   per-kernel validation path to static LDS cases, ISA checks, and occupancy
   planning.
 - Occupancy and resource model: build on the generated runtime resource table,
-  preserve the new HIP occupancy wrappers, and flag
-  VGPR/SGPR/LDS/private-memory limiters in benchmark output.
+  preserve the new HIP occupancy wrappers and benchmark limiter flags, then use
+  that data to guide heavier launch-planning work.
 
 ### P1: Runtime Orchestration
 
