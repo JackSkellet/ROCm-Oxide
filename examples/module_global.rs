@@ -29,7 +29,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     unsafe {
         rocm_oxide::launch!(
             kernel,
-            LaunchConfig::for_num_elems(n, 256),
+            LaunchConfig::for_num_elems(n),
             d_out.as_mut_ptr(),
             d_input.as_ptr(),
             n as u64,

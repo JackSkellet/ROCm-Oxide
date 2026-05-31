@@ -17,12 +17,11 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     unsafe {
         rocm_oxide::launch!(
             kernel,
-            LaunchConfig::for_num_elems(n, block_x),
+            LaunchConfig::for_num_elems_with_block_size(n, block_x),
             d_out.as_mut_ptr(),
             d_a.as_ptr(),
             d_b.as_ptr(),
-            n,
-            block_x,
+            n
         )?;
     }
     rocm_oxide::hip::synchronize()?;

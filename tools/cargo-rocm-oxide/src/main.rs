@@ -110,10 +110,10 @@ fn pipeline(args: &[OsString]) -> Result<(), String> {
     println!(
         "1. discover #[kernel] functions in device-spike/src and kernel-bearing path dependencies"
     );
-    println!("2. cargo +nightly rustc -Z build-std=core --target amdgcn-amd-amdhsa");
+    println!("2. cargo rustc -Z build-std=core --target amdgcn-amd-amdhsa");
     println!("3. rewrite marked Rust functions into AMDGPU/HSA kernels");
-    println!("4. lower LLVM IR with /opt/rocm/lib/llvm/bin/llc");
-    println!("5. link HSACO with /opt/rocm/lib/llvm/bin/clang");
+    println!("4. lower LLVM IR with ROCm llc");
+    println!("5. link HSACO with ROCm clang");
     println!("6. validate kernel symbols and .kd descriptors with llvm-readelf");
     println!("7. emit metadata, mirrored repr(C) device structs, and typed host bindings");
     println!("8. root build.rs copies artifacts into OUT_DIR for host embedding");

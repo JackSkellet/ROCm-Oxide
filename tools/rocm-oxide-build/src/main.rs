@@ -5,9 +5,10 @@ use std::fs;
 use std::panic::{self, AssertUnwindSafe};
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
+use std::time::{SystemTime, UNIX_EPOCH};
 
 const TARGET: &str = "amdgcn-amd-amdhsa";
-const ROCM_LLVM: &str = "/opt/rocm/lib/llvm/bin";
+const DEFAULT_ROCM_PATH: &str = "/opt/rocm";
 
 fn main() {
     if let Err(err) = run() {
@@ -31,12 +32,12 @@ fn run() -> Result<(), String> {
         "failed to detect ROCm GPU architecture; pass --arch gfx... or set ROCM_OXIDE_ARCH"
             .to_string()
     })?;
+    let tools = ToolPaths::discover()?;
 
     ensure_tool("cargo", &["--version"])?;
-    ensure_tool("rustc", &["+nightly", "--version"])?;
-    ensure_file(Path::new(ROCM_LLVM).join("llc"))?;
-    ensure_file(Path::new(ROCM_LLVM).join("clang"))?;
-    ensure_file(Path::new(ROCM_LLVM).join("llvm-readelf"))?;
+    ensure_tool("rustc", &["--version"])?;
+    ensure_amdgpu_target()?;
+    ensure_rust_src()?;
 
     let device_crates = discover_device_crate_bundle(&device_crate)?;
     let mut kernels = BTreeMap::new();
@@ -89,7 +90,7 @@ fn run() -> Result<(), String> {
             .map_err(|err| format!("failed to write {}: {err}", kernel_ir.display()))?;
 
         run_command(
-            Command::new(Path::new(ROCM_LLVM).join("llc"))
+            Command::new(&tools.llc)
                 .arg("-mtriple=amdgcn-amd-amdhsa")
                 .arg(format!("-mcpu={arch}"))
                 .arg("-filetype=obj")
@@ -113,7 +114,7 @@ fn run() -> Result<(), String> {
     let metadata = release_dir.join(format!("{}.metadata.json", args.output_stem));
     let bindings = release_dir.join(format!("{}.bindings.rs", args.output_stem));
 
-    let mut link = Command::new(Path::new(ROCM_LLVM).join("clang"));
+    let mut link = Command::new(&tools.clang);
     link.arg("-target")
         .arg("amdgcn-amd-amdhsa")
         .arg(format!("-mcpu={arch}"));
@@ -123,8 +124,8 @@ fn run() -> Result<(), String> {
     link.arg("-o").arg(&hsaco);
     run_command(&mut link, "link AMDGPU code object with ROCm clang")?;
 
-    validate_code_object(&hsaco, &kernel_names)?;
-    let code_object_metadata = read_code_object_metadata(&hsaco)?;
+    validate_code_object(&hsaco, &kernel_names, &tools.llvm_readelf)?;
+    let code_object_metadata = read_code_object_metadata(&hsaco, &tools.llvm_readelf)?;
     write_metadata(&metadata, &arch, &hsaco, &kernels, &code_object_metadata)?;
     write_bindings(&bindings, &hsaco, &kernels, &device_structs)?;
     println!("{}", hsaco.display());
@@ -201,23 +202,28 @@ fn print_help() {
 fn doctor() -> Result<(), String> {
     println!("ROCm-Oxide doctor");
     report_tool("cargo", &["--version"])?;
-    report_tool("rustc", &["+nightly", "--version"])?;
-    report_file("ROCm llc", &Path::new(ROCM_LLVM).join("llc"))?;
-    report_file("ROCm clang", &Path::new(ROCM_LLVM).join("clang"))?;
-    report_file(
-        "ROCm llvm-readelf",
-        &Path::new(ROCM_LLVM).join("llvm-readelf"),
-    )?;
+    report_tool("rustc", &["--version"])?;
+    report_amdgpu_target()?;
+    report_rust_src()?;
+    let tools = ToolPaths::discover()?;
+    report_rocm_tool("ROCm llc", &tools.llc)?;
+    report_llc_amdgcn(&tools.llc)?;
+    report_rocm_tool("ROCm clang", &tools.clang)?;
+    report_rocm_tool("ROCm llvm-readelf", &tools.llvm_readelf)?;
 
-    match detect_arch() {
-        Some(arch) => println!("ok: detected AMD GPU architecture {arch}"),
+    let arch = match detect_arch() {
+        Some(arch) => {
+            println!("ok: detected AMD GPU architecture {arch}");
+            arch
+        }
         None => {
             return Err(
                 "failed to detect AMD GPU architecture; set ROCM_OXIDE_ARCH=gfx...".to_string(),
             );
         }
-    }
+    };
 
+    report_core_build_probe(&arch)?;
     println!("ok: build prerequisites are present");
     Ok(())
 }
@@ -238,15 +244,6 @@ fn report_tool(program: &str, args: &[&str]) -> Result<(), String> {
     let first = stdout.lines().next().unwrap_or("<no version output>");
     println!("ok: {program} {first}");
     Ok(())
-}
-
-fn report_file(label: &str, path: &Path) -> Result<(), String> {
-    if path.is_file() {
-        println!("ok: {label} {}", path.display());
-        Ok(())
-    } else {
-        Err(format!("missing {label}: {}", path.display()))
-    }
 }
 
 fn inspect_metadata(path: &Path) -> Result<(), String> {
@@ -449,7 +446,7 @@ fn workspace_root() -> Result<PathBuf, String> {
 }
 
 fn detect_arch() -> Option<String> {
-    let output = Command::new("/opt/rocm/bin/rocminfo").output().ok()?;
+    let output = Command::new(rocminfo_path()).output().ok()?;
     if !output.status.success() {
         return None;
     }
@@ -467,6 +464,20 @@ fn detect_arch() -> Option<String> {
         })
 }
 
+fn rocminfo_path() -> PathBuf {
+    if let Some(path) = env::var_os("ROCMINFO").filter(|value| !value.is_empty()) {
+        return PathBuf::from(path);
+    }
+    rocm_path().join("bin/rocminfo")
+}
+
+fn rocm_path() -> PathBuf {
+    env::var_os("ROCM_PATH")
+        .filter(|value| !value.is_empty())
+        .map(PathBuf::from)
+        .unwrap_or_else(|| PathBuf::from(DEFAULT_ROCM_PATH))
+}
+
 fn ensure_tool(program: &str, args: &[&str]) -> Result<(), String> {
     let status = Command::new(program)
         .args(args)
@@ -481,18 +492,205 @@ fn ensure_tool(program: &str, args: &[&str]) -> Result<(), String> {
     }
 }
 
-fn ensure_file(path: PathBuf) -> Result<(), String> {
-    if path.is_file() {
-        Ok(())
-    } else {
-        Err(format!("required tool not found: {}", path.display()))
+#[derive(Debug, Clone)]
+struct ToolPaths {
+    llc: PathBuf,
+    clang: PathBuf,
+    llvm_readelf: PathBuf,
+}
+
+impl ToolPaths {
+    fn discover() -> Result<Self, String> {
+        Ok(Self {
+            llc: find_rocm_tool("ROCM_OXIDE_LLC", "llc")?,
+            clang: find_rocm_tool("ROCM_OXIDE_CLANG", "clang")?,
+            llvm_readelf: find_rocm_tool("ROCM_OXIDE_LLVM_READELF", "llvm-readelf")?,
+        })
     }
 }
 
+fn find_rocm_tool(env_var: &str, name: &str) -> Result<PathBuf, String> {
+    let mut candidates = Vec::new();
+    if let Some(path) = env::var_os(env_var).filter(|value| !value.is_empty()) {
+        candidates.push(PathBuf::from(path));
+    }
+    candidates.push(rocm_path().join("lib/llvm/bin").join(name));
+    candidates.push(Path::new(DEFAULT_ROCM_PATH).join("lib/llvm/bin").join(name));
+    candidates.push(PathBuf::from(name));
+
+    for candidate in candidates {
+        if tool_works(&candidate, &["--version"]) {
+            return Ok(candidate);
+        }
+    }
+
+    Err(format!(
+        "could not find `{name}`; set {env_var}=/path/to/{name} or ROCM_PATH=/path/to/rocm"
+    ))
+}
+
+fn tool_works(program: &Path, args: &[&str]) -> bool {
+    Command::new(program)
+        .args(args)
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .status()
+        .is_ok_and(|status| status.success())
+}
+
+fn report_rocm_tool(label: &str, path: &Path) -> Result<(), String> {
+    let output = Command::new(path)
+        .arg("--version")
+        .output()
+        .map_err(|err| format!("failed to run {}: {err}", path.display()))?;
+    if !output.status.success() {
+        return Err(format!(
+            "{} --version failed:\n{}",
+            path.display(),
+            String::from_utf8_lossy(&output.stderr)
+        ));
+    }
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let first = stdout.lines().next().unwrap_or("<no version output>");
+    println!("ok: {label} {} ({first})", path.display());
+    Ok(())
+}
+
+fn report_llc_amdgcn(llc: &Path) -> Result<(), String> {
+    let output = Command::new(llc)
+        .arg("--version")
+        .output()
+        .map_err(|err| format!("failed to run {} --version: {err}", llc.display()))?;
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    if stdout.contains("amdgcn") {
+        println!("ok: llc supports the amdgcn backend");
+        Ok(())
+    } else {
+        Err(format!(
+            "{} does not report amdgcn backend support; set ROCM_OXIDE_LLC to ROCm's llc",
+            llc.display()
+        ))
+    }
+}
+
+fn ensure_amdgpu_target() -> Result<(), String> {
+    rust_target_list().and_then(|targets| {
+        if targets.lines().any(|line| line.trim() == TARGET) {
+            Ok(())
+        } else {
+            Err(format!("rustc does not list required target `{TARGET}`"))
+        }
+    })
+}
+
+fn report_amdgpu_target() -> Result<(), String> {
+    ensure_amdgpu_target()?;
+    println!("ok: rustc target {TARGET}");
+    Ok(())
+}
+
+fn rust_target_list() -> Result<String, String> {
+    let output = Command::new("rustc")
+        .args(["--print", "target-list"])
+        .output()
+        .map_err(|err| format!("failed to query rustc target list: {err}"))?;
+    if output.status.success() {
+        Ok(String::from_utf8_lossy(&output.stdout).into_owned())
+    } else {
+        Err(format!(
+            "rustc --print target-list failed:\n{}",
+            String::from_utf8_lossy(&output.stderr)
+        ))
+    }
+}
+
+fn ensure_rust_src() -> Result<(), String> {
+    let path = rust_src_core_path()?;
+    if path.is_file() {
+        Ok(())
+    } else {
+        Err(format!(
+            "missing Rust source component at {}; install it with `rustup component add rust-src`",
+            path.display()
+        ))
+    }
+}
+
+fn report_rust_src() -> Result<(), String> {
+    ensure_rust_src()?;
+    println!("ok: rust-src component is installed");
+    Ok(())
+}
+
+fn rust_src_core_path() -> Result<PathBuf, String> {
+    let output = Command::new("rustc")
+        .args(["--print", "sysroot"])
+        .output()
+        .map_err(|err| format!("failed to query rustc sysroot: {err}"))?;
+    if !output.status.success() {
+        return Err(format!(
+            "rustc --print sysroot failed:\n{}",
+            String::from_utf8_lossy(&output.stderr)
+        ));
+    }
+    let sysroot = String::from_utf8_lossy(&output.stdout).trim().to_string();
+    Ok(PathBuf::from(sysroot).join("lib/rustlib/src/rust/library/core/src/lib.rs"))
+}
+
+fn report_core_build_probe(arch: &str) -> Result<(), String> {
+    let probe_dir = create_core_probe_crate()?;
+    let target_dir = probe_dir.join("target");
+    let mut command = cargo_command();
+    command
+        .arg("rustc")
+        .arg("-Z")
+        .arg("build-std=core")
+        .arg("--target")
+        .arg(TARGET)
+        .arg("--release")
+        .arg("--")
+        .arg("--emit=llvm-ir")
+        .current_dir(&probe_dir)
+        .env("RUSTFLAGS", format!("-C target-cpu={arch}"))
+        .env("CARGO_TARGET_DIR", &target_dir);
+    sanitize_rust_env(&mut command);
+
+    let result = run_command(&mut command, "build `core` for amdgcn-amd-amdhsa")
+        .map_err(with_core_build_hint);
+    let _ = fs::remove_dir_all(&probe_dir);
+    result?;
+    println!("ok: `core` builds for {TARGET} with nightly build-std");
+    Ok(())
+}
+
+fn create_core_probe_crate() -> Result<PathBuf, String> {
+    let suffix = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map_err(|err| format!("system clock before Unix epoch: {err}"))?
+        .as_nanos();
+    let root = env::temp_dir().join(format!("rocm-oxide-core-probe-{}-{suffix}", std::process::id()));
+    fs::create_dir_all(root.join("src"))
+        .map_err(|err| format!("failed to create {}: {err}", root.display()))?;
+    fs::write(
+        root.join("Cargo.toml"),
+        "[package]\nname = \"rocm-oxide-core-probe\"\nversion = \"0.0.0\"\nedition = \"2024\"\n\n[lib]\ncrate-type = [\"rlib\"]\n",
+    )
+    .map_err(|err| format!("failed to write probe Cargo.toml: {err}"))?;
+    fs::write(
+        root.join("src/lib.rs"),
+        "#![no_std]\n#[unsafe(no_mangle)]\npub unsafe extern \"C\" fn rocm_oxide_core_probe() {}\n",
+    )
+    .map_err(|err| format!("failed to write probe lib.rs: {err}"))?;
+    Ok(root)
+}
+
+fn cargo_command() -> Command {
+    Command::new(env::var_os("CARGO").unwrap_or_else(|| "cargo".into()))
+}
+
 fn build_device_crate(device_crate: &Path, arch: &str) -> Result<(), String> {
-    run_command(
-        Command::new("cargo")
-            .arg("+nightly")
+    let mut command = cargo_command();
+    command
             .arg("rustc")
             .arg("-Z")
             .arg("build-std=core")
@@ -502,13 +700,32 @@ fn build_device_crate(device_crate: &Path, arch: &str) -> Result<(), String> {
             .arg("--")
             .arg("--emit=llvm-ir")
             .current_dir(device_crate)
-            .env_remove("CARGO_ENCODED_RUSTFLAGS")
-            .env_remove("RUSTC")
-            .env_remove("RUSTC_WRAPPER")
-            .env_remove("RUSTDOC")
-            .env("RUSTFLAGS", format!("-C target-cpu={arch}")),
-        "compile Rust device crate to AMDGPU LLVM IR",
-    )
+            .env("RUSTFLAGS", format!("-C target-cpu={arch}"));
+    sanitize_rust_env(&mut command);
+    run_command(&mut command, "compile Rust device crate to AMDGPU LLVM IR")
+        .map_err(with_core_build_hint)
+}
+
+fn sanitize_rust_env(command: &mut Command) {
+    command
+        .env_remove("CARGO_ENCODED_RUSTFLAGS")
+        .env_remove("RUSTC")
+        .env_remove("RUSTC_WRAPPER")
+        .env_remove("RUSTDOC");
+}
+
+fn with_core_build_hint(err: String) -> String {
+    if err.contains("can't find crate for `core`")
+        || err.contains("build-std")
+        || err.contains("the option `Z` is only accepted")
+        || err.contains("rust-src")
+    {
+        format!(
+            "{err}\n\nhint: ROCm-Oxide device compilation must build `core` for `{TARGET}` with nightly Rust and the `rust-src` component. This repo pins nightly in rust-toolchain.toml; run `rustup component add rust-src` if doctor reports it missing, then retry `cargo rocm-oxide doctor`."
+        )
+    } else {
+        err
+    }
 }
 
 fn discover_device_crate_bundle(root_crate: &Path) -> Result<Vec<PathBuf>, String> {
@@ -1384,8 +1601,12 @@ fn rewrite_kernel_attributes(line: &str) -> String {
     )
 }
 
-fn validate_code_object(hsaco: &Path, expected_kernels: &BTreeSet<String>) -> Result<(), String> {
-    let output = Command::new(Path::new(ROCM_LLVM).join("llvm-readelf"))
+fn validate_code_object(
+    hsaco: &Path,
+    expected_kernels: &BTreeSet<String>,
+    llvm_readelf: &Path,
+) -> Result<(), String> {
+    let output = Command::new(llvm_readelf)
         .arg("-s")
         .arg(hsaco)
         .output()
@@ -1439,8 +1660,8 @@ fn validate_code_object(hsaco: &Path, expected_kernels: &BTreeSet<String>) -> Re
     Ok(())
 }
 
-fn read_code_object_metadata(hsaco: &Path) -> Result<CodeObjectMetadata, String> {
-    let output = Command::new(Path::new(ROCM_LLVM).join("llvm-readelf"))
+fn read_code_object_metadata(hsaco: &Path, llvm_readelf: &Path) -> Result<CodeObjectMetadata, String> {
+    let output = Command::new(llvm_readelf)
         .arg("-n")
         .arg(hsaco)
         .output()

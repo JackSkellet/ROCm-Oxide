@@ -35,13 +35,12 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     while window.is_open() && !window.is_key_down(Key::Escape) {
         unsafe {
             kernels.rainbow_geometry(
-                LaunchConfig::for_num_elems(n, block_x),
+                LaunchConfig::for_num_elems_with_block_size(n, block_x),
                 &device_frame,
                 n,
                 WIDTH as u32,
                 HEIGHT as u32,
                 frame_index,
-                block_x,
             )?;
         }
         rocm_oxide::hip::synchronize()?;

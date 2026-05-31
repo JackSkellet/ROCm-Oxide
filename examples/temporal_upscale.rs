@@ -26,7 +26,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let device_prev_history = DeviceBuffer::<u32>::from_slice(&prev_history)?;
     let device_frame = DeviceBuffer::<u32>::new(PIXELS)?;
     let device_history_out = DeviceBuffer::<u32>::new(PIXELS)?;
-    let config = LaunchConfig::for_num_elems(PIXELS, 256);
+    let config = LaunchConfig::for_num_elems(PIXELS);
 
     let mut host_frame = vec![0u32; PIXELS];
     unsafe {
@@ -37,7 +37,6 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             &device_depth,
             PIXELS,
             4u32 << 4,
-            256,
         )?;
     }
     rocm_oxide::hip::synchronize()?;
@@ -65,7 +64,6 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 &device_prev_history,
                 PIXELS,
                 mode,
-                256,
             )?;
         }
         rocm_oxide::hip::synchronize()?;

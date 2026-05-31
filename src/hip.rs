@@ -1,7 +1,7 @@
 use std::ffi::{CStr, c_char, c_int, c_uint, c_void};
 use std::fmt;
 use std::marker::PhantomData;
-use std::ptr;
+use std::ptr::{self, NonNull};
 
 pub type HipError = c_int;
 pub type HipModule = *mut c_void;
@@ -232,10 +232,22 @@ unsafe impl<T: Sync> Sync for DeviceBuffer<T> {}
 
 impl<T> DeviceBuffer<T> {
     pub fn new(len: usize) -> Result<Self> {
-        let mut ptr = ptr::null_mut();
         let bytes = checked_allocation_bytes::<T>(len, "device")?;
+        if bytes == 0 {
+            return Ok(Self {
+                ptr: NonNull::<T>::dangling().as_ptr(),
+                len,
+            });
+        }
+
+        let mut ptr = ptr::null_mut();
         unsafe {
-            check(hipMalloc(&mut ptr, bytes))?;
+            if let Err(err) = check(hipMalloc(&mut ptr, bytes)) {
+                if !ptr.is_null() {
+                    let _ = hipFree(ptr);
+                }
+                return Err(err);
+            }
         }
         Ok(Self {
             ptr: ptr.cast::<T>(),
@@ -244,10 +256,22 @@ impl<T> DeviceBuffer<T> {
     }
 
     pub fn new_async(stream: &Stream, len: usize) -> Result<Self> {
-        let mut ptr = ptr::null_mut();
         let bytes = checked_allocation_bytes::<T>(len, "device")?;
+        if bytes == 0 {
+            return Ok(Self {
+                ptr: NonNull::<T>::dangling().as_ptr(),
+                len,
+            });
+        }
+
+        let mut ptr = ptr::null_mut();
         unsafe {
-            check(hipMallocAsync(&mut ptr, bytes, stream.as_raw()))?;
+            if let Err(err) = check(hipMallocAsync(&mut ptr, bytes, stream.as_raw())) {
+                if !ptr.is_null() {
+                    let _ = hipFreeAsync(ptr, stream.as_raw());
+                }
+                return Err(err);
+            }
         }
         Ok(Self {
             ptr: ptr.cast::<T>(),
@@ -257,11 +281,15 @@ impl<T> DeviceBuffer<T> {
 
     pub fn copy_from_host(&self, input: &[T]) -> Result<()> {
         validate_slice_len("host-to-device source", input.len(), self.len)?;
+        let bytes = std::mem::size_of_val(input);
+        if bytes == 0 {
+            return Ok(());
+        }
         unsafe {
             check(hipMemcpy(
                 self.ptr.cast::<c_void>(),
                 input.as_ptr().cast::<c_void>(),
-                std::mem::size_of_val(input),
+                bytes,
                 HIP_MEMCPY_HOST_TO_DEVICE,
             ))
         }
@@ -269,11 +297,15 @@ impl<T> DeviceBuffer<T> {
 
     pub fn copy_from_host_async(&self, stream: &Stream, input: &[T]) -> Result<()> {
         validate_slice_len("async host-to-device source", input.len(), self.len)?;
+        let bytes = std::mem::size_of_val(input);
+        if bytes == 0 {
+            return Ok(());
+        }
         unsafe {
             check(hipMemcpyAsync(
                 self.ptr.cast::<c_void>(),
                 input.as_ptr().cast::<c_void>(),
-                std::mem::size_of_val(input),
+                bytes,
                 HIP_MEMCPY_HOST_TO_DEVICE,
                 stream.as_raw(),
             ))
@@ -282,11 +314,15 @@ impl<T> DeviceBuffer<T> {
 
     pub fn copy_to_host(&self, output: &mut [T]) -> Result<()> {
         validate_slice_len("device-to-host destination", output.len(), self.len)?;
+        let bytes = std::mem::size_of_val(output);
+        if bytes == 0 {
+            return Ok(());
+        }
         unsafe {
             check(hipMemcpy(
                 output.as_mut_ptr().cast::<c_void>(),
                 self.ptr.cast::<c_void>(),
-                std::mem::size_of_val(output),
+                bytes,
                 HIP_MEMCPY_DEVICE_TO_HOST,
             ))
         }
@@ -294,18 +330,28 @@ impl<T> DeviceBuffer<T> {
 
     pub fn copy_to_host_async(&self, stream: &Stream, output: &mut [T]) -> Result<()> {
         validate_slice_len("async device-to-host destination", output.len(), self.len)?;
+        let bytes = std::mem::size_of_val(output);
+        if bytes == 0 {
+            return Ok(());
+        }
         unsafe {
             check(hipMemcpyAsync(
                 output.as_mut_ptr().cast::<c_void>(),
                 self.ptr.cast::<c_void>(),
-                std::mem::size_of_val(output),
+                bytes,
                 HIP_MEMCPY_DEVICE_TO_HOST,
                 stream.as_raw(),
             ))
         }
     }
 
-    pub fn copy_from_pinned_host_async(
+    /// Enqueues a host-to-device copy from pinned host memory.
+    ///
+    /// # Safety
+    ///
+    /// The input pinned buffer must not be dropped, freed, mutated, or aliased
+    /// until the stream reaches this copy.
+    pub unsafe fn copy_from_pinned_host_async(
         &self,
         stream: &Stream,
         input: &PinnedHostBuffer<T>,
@@ -313,7 +359,13 @@ impl<T> DeviceBuffer<T> {
         self.copy_from_host_async(stream, input.as_slice())
     }
 
-    pub fn copy_to_pinned_host_async(
+    /// Enqueues a device-to-host copy into pinned host memory.
+    ///
+    /// # Safety
+    ///
+    /// The output pinned buffer must not be dropped, freed, read, or aliased
+    /// until the stream reaches this copy.
+    pub unsafe fn copy_to_pinned_host_async(
         &self,
         stream: &Stream,
         output: &mut PinnedHostBuffer<T>,
@@ -330,7 +382,7 @@ impl<T> DeviceBuffer<T> {
     }
 
     pub unsafe fn free_async(mut self, stream: &Stream) -> Result<()> {
-        if !self.ptr.is_null() {
+        if self.len != 0 && !self.ptr.is_null() {
             let ptr = self.ptr.cast::<c_void>();
             self.ptr = ptr::null_mut();
             unsafe {
@@ -439,7 +491,7 @@ impl<T: Copy + Default> DeviceBuffer<T> {
 
 impl<T> Drop for DeviceBuffer<T> {
     fn drop(&mut self) {
-        if !self.ptr.is_null() {
+        if self.len != 0 && !self.ptr.is_null() {
             unsafe {
                 let _ = hipFree(self.ptr.cast::<c_void>());
             }
@@ -680,6 +732,13 @@ mod tests {
             .copy_from_host(&[1, 2])
             .expect_err("short host copy should fail");
         assert!(err.to_string().contains("length mismatch"));
+    }
+
+    #[test]
+    fn zero_length_device_buffer_does_not_allocate() {
+        let buffer = DeviceBuffer::<u8>::new(0).expect("zero-sized allocation should work");
+        assert!(buffer.is_empty());
+        assert_eq!(buffer.len(), 0);
     }
 
     #[test]

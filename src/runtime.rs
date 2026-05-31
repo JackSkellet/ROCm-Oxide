@@ -1,7 +1,7 @@
 use crate::{hip, hiprtc};
 use std::ffi::{CStr, c_void};
 use std::fmt;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::process::Command;
 
 #[derive(Debug)]
@@ -129,6 +129,8 @@ pub struct LaunchConfig {
 }
 
 impl LaunchConfig {
+    pub const DEFAULT_BLOCK_X: u32 = 256;
+
     pub const fn new(grid: Dim3, block: Dim3) -> Self {
         Self {
             grid,
@@ -137,9 +139,19 @@ impl LaunchConfig {
         }
     }
 
-    pub fn for_num_elems(num_elems: usize, block_x: u32) -> Self {
+    pub fn for_num_elems(num_elems: usize) -> Self {
+        Self::for_num_elems_with_block_size(num_elems, Self::DEFAULT_BLOCK_X)
+    }
+
+    pub fn for_num_elems_with_block_size(num_elems: usize, block_x: u32) -> Self {
         let grid_x = (num_elems as u32).div_ceil(block_x);
         Self::new(Dim3::x(grid_x), Dim3::x(block_x))
+    }
+
+    pub fn for_2d(width: u32, height: u32, block_x: u32, block_y: u32) -> Self {
+        let grid_x = width.div_ceil(block_x);
+        let grid_y = height.div_ceil(block_y);
+        Self::new(Dim3::new(grid_x, grid_y, 1), Dim3::new(block_x, block_y, 1))
     }
 
     pub const fn with_shared_mem_bytes(mut self, shared_mem_bytes: u32) -> Self {
@@ -259,7 +271,7 @@ fn detect_arch() -> Option<String> {
         }
     }
 
-    let output = Command::new("/opt/rocm/bin/rocminfo").output().ok()?;
+    let output = Command::new(rocminfo_path()).output().ok()?;
     if !output.status.success() {
         return None;
     }
@@ -276,16 +288,41 @@ fn detect_arch() -> Option<String> {
     })
 }
 
+fn rocminfo_path() -> PathBuf {
+    if let Some(path) = std::env::var_os("ROCMINFO").filter(|value| !value.is_empty()) {
+        return PathBuf::from(path);
+    }
+    std::env::var_os("ROCM_PATH")
+        .filter(|value| !value.is_empty())
+        .map(PathBuf::from)
+        .unwrap_or_else(|| PathBuf::from("/opt/rocm"))
+        .join("bin/rocminfo")
+}
+
 #[cfg(test)]
 mod tests {
     use super::{Dim3, LaunchConfig};
 
     #[test]
     fn one_dimensional_launch_config_rounds_up() {
-        let config = LaunchConfig::for_num_elems(1_025, 256);
+        let config = LaunchConfig::for_num_elems(1_025);
         assert_eq!(config.grid, Dim3::x(5));
         assert_eq!(config.block, Dim3::x(256));
         assert_eq!(config.shared_mem_bytes, 0);
+    }
+
+    #[test]
+    fn custom_one_dimensional_block_size_rounds_up() {
+        let config = LaunchConfig::for_num_elems_with_block_size(1_025, 128);
+        assert_eq!(config.grid, Dim3::x(9));
+        assert_eq!(config.block, Dim3::x(128));
+    }
+
+    #[test]
+    fn two_dimensional_launch_config_rounds_up() {
+        let config = LaunchConfig::for_2d(1_025, 513, 16, 16);
+        assert_eq!(config.grid, Dim3::new(65, 33, 1));
+        assert_eq!(config.block, Dim3::new(16, 16, 1));
     }
 
     #[test]

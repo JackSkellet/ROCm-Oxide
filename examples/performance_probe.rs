@@ -55,10 +55,10 @@ fn probe_vector_add(
     let d_a = DeviceBuffer::from_slice(&a)?;
     let d_b = DeviceBuffer::from_slice(&b)?;
     let d_out = DeviceBuffer::<f32>::new(VECTOR_N)?;
-    let config = LaunchConfig::for_num_elems(VECTOR_N, BLOCK_X);
+    let config = LaunchConfig::for_num_elems_with_block_size(VECTOR_N, BLOCK_X);
 
     let ms = time_gpu_ms(64, || unsafe {
-        kernels.vector_add(config, &d_out, &d_a, &d_b, VECTOR_N, BLOCK_X)
+        kernels.vector_add(config, &d_out, &d_a, &d_b, VECTOR_N)
     })?;
     record_sample(
         samples,
@@ -83,10 +83,10 @@ fn probe_affine_transform(
         scale: 1.618,
         bias: -0.125,
     }])?;
-    let config = LaunchConfig::for_num_elems(VECTOR_N, BLOCK_X);
+    let config = LaunchConfig::for_num_elems_with_block_size(VECTOR_N, BLOCK_X);
 
     let ms = time_gpu_ms(64, || unsafe {
-        kernels.affine_transform(config, &d_out, &d_input, &params, VECTOR_N, BLOCK_X)
+        kernels.affine_transform(config, &d_out, &d_input, &params, VECTOR_N)
     })?;
     record_sample(
         samples,
@@ -105,11 +105,11 @@ fn probe_stress_3d(
     samples: &mut Vec<ProbeSample>,
 ) -> Result<()> {
     let frame = DeviceBuffer::<u32>::new(PIXELS)?;
-    let config = LaunchConfig::for_num_elems(PIXELS, BLOCK_X);
+    let config = LaunchConfig::for_num_elems_with_block_size(PIXELS, BLOCK_X);
 
     for steps in [32u32, 96, 256, 1024, 3000] {
         let ms = time_gpu_ms(iterations_for_ms_probe(steps), || unsafe {
-            kernels.stress_3d(config, &frame, PIXELS, 17, 2, steps, BLOCK_X)
+            kernels.stress_3d(config, &frame, PIXELS, 17, 2, steps)
         })?;
         record_sample(
             samples,
@@ -133,11 +133,11 @@ fn probe_stress_pattern(
     samples: &mut Vec<ProbeSample>,
 ) -> Result<()> {
     let frame = DeviceBuffer::<u32>::new(PIXELS)?;
-    let config = LaunchConfig::for_num_elems(PIXELS, BLOCK_X);
+    let config = LaunchConfig::for_num_elems_with_block_size(PIXELS, BLOCK_X);
 
     for steps in [32u32, 96, 256, 1024, 3000] {
         let ms = time_gpu_ms(iterations_for_ms_probe(steps), || unsafe {
-            kernels.stress_pattern(config, &frame, PIXELS, 17, 5, steps, BLOCK_X)
+            kernels.stress_pattern(config, &frame, PIXELS, 17, 5, steps)
         })?;
         record_sample(
             samples,
@@ -164,10 +164,10 @@ fn probe_raytrace_world(
         0.0, 0.0, 1.0, // forward
         3.0, // shadows + reflections
     ])?;
-    let config = LaunchConfig::for_num_elems(PIXELS, BLOCK_X);
+    let config = LaunchConfig::for_num_elems_with_block_size(PIXELS, BLOCK_X);
 
     let ms = time_gpu_ms(24, || unsafe {
-        kernels.raytrace_world(config, &frame, &camera, PIXELS, 17, BLOCK_X)
+        kernels.raytrace_world(config, &frame, &camera, PIXELS, 17)
     })?;
     record_sample(
         samples,

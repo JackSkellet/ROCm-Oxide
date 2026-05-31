@@ -4,10 +4,14 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 
 fn main() {
-    println!("cargo:rustc-link-search=native=/opt/rocm/lib");
+    let rocm_path = rocm_path();
+    let rocm_lib = rocm_path.join("lib");
+
+    println!("cargo:rerun-if-env-changed=ROCM_PATH");
+    println!("cargo:rustc-link-search=native={}", rocm_lib.display());
     println!("cargo:rustc-link-lib=dylib=amdhip64");
     println!("cargo:rustc-link-lib=dylib=hiprtc");
-    println!("cargo:rustc-link-arg=-Wl,-rpath,/opt/rocm/lib");
+    println!("cargo:rustc-link-arg=-Wl,-rpath,{}", rocm_lib.display());
 
     println!("cargo:rerun-if-changed=device-spike/Cargo.toml");
     println!("cargo:rerun-if-changed=device-spike/src");
@@ -79,4 +83,11 @@ fn main() {
         "cargo:rustc-env=ROCM_OXIDE_DEVICE_METADATA={}",
         metadata_out.display()
     );
+}
+
+fn rocm_path() -> PathBuf {
+    env::var_os("ROCM_PATH")
+        .filter(|value| !value.is_empty())
+        .map(PathBuf::from)
+        .unwrap_or_else(|| PathBuf::from("/opt/rocm"))
 }

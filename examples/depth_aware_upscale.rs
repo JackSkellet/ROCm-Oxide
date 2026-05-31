@@ -23,13 +23,12 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     for (name, mode) in [("color", 4u32 << 4), ("depth", 1u32), ("edge_mask", 2u32)] {
         unsafe {
             kernels.depth_aware_upscale(
-                LaunchConfig::for_num_elems(DST_W * DST_H, 256),
+                LaunchConfig::for_num_elems(DST_W * DST_H),
                 &device_frame,
                 &device_color,
                 &device_depth,
                 DST_W * DST_H,
                 mode,
-                256,
             )?;
         }
         rocm_oxide::hip::synchronize()?;

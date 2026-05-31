@@ -175,12 +175,11 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         let render_result: Result<(), Box<dyn std::error::Error>> = (|| {
             unsafe {
                 kernels.raytrace_world(
-                    LaunchConfig::for_num_elems(pixel_count, block_x),
+                    LaunchConfig::for_num_elems_with_block_size(pixel_count, block_x),
                     &device_frame,
                     &device_camera,
                     pixel_count,
                     frame_index,
-                    block_x,
                 )?;
             }
             rocm_oxide::hip::synchronize()?;

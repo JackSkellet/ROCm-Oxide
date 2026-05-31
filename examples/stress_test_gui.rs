@@ -71,13 +71,12 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
         unsafe {
             kernels.stress_pattern(
-                LaunchConfig::for_num_elems(n, block_x),
+                LaunchConfig::for_num_elems_with_block_size(n, block_x),
                 &device_frame,
                 n,
                 frame_index,
                 mode as u32,
                 work_iters,
-                block_x,
             )?;
         }
         rocm_oxide::hip::synchronize()?;

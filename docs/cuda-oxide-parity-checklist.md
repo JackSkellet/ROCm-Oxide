@@ -14,7 +14,8 @@ not the product.
 - [x] Generated metadata JSON for device artifacts.
 - [x] Generated typed host bindings for marked kernels.
 - [x] Host-side launch validation for grid/block shape.
-- [x] Host-side `block_x` contract validation.
+- [x] `LaunchConfig::for_num_elems` default block-size helper.
+- [x] Host-side launch-shape validation.
 - [x] Source-level per-buffer length contracts.
 - [x] Generated validation for mixed-resolution buffer lengths.
 - [x] `rocm-oxide-build --doctor` prerequisite check.
@@ -29,6 +30,13 @@ not the product.
 - [x] HIP module global lookup.
 - [x] Typed host setters/getters for module globals.
 - [x] `rocm-oxide-device` no-std helper crate for AMDGPU intrinsics.
+- [x] Dispatch-packet-derived `block_dim_*`, `grid_dim_*`, and `global_id_*`
+      helpers so kernels do not need a host-passed `block_x` scalar.
+- [x] Dynamic launch-sized LDS pointer helper over Rust's GPU workgroup-memory
+      intrinsic.
+- [x] Nightly `rust-toolchain.toml` with `rust-src` for building `core` on the
+      AMDGPU target.
+- [x] Doctor probe that verifies `core` actually builds for `amdgcn-amd-amdhsa`.
 - [x] Compiler diagnostics include source spans for marked kernels.
 - [x] Compiler IR pointer propagation beyond `getelementptr`.
 - [x] Cross-crate kernel discovery and bundling for local path dependencies.
@@ -79,7 +87,7 @@ not the product.
   - [x] thread/block/grid helpers instead of raw `core::arch::amdgpu`
   - [x] warp/wavefront helpers
   - [x] barriers
-  - [ ] dynamic shared memory/LDS wrappers
+  - [x] dynamic shared memory/LDS wrappers
   - [x] basic `u32` atomics
   - [ ] explicit memory-scope atomics
   - [ ] math intrinsic lowering

@@ -1,4 +1,4 @@
-use rocm_oxide::{Device, DeviceBuffer, LaunchConfig};
+use rocm_oxide::{Device, DeviceBuffer, Dim3, LaunchConfig};
 
 mod generated {
     include!(env!("ROCM_OXIDE_DEVICE_BINDINGS"));
@@ -20,12 +20,11 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let short = DeviceBuffer::from_slice(&a[..n / 2])?;
     let validation = unsafe {
         kernels.vector_add(
-            LaunchConfig::for_num_elems(n, block_x),
+            LaunchConfig::for_num_elems_with_block_size(n, block_x),
             &d_out,
             &short,
             &d_b,
             n,
-            block_x,
         )
     };
     match validation {
@@ -38,20 +37,19 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     let block_validation = unsafe {
         kernels.vector_add(
-            LaunchConfig::for_num_elems(n, block_x),
+            LaunchConfig::new(Dim3::x(1), Dim3::x(0)),
             &d_out,
             &d_a,
             &d_b,
             n,
-            block_x / 2,
         )
     };
     match block_validation {
         Err(rocm_oxide::Error::InvalidLaunch(message)) => {
-            println!("Validation rejected block_x mismatch: {message}");
+            println!("Validation rejected invalid launch shape: {message}");
         }
-        Err(err) => return Err(format!("unexpected block_x validation error: {err}").into()),
-        Ok(()) => return Err("block_x mismatch launch unexpectedly succeeded".into()),
+        Err(err) => return Err(format!("unexpected launch validation error: {err}").into()),
+        Ok(()) => return Err("invalid launch unexpectedly succeeded".into()),
     }
 
     let small_frame = DeviceBuffer::<u32>::new(512)?;
@@ -59,13 +57,12 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let small_depth = DeviceBuffer::<f32>::new(128)?;
     let contract_validation = unsafe {
         kernels.depth_aware_upscale(
-            LaunchConfig::for_num_elems(512, block_x),
+            LaunchConfig::for_num_elems_with_block_size(512, block_x),
             &small_frame,
             &small_color,
             &small_depth,
             512,
             0,
-            block_x,
         )
     };
     match contract_validation {
@@ -78,12 +75,11 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     unsafe {
         kernels.vector_add(
-            LaunchConfig::for_num_elems(n, block_x),
+            LaunchConfig::for_num_elems_with_block_size(n, block_x),
             &d_out,
             &d_a,
             &d_b,
             n,
-            block_x,
         )?;
     }
     rocm_oxide::hip::synchronize()?;
@@ -102,12 +98,11 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     }])?;
     unsafe {
         kernels.affine_transform(
-            LaunchConfig::for_num_elems(n, block_x),
+            LaunchConfig::for_num_elems_with_block_size(n, block_x),
             &d_out,
             &d_a,
             &params,
             n,
-            block_x,
         )?;
     }
     rocm_oxide::hip::synchronize()?;

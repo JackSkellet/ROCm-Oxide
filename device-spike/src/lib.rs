@@ -14,7 +14,7 @@ pub struct AffineParams {
 
 #[kernel]
 pub unsafe extern "C" fn add_one(out: *mut f32, input: *const f32, n: usize) {
-    let i = gpu::thread_idx_x() as usize;
+    let i = gpu::global_id_x();
     if i < n {
         unsafe {
             *out.add(i) = *input.add(i) + 1.0;
@@ -28,9 +28,8 @@ pub unsafe extern "C" fn vector_add(
     a: *const f32,
     b: *const f32,
     n: usize,
-    block_x: u32,
 ) {
-    let i = gpu::global_id_x(block_x);
+    let i = gpu::global_id_x();
     if i < n {
         unsafe {
             *out.add(i) = *a.add(i) + *b.add(i);
@@ -47,9 +46,8 @@ pub unsafe extern "C" fn affine_transform(
     input: *const f32,
     params: *const AffineParams,
     n: usize,
-    block_x: u32,
 ) {
-    let i = gpu::global_id_x(block_x);
+    let i = gpu::global_id_x();
     if i < n {
         let env = unsafe { *params };
         unsafe {
@@ -65,9 +63,8 @@ pub unsafe extern "C" fn rainbow_geometry(
     width: u32,
     height: u32,
     frame_index: u32,
-    block_x: u32,
 ) {
-    let i = gpu::global_id_x(block_x);
+    let i = gpu::global_id_x();
     if i >= n {
         return;
     }
@@ -111,9 +108,8 @@ pub unsafe extern "C" fn stress_pattern(
     frame_index: u32,
     mode: u32,
     work_iters: u32,
-    block_x: u32,
 ) {
-    let i = gpu::global_id_x(block_x);
+    let i = gpu::global_id_x();
     if i >= n {
         return;
     }
@@ -184,9 +180,8 @@ pub unsafe extern "C" fn stress_3d(
     frame_index: u32,
     mode: u32,
     work_iters: u32,
-    block_x: u32,
 ) {
-    let i = gpu::global_id_x(block_x);
+    let i = gpu::global_id_x();
     if i >= n {
         return;
     }
@@ -310,9 +305,8 @@ pub unsafe extern "C" fn raytrace_world(
     camera: *const f32,
     pixel_count: usize,
     frame_index: u32,
-    block_x: u32,
 ) {
-    let i = gpu::global_id_x(block_x);
+    let i = gpu::global_id_x();
     if i >= pixel_count {
         return;
     }
@@ -396,9 +390,8 @@ pub unsafe extern "C" fn window_fx(
     pixel_count: usize,
     frame_index: u32,
     mode: u32,
-    block_x: u32,
 ) {
-    let i = gpu::global_id_x(block_x);
+    let i = gpu::global_id_x();
     if i >= pixel_count {
         return;
     }
@@ -542,9 +535,8 @@ pub unsafe extern "C" fn depth_aware_upscale(
     depth: *const f32,
     pixel_count: usize,
     mode: u32,
-    block_x: u32,
 ) {
-    let i = gpu::global_id_x(block_x);
+    let i = gpu::global_id_x();
     if i >= pixel_count {
         return;
     }
@@ -608,9 +600,8 @@ pub unsafe extern "C" fn temporal_reconstruct_upscale(
     prev_history: *const u32,
     pixel_count: usize,
     mode: u32,
-    block_x: u32,
 ) {
-    let i = gpu::global_id_x(block_x);
+    let i = gpu::global_id_x();
     if i >= pixel_count {
         return;
     }
@@ -708,9 +699,8 @@ pub unsafe extern "C" fn bvh_raytrace(
     scene: *const f32,
     pixel_count: usize,
     mode: u32,
-    block_x: u32,
 ) {
-    let i = gpu::global_id_x(block_x);
+    let i = gpu::global_id_x();
     if i >= pixel_count {
         return;
     }

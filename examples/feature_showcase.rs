@@ -48,7 +48,7 @@ fn vector_add_operation(
         d_a.copy_from_host_async(context.stream(), &a)?;
         d_b.copy_from_host_async(context.stream(), &b)?;
 
-        let config = LaunchConfig::for_num_elems(n, 256);
+        let config = LaunchConfig::for_num_elems(n);
         let mut out_ptr = d_out.as_mut_ptr();
         let mut a_ptr = d_a.as_ptr();
         let mut b_ptr = d_b.as_ptr();
@@ -86,12 +86,11 @@ fn main() -> Result<()> {
     let short = DeviceBuffer::from_slice(&a[..n / 2])?;
     let rejected = unsafe {
         kernels.vector_add(
-            LaunchConfig::for_num_elems(n, block_x),
+            LaunchConfig::for_num_elems_with_block_size(n, block_x),
             &d_out,
             &short,
             &d_b,
             n,
-            block_x,
         )
     };
     assert!(matches!(rejected, Err(rocm_oxide::Error::InvalidLaunch(_))));
@@ -99,12 +98,11 @@ fn main() -> Result<()> {
 
     unsafe {
         kernels.vector_add(
-            LaunchConfig::for_num_elems(n, block_x),
+            LaunchConfig::for_num_elems_with_block_size(n, block_x),
             &d_out,
             &d_a,
             &d_b,
             n,
-            block_x,
         )?;
     }
     rocm_oxide::hip::synchronize()?;
@@ -118,12 +116,11 @@ fn main() -> Result<()> {
     }])?;
     unsafe {
         kernels.affine_transform(
-            LaunchConfig::for_num_elems(n, block_x),
+            LaunchConfig::for_num_elems_with_block_size(n, block_x),
             &d_out,
             &d_a,
             &params,
             n,
-            block_x,
         )?;
     }
     rocm_oxide::hip::synchronize()?;
@@ -138,7 +135,7 @@ fn main() -> Result<()> {
     unsafe {
         rocm_oxide::launch!(
             kernel,
-            LaunchConfig::for_num_elems(n, block_x),
+            LaunchConfig::for_num_elems_with_block_size(n, block_x),
             d_out.as_mut_ptr(),
             d_a.as_ptr(),
             n as u64,

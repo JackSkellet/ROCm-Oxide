@@ -39,7 +39,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let device_frame = DeviceBuffer::<u32>::new(WIDTH * HEIGHT)?;
     let mut brute = vec![0u32; WIDTH * HEIGHT];
     let mut bvh = vec![0u32; WIDTH * HEIGHT];
-    let config = LaunchConfig::for_num_elems(WIDTH * HEIGHT, 256);
+    let config = LaunchConfig::for_num_elems(WIDTH * HEIGHT);
 
     let brute_ms = benchmark_mode(
         &kernels,
@@ -83,14 +83,14 @@ fn benchmark_mode(
 ) -> rocm_oxide::Result<f64> {
     const ITERS: usize = 12;
     unsafe {
-        kernels.bvh_raytrace(config, frame, scene, WIDTH * HEIGHT, mode, 256)?;
+        kernels.bvh_raytrace(config, frame, scene, WIDTH * HEIGHT, mode)?;
     }
     rocm_oxide::hip::synchronize()?;
 
     let start = Instant::now();
     for _ in 0..ITERS {
         unsafe {
-            kernels.bvh_raytrace(config, frame, scene, WIDTH * HEIGHT, mode, 256)?;
+            kernels.bvh_raytrace(config, frame, scene, WIDTH * HEIGHT, mode)?;
         }
     }
     rocm_oxide::hip::synchronize()?;

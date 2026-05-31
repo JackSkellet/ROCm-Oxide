@@ -15,7 +15,6 @@ pub unsafe extern "C" fn depth_aware_upscale(
     depth: *const f32,
     pixel_count: usize,
     mode: u32,
-    block_x: u32,
 ) {
     /* device code */
 }

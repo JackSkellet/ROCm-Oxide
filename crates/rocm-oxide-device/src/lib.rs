@@ -1,7 +1,12 @@
 #![no_std]
+#![feature(core_intrinsics)]
+#![feature(gpu_intrinsics)]
+#![feature(gpu_launch_sized_workgroup_mem)]
 #![feature(stdarch_amdgpu)]
 
 use core::arch::amdgpu;
+use core::intrinsics::gpu::{amdgpu_dispatch_ptr, gpu_launch_sized_workgroup_mem};
+use core::marker::PhantomData;
 use core::sync::atomic::{AtomicU32, Ordering};
 
 #[inline(always)]
@@ -35,8 +40,48 @@ pub fn block_idx_z() -> u32 {
 }
 
 #[inline(always)]
-pub fn global_id_x(block_dim_x: u32) -> usize {
-    (block_idx_x() as usize * block_dim_x as usize) + thread_idx_x() as usize
+pub fn block_dim_x() -> u32 {
+    dispatch_packet().workgroup_size_x as u32
+}
+
+#[inline(always)]
+pub fn block_dim_y() -> u32 {
+    dispatch_packet().workgroup_size_y as u32
+}
+
+#[inline(always)]
+pub fn block_dim_z() -> u32 {
+    dispatch_packet().workgroup_size_z as u32
+}
+
+#[inline(always)]
+pub fn grid_dim_x() -> u32 {
+    dispatch_packet().grid_size_x.div_ceil(block_dim_x())
+}
+
+#[inline(always)]
+pub fn grid_dim_y() -> u32 {
+    dispatch_packet().grid_size_y.div_ceil(block_dim_y())
+}
+
+#[inline(always)]
+pub fn grid_dim_z() -> u32 {
+    dispatch_packet().grid_size_z.div_ceil(block_dim_z())
+}
+
+#[inline(always)]
+pub fn global_id_x() -> usize {
+    (block_idx_x() as usize * block_dim_x() as usize) + thread_idx_x() as usize
+}
+
+#[inline(always)]
+pub fn global_id_y() -> usize {
+    (block_idx_y() as usize * block_dim_y() as usize) + thread_idx_y() as usize
+}
+
+#[inline(always)]
+pub fn global_id_z() -> usize {
+    (block_idx_z() as usize * block_dim_z() as usize) + thread_idx_z() as usize
 }
 
 #[inline(always)]
@@ -114,4 +159,44 @@ pub unsafe fn atomic_store_u32(ptr: *mut u32, value: u32, ordering: Ordering) {
 #[inline(always)]
 pub unsafe fn atomic_load_u32(ptr: *const u32, ordering: Ordering) -> u32 {
     unsafe { (*(ptr.cast::<AtomicU32>())).load(ordering) }
+}
+
+pub struct DynamicSharedMem<T> {
+    _marker: PhantomData<T>,
+}
+
+impl<T> DynamicSharedMem<T> {
+    #[inline(always)]
+    pub unsafe fn get() -> *mut T {
+        gpu_launch_sized_workgroup_mem::<T>()
+    }
+
+    #[inline(always)]
+    pub unsafe fn offset(byte_offset: usize) -> *mut T {
+        unsafe { Self::get().cast::<u8>().add(byte_offset).cast::<T>() }
+    }
+}
+
+#[repr(C)]
+struct HsaKernelDispatchPacket {
+    full_header: u32,
+    workgroup_size_x: u16,
+    workgroup_size_y: u16,
+    workgroup_size_z: u16,
+    reserved0: u16,
+    grid_size_x: u32,
+    grid_size_y: u32,
+    grid_size_z: u32,
+    private_segment_size: u32,
+    group_segment_size: u32,
+    kernel_object: u64,
+    kernarg_address: *const u8,
+    reserved1: u32,
+    reserved2: u64,
+    completion_signal: u64,
+}
+
+#[inline(always)]
+fn dispatch_packet() -> &'static HsaKernelDispatchPacket {
+    unsafe { &*(amdgpu_dispatch_ptr().cast::<HsaKernelDispatchPacket>()) }
 }

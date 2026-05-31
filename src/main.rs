@@ -25,7 +25,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let d_b = DeviceBuffer::<f32>::from_slice(&b)?;
     let d_out = DeviceBuffer::<f32>::new(n)?;
 
-    let config = LaunchConfig::for_num_elems(n, 256);
+    let config = LaunchConfig::for_num_elems(n);
     unsafe {
         rocm_oxide::launch!(
             kernel,

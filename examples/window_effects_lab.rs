@@ -171,13 +171,12 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         let packed_mode = mode as u32 | (sharpness << 4) | (current_upscale << 8);
         unsafe {
             kernels.window_fx(
-                LaunchConfig::for_num_elems(output_pixels, 256),
+                LaunchConfig::for_num_elems(output_pixels),
                 &device_frame,
                 &device_input,
                 output_pixels,
                 frame_index,
                 packed_mode,
-                256,
             )?;
         }
         rocm_oxide::hip::synchronize()?;

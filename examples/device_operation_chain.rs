@@ -32,7 +32,7 @@ fn vector_add_operation(
         d_a.copy_from_host_async(context.stream(), &a)?;
         d_b.copy_from_host_async(context.stream(), &b)?;
 
-        let config = LaunchConfig::for_num_elems(n, 256);
+        let config = LaunchConfig::for_num_elems(n);
         let mut out_ptr = d_out.as_mut_ptr();
         let mut a_ptr = d_a.as_ptr();
         let mut b_ptr = d_b.as_ptr();

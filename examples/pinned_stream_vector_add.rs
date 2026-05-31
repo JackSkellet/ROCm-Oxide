@@ -26,9 +26,11 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let d_b = DeviceBuffer::<f32>::new(n)?;
     let d_out = DeviceBuffer::<f32>::new_async(&stream, n)?;
     d_a.copy_from_pinned_host(&a_host)?;
-    d_b.copy_from_pinned_host_async(&stream, &b_host)?;
+    unsafe {
+        d_b.copy_from_pinned_host_async(&stream, &b_host)?;
+    }
 
-    let config = LaunchConfig::for_num_elems(n, 256);
+    let config = LaunchConfig::for_num_elems(n);
     let mut out_ptr = d_out.as_mut_ptr();
     let mut a_ptr = d_a.as_ptr();
     let mut b_ptr = d_b.as_ptr();
@@ -43,7 +45,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         kernel.launch_raw_on_stream(&stream, config, &mut params)?;
     }
 
-    d_out.copy_to_pinned_host_async(&stream, &mut out_host)?;
+    unsafe {
+        d_out.copy_to_pinned_host_async(&stream, &mut out_host)?;
+    }
     stream.synchronize()?;
 
     for (i, value) in out_host.as_slice().iter().enumerate() {

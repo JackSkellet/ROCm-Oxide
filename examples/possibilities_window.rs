@@ -166,13 +166,12 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 Key::C => {
                     let check = unsafe {
                         kernels.rainbow_geometry(
-                            LaunchConfig::for_num_elems(pixel_count, block_x),
+                            LaunchConfig::for_num_elems_with_block_size(pixel_count, block_x),
                             &short,
                             pixel_count,
                             WIDTH as u32,
                             HEIGHT as u32,
                             0,
-                            block_x,
                         )
                     };
                     safety_status = match check {
@@ -219,7 +218,6 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 pixel_count,
                 frame_index,
                 mode as u32,
-                block_x,
             )?;
         } else {
             party_intensity.set(0.0)?;
@@ -227,12 +225,11 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
         unsafe {
             kernels.affine_transform(
-                LaunchConfig::for_num_elems(4, block_x),
+                LaunchConfig::for_num_elems_with_block_size(4, block_x),
                 &d_affine_output,
                 &d_affine_input,
                 &d_affine_params,
                 4,
-                block_x,
             )?;
         }
         rocm_oxide::hip::synchronize()?;
@@ -292,35 +289,32 @@ fn render_mode(
     match mode {
         0 => unsafe {
             kernels.rainbow_geometry(
-                LaunchConfig::for_num_elems(pixel_count, block_x),
+                LaunchConfig::for_num_elems_with_block_size(pixel_count, block_x),
                 device_frame,
                 pixel_count,
                 WIDTH as u32,
                 HEIGHT as u32,
                 frame_index,
-                block_x,
             )?;
         },
         1 => unsafe {
             kernels.stress_pattern(
-                LaunchConfig::for_num_elems(pixel_count, block_x),
+                LaunchConfig::for_num_elems_with_block_size(pixel_count, block_x),
                 device_frame,
                 pixel_count,
                 frame_index,
                 (frame_index / 90) & 7,
                 work_iters,
-                block_x,
             )?;
         },
         2 => unsafe {
             kernels.stress_3d(
-                LaunchConfig::for_num_elems(pixel_count, block_x),
+                LaunchConfig::for_num_elems_with_block_size(pixel_count, block_x),
                 device_frame,
                 pixel_count,
                 frame_index,
                 (frame_index / 100) & 7,
                 work_iters.max(32),
-                block_x,
             )?;
         },
         _ => {
@@ -328,12 +322,11 @@ fn render_mode(
             device_camera.copy_from_host(camera)?;
             unsafe {
                 kernels.raytrace_world(
-                    LaunchConfig::for_num_elems(pixel_count, block_x),
+                    LaunchConfig::for_num_elems_with_block_size(pixel_count, block_x),
                     device_frame,
                     device_camera,
                     pixel_count,
                     frame_index,
-                    block_x,
                 )?;
             }
         }
@@ -349,7 +342,6 @@ fn launch_party_post(
     pixel_count: usize,
     frame_index: u32,
     mode: u32,
-    block_x: u32,
 ) -> Result<(), Box<dyn std::error::Error>> {
     let mut frame_ptr = frame.as_mut_ptr();
     let mut n_arg = pixel_count as u64;
@@ -362,10 +354,7 @@ fn launch_party_post(
         rocm_oxide::__private::arg_ptr(&mut mode_arg),
     ];
     unsafe {
-        kernel.launch_raw(
-            LaunchConfig::for_num_elems(pixel_count, block_x),
-            &mut params,
-        )?;
+        kernel.launch_raw(LaunchConfig::for_num_elems(pixel_count), &mut params)?;
     }
     Ok(())
 }
