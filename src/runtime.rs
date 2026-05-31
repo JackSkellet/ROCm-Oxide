@@ -219,6 +219,17 @@ impl KernelResource {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct OccupancyMaxPotentialBlockSize {
+    pub min_grid_size: u32,
+    pub block_size: u32,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct OccupancyActiveBlocks {
+    pub blocks_per_multiprocessor: u32,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct LaunchConfig {
     pub grid: Dim3,
     pub block: Dim3,
@@ -481,6 +492,64 @@ pub struct Kernel {
 }
 
 impl Kernel {
+    pub fn occupancy_max_potential_block_size(
+        &self,
+        dynamic_shared_mem_per_block: u32,
+        block_size_limit: u32,
+    ) -> Result<OccupancyMaxPotentialBlockSize> {
+        self.validate_occupancy_shared_mem(dynamic_shared_mem_per_block)?;
+        let (min_grid_size, block_size) = self
+            .function
+            .occupancy_max_potential_block_size(dynamic_shared_mem_per_block, block_size_limit)?;
+        Ok(OccupancyMaxPotentialBlockSize {
+            min_grid_size,
+            block_size,
+        })
+    }
+
+    pub fn occupancy_max_active_blocks_per_multiprocessor(
+        &self,
+        block_size: u32,
+        dynamic_shared_mem_per_block: u32,
+    ) -> Result<OccupancyActiveBlocks> {
+        if block_size == 0 {
+            return Err(Error::InvalidLaunch(
+                "occupancy block size must be nonzero".to_string(),
+            ));
+        }
+        self.validate_occupancy_shared_mem(dynamic_shared_mem_per_block)?;
+        Ok(OccupancyActiveBlocks {
+            blocks_per_multiprocessor: self
+                .function
+                .occupancy_max_active_blocks_per_multiprocessor(
+                    block_size,
+                    dynamic_shared_mem_per_block,
+                )?,
+        })
+    }
+
+    pub fn occupancy_for_config(&self, config: LaunchConfig) -> Result<OccupancyActiveBlocks> {
+        validate_launch_config_for_limits(config, self.limits, self.metadata)?;
+        self.occupancy_max_active_blocks_per_multiprocessor(
+            config.block.x * config.block.y * config.block.z,
+            config.shared_mem_bytes,
+        )
+    }
+
+    fn validate_occupancy_shared_mem(&self, dynamic_shared_mem_per_block: u32) -> Result<()> {
+        let total_shared_mem =
+            self.metadata.static_shared_mem_bytes as u64 + dynamic_shared_mem_per_block as u64;
+        if total_shared_mem > self.limits.max_shared_mem_per_block as u64 {
+            return Err(Error::InvalidLaunch(format!(
+                "occupancy query requests {total_shared_mem} bytes of LDS/shared memory ({} static + {} dynamic), but device limit is {} bytes per block",
+                self.metadata.static_shared_mem_bytes,
+                dynamic_shared_mem_per_block,
+                self.limits.max_shared_mem_per_block
+            )));
+        }
+        Ok(())
+    }
+
     pub unsafe fn launch_raw(
         &self,
         config: LaunchConfig,

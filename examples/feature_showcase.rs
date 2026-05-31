@@ -72,6 +72,8 @@ fn vector_add_operation(
 fn main() -> Result<()> {
     let device = Device::first()?;
     let kernels = generated::DeviceKernels::load_embedded(&device)?;
+    let n = 1 << 16;
+    let block_x = 256;
     let lds_resource = kernels
         .resource("lds_block_sum")
         .expect("generated resource metadata should include lds_block_sum");
@@ -80,12 +82,17 @@ fn main() -> Result<()> {
         kernels.resources().len(),
         generated::DEVICE_KERNEL_RESOURCES.len()
     );
-    let n = 1 << 16;
-    let block_x = 256;
+    let vector_kernel = kernels.module().kernel(c"vector_add")?;
+    let potential = vector_kernel.occupancy_max_potential_block_size(0, 0)?;
+    assert!(potential.min_grid_size > 0);
+    assert!(potential.block_size > 0);
+    let active = vector_kernel.occupancy_max_active_blocks_per_multiprocessor(block_x, 0)?;
+    assert!(active.blocks_per_multiprocessor > 0);
     let a = (0..n).map(|i| i as f32).collect::<Vec<_>>();
     let b = (0..n).map(|i| (i as f32) * 0.5).collect::<Vec<_>>();
 
     println!("ROCm-Oxide feature showcase on {}", device.arch());
+    println!("ok: HIP occupancy wrappers reported launch guidance");
 
     let d_a = Arc::new(DeviceBuffer::from_slice(&a)?);
     let d_b = Arc::new(DeviceBuffer::from_slice(&b)?);
@@ -133,13 +140,19 @@ fn main() -> Result<()> {
     let reduce_n = 768usize;
     let reduce_block_x = 128u32;
     let partial_count = reduce_n.div_ceil(reduce_block_x as usize);
+    let reduce_config = LaunchConfig::for_num_elems_with_block_size(reduce_n, reduce_block_x)
+        .try_with_dynamic_shared_mem::<f32>(reduce_block_x as usize)?;
+    let lds_kernel = kernels
+        .module()
+        .kernel_with_metadata(c"lds_block_sum", lds_resource.launch_metadata())?;
+    let lds_active = lds_kernel.occupancy_for_config(reduce_config)?;
+    assert!(lds_active.blocks_per_multiprocessor > 0);
     let reduce_input = (0..reduce_n).map(|i| (i % 5) as f32).collect::<Vec<_>>();
     let d_reduce_input = DeviceBuffer::from_slice(&reduce_input)?;
     let d_partials = DeviceBuffer::<f32>::new(partial_count)?;
     unsafe {
         kernels.lds_block_sum(
-            LaunchConfig::for_num_elems_with_block_size(reduce_n, reduce_block_x)
-                .try_with_dynamic_shared_mem::<f32>(reduce_block_x as usize)?,
+            reduce_config,
             &d_partials,
             &d_reduce_input,
             reduce_n,

@@ -69,7 +69,7 @@ Local probes on 2026-05-31:
 - [ ] Occupancy and resource model:
   - [x] expose per-kernel VGPR, SGPR, LDS, private segment, kernarg, and wavefront metadata at runtime
   - [x] switch `performance_probe` to the generated runtime resource table
-  - [ ] wrap HIP occupancy APIs for launch planning
+  - [x] wrap HIP occupancy APIs for launch planning
   - [ ] add benchmark output that flags occupancy limiters and spills
 
 ### P1: Runtime Orchestration

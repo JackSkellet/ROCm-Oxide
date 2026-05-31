@@ -2542,6 +2542,9 @@ fn write_bindings(
         "        Ok(Self { module: std::sync::Arc::new(device.load_code_object(DEVICE_HSACO_BYTES)?) })\n",
     );
     out.push_str("    }\n\n");
+    out.push_str("    pub fn module(&self) -> &rocm_oxide::Module {\n");
+    out.push_str("        self.module.as_ref()\n");
+    out.push_str("    }\n\n");
     out.push_str(
         "    pub const fn resources(&self) -> &'static [rocm_oxide::KernelResource] {\n",
     );

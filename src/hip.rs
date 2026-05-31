@@ -76,6 +76,19 @@ unsafe extern "C" {
         kernel_params: *mut *mut c_void,
         extra: *mut *mut c_void,
     ) -> HipError;
+    fn hipModuleOccupancyMaxPotentialBlockSize(
+        grid_size: *mut c_int,
+        block_size: *mut c_int,
+        function: HipFunction,
+        dynamic_shared_mem_per_block: usize,
+        block_size_limit: c_int,
+    ) -> HipError;
+    fn hipModuleOccupancyMaxActiveBlocksPerMultiprocessor(
+        blocks_per_multiprocessor: *mut c_int,
+        function: HipFunction,
+        block_size: c_int,
+        dynamic_shared_mem_per_block: usize,
+    ) -> HipError;
 }
 
 #[derive(Debug, Clone)]
@@ -135,9 +148,18 @@ pub fn device_attribute(device_id: i32, attribute: c_int) -> Result<u32> {
     unsafe {
         check(hipDeviceGetAttribute(&mut value, attribute, device_id))?;
     }
-    u32::try_from(value).map_err(|_| {
+    u32_from_hip_int(&format!("HIP device attribute {attribute}"), value)
+}
+
+fn u32_from_hip_int(label: &str, value: c_int) -> Result<u32> {
+    u32::try_from(value)
+        .map_err(|_| Error::invalid_value(format!("{label} returned negative value {value}")))
+}
+
+fn c_int_from_u32(label: &str, value: u32) -> Result<c_int> {
+    c_int::try_from(value).map_err(|_| {
         Error::invalid_value(format!(
-            "HIP device attribute {attribute} returned negative value {value}"
+            "{label} value {value} exceeds HIP int parameter range"
         ))
     })
 }
@@ -577,6 +599,50 @@ pub struct Function {
 }
 
 impl Function {
+    pub fn occupancy_max_potential_block_size(
+        &self,
+        dynamic_shared_mem_per_block: u32,
+        block_size_limit: u32,
+    ) -> Result<(u32, u32)> {
+        let mut grid_size = 0;
+        let mut block_size = 0;
+        let block_size_limit = c_int_from_u32("occupancy block-size limit", block_size_limit)?;
+        unsafe {
+            check(hipModuleOccupancyMaxPotentialBlockSize(
+                &mut grid_size,
+                &mut block_size,
+                self.raw,
+                dynamic_shared_mem_per_block as usize,
+                block_size_limit,
+            ))?;
+        }
+        Ok((
+            u32_from_hip_int("occupancy grid size", grid_size)?,
+            u32_from_hip_int("occupancy block size", block_size)?,
+        ))
+    }
+
+    pub fn occupancy_max_active_blocks_per_multiprocessor(
+        &self,
+        block_size: u32,
+        dynamic_shared_mem_per_block: u32,
+    ) -> Result<u32> {
+        let mut blocks_per_multiprocessor = 0;
+        let block_size = c_int_from_u32("occupancy block size", block_size)?;
+        unsafe {
+            check(hipModuleOccupancyMaxActiveBlocksPerMultiprocessor(
+                &mut blocks_per_multiprocessor,
+                self.raw,
+                block_size,
+                dynamic_shared_mem_per_block as usize,
+            ))?;
+        }
+        u32_from_hip_int(
+            "occupancy active blocks per multiprocessor",
+            blocks_per_multiprocessor,
+        )
+    }
+
     pub unsafe fn launch(
         &self,
         grid: (u32, u32, u32),

@@ -218,6 +218,9 @@ execution ergonomics on ROCm:
   cancel already submitted/started work
 - `Module::global::<T>` and typed `Global<T>` setters/getters over
   `hipModuleGetGlobal`
+- `Kernel::occupancy_max_potential_block_size`,
+  `Kernel::occupancy_max_active_blocks_per_multiprocessor`, and
+  `Kernel::occupancy_for_config` wrappers over HIP occupancy planning APIs
 - `#[device_global]` and `#[constant]` markers for Rust-authored device globals,
   with generated typed host accessors and ROCm address-space lowering
 - generated-kernel performance probes without GUI/readback timing noise
@@ -226,7 +229,9 @@ execution ergonomics on ROCm:
 SGPR, static LDS, dynamic LDS usage, private segment bytes, kernarg size, spills,
 wavefront size, and dynamic-stack usage.
 Generated bindings expose the same facts through `DEVICE_KERNEL_RESOURCES`,
-`DeviceKernels::resources()`, and `DeviceKernels::resource(name)`.
+`DeviceKernels::resources()`, `DeviceKernels::resource(name)`, and a
+`DeviceKernels::module()` accessor for lower-level runtime queries such as HIP
+occupancy planning.
 
 `cargo run --example performance_probe -- --json target/performance_probe.json`
 reports HIP-event GPU time for generated Rust kernels and can write benchmark
@@ -322,8 +327,8 @@ This roadmap is grounded in the current local probe target:
   per-kernel validation path to static LDS cases, ISA checks, and occupancy
   planning.
 - Occupancy and resource model: build on the generated runtime resource table,
-  wrap HIP occupancy APIs, and flag VGPR/SGPR/LDS/private-memory limiters in
-  benchmark output.
+  preserve the new HIP occupancy wrappers, and flag
+  VGPR/SGPR/LDS/private-memory limiters in benchmark output.
 
 ### P1: Runtime Orchestration
 
