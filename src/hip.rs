@@ -19,15 +19,32 @@ pub const HIP_MEMCPY_DEVICE_TO_HOST: c_int = 2;
 pub const HIP_DEVICE_MALLOC_FINEGRAINED: c_uint = 0x1;
 pub const HIP_HOST_MALLOC_MAPPED: c_uint = 0x2;
 pub const HIP_HOST_MALLOC_COHERENT: c_uint = 0x4000_0000;
+pub const HIP_MEM_ATTACH_GLOBAL: c_uint = 0x01;
+pub const HIP_MEM_ADVISE_SET_COARSE_GRAIN: c_int = 100;
+pub const HIP_MEM_ADVISE_UNSET_COARSE_GRAIN: c_int = 101;
 // hipDeviceAttribute_t discriminants used through hipDeviceGetAttribute.
 // Values match ROCm HIP 7.2 headers and the CUDA-compatible enum ordering.
+pub const HIP_DEVICE_ATTRIBUTE_ASYNC_ENGINE_COUNT: c_int = 2;
+pub const HIP_DEVICE_ATTRIBUTE_CAN_MAP_HOST_MEMORY: c_int = 3;
+pub const HIP_DEVICE_ATTRIBUTE_CAN_USE_HOST_POINTER_FOR_REGISTERED_MEM: c_int = 4;
+pub const HIP_DEVICE_ATTRIBUTE_CONCURRENT_MANAGED_ACCESS: c_int = 9;
+pub const HIP_DEVICE_ATTRIBUTE_DIRECT_MANAGED_MEM_ACCESS_FROM_HOST: c_int = 13;
+pub const HIP_DEVICE_ATTRIBUTE_HOST_NATIVE_ATOMIC_SUPPORTED: c_int = 15;
+pub const HIP_DEVICE_ATTRIBUTE_MANAGED_MEMORY: c_int = 24;
 pub const HIP_DEVICE_ATTRIBUTE_MAX_BLOCK_DIM_X: c_int = 26;
 pub const HIP_DEVICE_ATTRIBUTE_MAX_BLOCK_DIM_Y: c_int = 27;
 pub const HIP_DEVICE_ATTRIBUTE_MAX_BLOCK_DIM_Z: c_int = 28;
 pub const HIP_DEVICE_ATTRIBUTE_MAX_THREADS_PER_BLOCK: c_int = 56;
+pub const HIP_DEVICE_ATTRIBUTE_MULTIPROCESSOR_COUNT: c_int = 63;
+pub const HIP_DEVICE_ATTRIBUTE_PAGEABLE_MEMORY_ACCESS: c_int = 65;
+pub const HIP_DEVICE_ATTRIBUTE_PAGEABLE_MEMORY_ACCESS_USES_HOST_PAGE_TABLES: c_int = 66;
 pub const HIP_DEVICE_ATTRIBUTE_MAX_SHARED_MEMORY_PER_BLOCK: c_int = 74;
 pub const HIP_DEVICE_ATTRIBUTE_SHARED_MEM_PER_BLOCK_OPTIN: c_int = 75;
 pub const HIP_DEVICE_ATTRIBUTE_SHARED_MEM_PER_MULTIPROCESSOR: c_int = 76;
+pub const HIP_DEVICE_ATTRIBUTE_UNIFIED_ADDRESSING: c_int = 85;
+pub const HIP_DEVICE_ATTRIBUTE_WARP_SIZE: c_int = 87;
+pub const HIP_DEVICE_ATTRIBUTE_MEMORY_POOLS_SUPPORTED: c_int = 88;
+pub const HIP_DEVICE_ATTRIBUTE_HOST_REGISTER_SUPPORTED: c_int = 90;
 pub const HIP_STREAM_CAPTURE_MODE_GLOBAL: c_int = 0;
 pub const HIP_STREAM_CAPTURE_MODE_THREAD_LOCAL: c_int = 1;
 pub const HIP_STREAM_CAPTURE_MODE_RELAXED: c_int = 2;
@@ -43,13 +60,22 @@ pub const HIP_MEM_POOL_ATTR_USED_MEM_HIGH: c_int = 0x8;
 unsafe extern "C" {
     fn hipGetErrorString(error: HipError) -> *const c_char;
     fn hipGetDeviceCount(count: *mut c_int) -> HipError;
+    fn hipGetDevice(device_id: *mut c_int) -> HipError;
     fn hipSetDevice(device_id: c_int) -> HipError;
     fn hipDeviceGetAttribute(value: *mut c_int, attr: c_int, device_id: c_int) -> HipError;
+    fn hipDeviceCanAccessPeer(
+        can_access_peer: *mut c_int,
+        device_id: c_int,
+        peer_device_id: c_int,
+    ) -> HipError;
+    fn hipDeviceEnablePeerAccess(peer_device_id: c_int, flags: c_uint) -> HipError;
+    fn hipDeviceDisablePeerAccess(peer_device_id: c_int) -> HipError;
     fn hipDeviceGetDefaultMemPool(mem_pool: *mut HipMemPool, device: c_int) -> HipError;
     fn hipDeviceGetMemPool(mem_pool: *mut HipMemPool, device: c_int) -> HipError;
     fn hipDeviceSetMemPool(device: c_int, mem_pool: HipMemPool) -> HipError;
     fn hipMalloc(ptr: *mut *mut c_void, size: usize) -> HipError;
     fn hipExtMallocWithFlags(ptr: *mut *mut c_void, size: usize, flags: c_uint) -> HipError;
+    fn hipMallocManaged(ptr: *mut *mut c_void, size: usize, flags: c_uint) -> HipError;
     fn hipMallocAsync(ptr: *mut *mut c_void, size: usize, stream: HipStream) -> HipError;
     fn hipMallocFromPoolAsync(
         ptr: *mut *mut c_void,
@@ -59,6 +85,7 @@ unsafe extern "C" {
     ) -> HipError;
     fn hipFree(ptr: *mut c_void) -> HipError;
     fn hipFreeAsync(ptr: *mut c_void, stream: HipStream) -> HipError;
+    fn hipMemAdvise(ptr: *const c_void, count: usize, advice: c_int, device: c_int) -> HipError;
     fn hipMemPoolTrimTo(mem_pool: HipMemPool, min_bytes_to_hold: usize) -> HipError;
     fn hipMemPoolSetAttribute(mem_pool: HipMemPool, attr: c_int, value: *mut c_void) -> HipError;
     fn hipMemPoolGetAttribute(mem_pool: HipMemPool, attr: c_int, value: *mut c_void) -> HipError;
@@ -199,6 +226,30 @@ pub fn device_attribute(device_id: i32, attribute: c_int) -> Result<u32> {
     u32_from_hip_int(&format!("HIP device attribute {attribute}"), value)
 }
 
+pub fn device_attribute_bool(device_id: i32, attribute: c_int) -> Result<bool> {
+    Ok(device_attribute(device_id, attribute)? != 0)
+}
+
+pub fn can_access_peer(device_id: i32, peer_device_id: i32) -> Result<bool> {
+    let mut value = 0;
+    unsafe {
+        check(hipDeviceCanAccessPeer(
+            &mut value,
+            device_id,
+            peer_device_id,
+        ))?;
+    }
+    Ok(value != 0)
+}
+
+pub fn enable_peer_access(peer_device_id: i32) -> Result<()> {
+    unsafe { check(hipDeviceEnablePeerAccess(peer_device_id, 0)) }
+}
+
+pub fn disable_peer_access(peer_device_id: i32) -> Result<()> {
+    unsafe { check(hipDeviceDisablePeerAccess(peer_device_id)) }
+}
+
 fn u32_from_hip_int(label: &str, value: c_int) -> Result<u32> {
     u32::try_from(value)
         .map_err(|_| Error::invalid_value(format!("{label} returned negative value {value}")))
@@ -228,6 +279,12 @@ fn validate_slice_len(label: &str, actual: usize, expected: usize) -> Result<()>
             "{label} length mismatch: got {actual}, expected {expected}"
         )))
     }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ManagedMemoryKind {
+    FineGrain,
+    CoarseGrain,
 }
 
 #[derive(Clone, Copy)]
@@ -545,6 +602,114 @@ pub struct DeviceBuffer<T> {
 
 unsafe impl<T: Send> Send for DeviceBuffer<T> {}
 unsafe impl<T: Sync> Sync for DeviceBuffer<T> {}
+
+pub struct ManagedBuffer<T> {
+    ptr: *mut T,
+    len: usize,
+    kind: ManagedMemoryKind,
+}
+
+unsafe impl<T: Send> Send for ManagedBuffer<T> {}
+unsafe impl<T: Sync> Sync for ManagedBuffer<T> {}
+
+impl<T> ManagedBuffer<T> {
+    pub fn new_zeroed(len: usize) -> Result<Self> {
+        Self::new_zeroed_with_kind(len, ManagedMemoryKind::FineGrain)
+    }
+
+    pub fn new_zeroed_coarse_grained(len: usize) -> Result<Self> {
+        Self::new_zeroed_with_kind(len, ManagedMemoryKind::CoarseGrain)
+    }
+
+    fn new_zeroed_with_kind(len: usize, kind: ManagedMemoryKind) -> Result<Self> {
+        let bytes = checked_allocation_bytes::<T>(len, "managed")?;
+        let coarse_grain_device = if matches!(kind, ManagedMemoryKind::CoarseGrain) {
+            Some(current_device()?)
+        } else {
+            None
+        };
+        if bytes == 0 {
+            return Ok(Self {
+                ptr: NonNull::<T>::dangling().as_ptr(),
+                len,
+                kind,
+            });
+        }
+
+        let mut ptr = ptr::null_mut();
+        unsafe {
+            if let Err(err) = check(hipMallocManaged(&mut ptr, bytes, HIP_MEM_ATTACH_GLOBAL)) {
+                if !ptr.is_null() {
+                    let _ = hipFree(ptr);
+                }
+                return Err(err);
+            }
+            if matches!(kind, ManagedMemoryKind::CoarseGrain)
+                && let Err(err) = check(hipMemAdvise(
+                    ptr.cast::<c_void>(),
+                    bytes,
+                    HIP_MEM_ADVISE_SET_COARSE_GRAIN,
+                    coarse_grain_device.expect("coarse-grain device must be queried"),
+                ))
+            {
+                let _ = hipFree(ptr);
+                return Err(err);
+            }
+            ptr::write_bytes(ptr.cast::<u8>(), 0, bytes);
+        }
+        Ok(Self {
+            ptr: ptr.cast::<T>(),
+            len,
+            kind,
+        })
+    }
+
+    pub fn kind(&self) -> ManagedMemoryKind {
+        self.kind
+    }
+
+    pub fn as_slice(&self) -> &[T] {
+        unsafe { std::slice::from_raw_parts(self.ptr, self.len) }
+    }
+
+    pub fn as_mut_slice(&mut self) -> &mut [T] {
+        unsafe { std::slice::from_raw_parts_mut(self.ptr, self.len) }
+    }
+
+    pub fn as_ptr(&self) -> *const T {
+        self.ptr
+    }
+
+    pub fn as_mut_ptr(&self) -> *mut T {
+        self.ptr
+    }
+
+    pub fn len(&self) -> usize {
+        self.len
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.len == 0
+    }
+}
+
+impl<T: Copy> ManagedBuffer<T> {
+    pub fn from_slice(input: &[T]) -> Result<Self> {
+        let mut buffer = Self::new_zeroed(input.len())?;
+        buffer.as_mut_slice().copy_from_slice(input);
+        Ok(buffer)
+    }
+}
+
+impl<T> Drop for ManagedBuffer<T> {
+    fn drop(&mut self) {
+        if self.len != 0 && !self.ptr.is_null() {
+            unsafe {
+                let _ = hipFree(self.ptr.cast::<c_void>());
+            }
+        }
+    }
+}
 
 impl<T> DeviceBuffer<T> {
     pub fn new(len: usize) -> Result<Self> {
@@ -1154,13 +1319,21 @@ pub fn device_count() -> Result<i32> {
     Ok(count)
 }
 
+pub fn current_device() -> Result<i32> {
+    let mut device_id = 0;
+    unsafe {
+        check(hipGetDevice(&mut device_id))?;
+    }
+    Ok(device_id)
+}
+
 pub fn set_device(device_id: i32) -> Result<()> {
     unsafe { check(hipSetDevice(device_id)) }
 }
 
 #[cfg(test)]
 mod tests {
-    use super::{DeviceBuffer, Global, PinnedHostBuffer};
+    use super::{DeviceBuffer, Global, ManagedBuffer, PinnedHostBuffer};
 
     #[test]
     fn device_allocation_size_overflow_is_error() {
@@ -1173,6 +1346,14 @@ mod tests {
     #[test]
     fn pinned_allocation_size_overflow_is_error() {
         let Err(err) = PinnedHostBuffer::<u16>::new_zeroed(usize::MAX) else {
+            panic!("overflow should fail");
+        };
+        assert!(err.to_string().contains("allocation size overflow"));
+    }
+
+    #[test]
+    fn managed_allocation_size_overflow_is_error() {
+        let Err(err) = ManagedBuffer::<u16>::new_zeroed(usize::MAX) else {
             panic!("overflow should fail");
         };
         assert!(err.to_string().contains("allocation size overflow"));

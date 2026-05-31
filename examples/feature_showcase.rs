@@ -1,6 +1,6 @@
 use rocm_oxide::{
-    Device, DeviceBuffer, DeviceOperation, Dim3, ExecutionContext, LaunchConfig, PinnedHostBuffer,
-    Result, StreamPool,
+    AtomicMemoryKind, Device, DeviceBuffer, DeviceOperation, Dim3, ExecutionContext, LaunchConfig,
+    ManagedBuffer, ManagedMemoryKind, PinnedHostBuffer, Result, StreamPool,
 };
 use std::sync::{Arc, mpsc};
 use std::time::Duration;
@@ -221,6 +221,30 @@ fn main() -> Result<()> {
     default_mem_pool.trim_to(0)?;
     println!("ok: HIP stream-ordered memory pool controls handled async allocation");
 
+    let properties = device.properties()?;
+    assert!(properties.warp_size > 0);
+    assert!(properties.multiprocessor_count > 0);
+    if properties.can_map_host_memory {
+        assert_eq!(
+            properties.mapped_host_memory_kind(),
+            Some(AtomicMemoryKind::MappedCoherentHost)
+        );
+    }
+    let visible_devices = Device::all()?;
+    assert!(!visible_devices.is_empty());
+    if visible_devices.len() > 1 {
+        let can_peer = visible_devices[0].can_access_peer(&visible_devices[1])?;
+        if can_peer
+            && visible_devices[0]
+                .enable_peer_access(&visible_devices[1])
+                .is_ok()
+        {
+            visible_devices[0].disable_peer_access(&visible_devices[1])?;
+        }
+    }
+    rocm_oxide::hip::set_device(device.ordinal())?;
+    println!("ok: device properties and peer-access probes described host memory support");
+
     let atomic_out = DeviceBuffer::<u32>::new(4)?;
     let atomic_counters = DeviceBuffer::from_slice(&[0u32; 3])?;
     unsafe {
@@ -259,6 +283,50 @@ fn main() -> Result<()> {
     rocm_oxide::hip::synchronize()?;
     verify_scoped_atomic_outputs(host_atomic_out.as_slice(), host_atomic_counters.as_slice());
     println!("ok: scoped atomic kernel updated mapped coherent host-visible counters");
+
+    if properties.managed_memory {
+        let managed_kind = properties
+            .managed_memory_kind(ManagedMemoryKind::FineGrain)
+            .expect("managed memory property should classify managed allocations");
+        assert!(matches!(
+            managed_kind,
+            AtomicMemoryKind::ManagedFineGrain | AtomicMemoryKind::ManagedCoarseGrain
+        ));
+        let managed_atomic_out = ManagedBuffer::<u32>::new_zeroed(4)?;
+        let managed_atomic_counters = ManagedBuffer::<u32>::new_zeroed(3)?;
+        launch_scoped_atomics_raw(
+            &kernels,
+            managed_atomic_out.as_mut_ptr(),
+            managed_atomic_out.len(),
+            managed_atomic_counters.as_mut_ptr(),
+            managed_atomic_counters.len(),
+        )?;
+        rocm_oxide::hip::synchronize()?;
+        verify_scoped_atomic_outputs(
+            managed_atomic_out.as_slice(),
+            managed_atomic_counters.as_slice(),
+        );
+
+        let coarse_atomic_out = ManagedBuffer::<u32>::new_zeroed_coarse_grained(4)?;
+        let coarse_atomic_counters = ManagedBuffer::<u32>::new_zeroed_coarse_grained(3)?;
+        assert_eq!(
+            properties.managed_memory_kind(coarse_atomic_counters.kind()),
+            Some(AtomicMemoryKind::ManagedCoarseGrain)
+        );
+        launch_scoped_atomics_raw(
+            &kernels,
+            coarse_atomic_out.as_mut_ptr(),
+            coarse_atomic_out.len(),
+            coarse_atomic_counters.as_mut_ptr(),
+            coarse_atomic_counters.len(),
+        )?;
+        rocm_oxide::hip::synchronize()?;
+        verify_scoped_atomic_outputs(
+            coarse_atomic_out.as_slice(),
+            coarse_atomic_counters.as_slice(),
+        );
+        println!("ok: scoped atomic kernel updated managed fine/coarse host-visible counters");
+    }
 
     let reduce_n = 768usize;
     let reduce_block_x = 128u32;

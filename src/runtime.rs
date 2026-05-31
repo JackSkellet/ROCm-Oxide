@@ -62,20 +62,42 @@ pub struct Device {
 }
 
 impl Device {
+    pub fn count() -> Result<i32> {
+        Ok(hip::device_count()?)
+    }
+
     pub fn first() -> Result<Self> {
+        Self::at(0)
+    }
+
+    pub fn at(ordinal: i32) -> Result<Self> {
         let count = hip::device_count()?;
         if count == 0 {
             return Err(Error::NoDevice);
         }
+        if ordinal < 0 || ordinal >= count {
+            return Err(Error::InvalidLaunch(format!(
+                "device ordinal {ordinal} is outside visible HIP device range 0..{count}"
+            )));
+        }
 
-        hip::set_device(0)?;
+        hip::set_device(ordinal)?;
         let arch = detect_arch().ok_or(Error::MissingArchitecture)?;
-        let limits = DeviceLimits::query(0)?;
+        let limits = DeviceLimits::query(ordinal)?;
         Ok(Self {
-            ordinal: 0,
+            ordinal,
             arch,
             limits,
         })
+    }
+
+    pub fn all() -> Result<Vec<Self>> {
+        let count = Self::count()?;
+        let mut devices = Vec::with_capacity(count as usize);
+        for ordinal in 0..count {
+            devices.push(Self::at(ordinal)?);
+        }
+        Ok(devices)
     }
 
     pub fn ordinal(&self) -> i32 {
@@ -88,6 +110,10 @@ impl Device {
 
     pub fn limits(&self) -> DeviceLimits {
         self.limits
+    }
+
+    pub fn properties(&self) -> Result<DeviceProperties> {
+        DeviceProperties::query(self.ordinal)
     }
 
     pub fn compile_hip_source(&self, source: &str) -> Result<Module> {
@@ -122,6 +148,125 @@ impl Device {
 
     pub fn set_mem_pool(&self, pool: hip::MemPool) -> Result<()> {
         Ok(pool.set_current_for_device(self.ordinal)?)
+    }
+
+    pub fn can_access_peer(&self, peer: &Device) -> Result<bool> {
+        Ok(hip::can_access_peer(self.ordinal, peer.ordinal)?)
+    }
+
+    pub fn enable_peer_access(&self, peer: &Device) -> Result<()> {
+        hip::set_device(self.ordinal)?;
+        Ok(hip::enable_peer_access(peer.ordinal)?)
+    }
+
+    pub fn disable_peer_access(&self, peer: &Device) -> Result<()> {
+        hip::set_device(self.ordinal)?;
+        Ok(hip::disable_peer_access(peer.ordinal)?)
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct DeviceProperties {
+    pub ordinal: i32,
+    pub managed_memory: bool,
+    pub concurrent_managed_access: bool,
+    pub direct_managed_mem_access_from_host: bool,
+    pub can_map_host_memory: bool,
+    pub can_use_host_pointer_for_registered_mem: bool,
+    pub host_native_atomic_supported: bool,
+    pub pageable_memory_access: bool,
+    pub pageable_memory_access_uses_host_page_tables: bool,
+    pub memory_pools_supported: bool,
+    pub unified_addressing: bool,
+    pub host_register_supported: bool,
+    pub async_engine_count: u32,
+    pub multiprocessor_count: u32,
+    pub warp_size: u32,
+}
+
+impl DeviceProperties {
+    fn query(ordinal: i32) -> Result<Self> {
+        Ok(Self {
+            ordinal,
+            managed_memory: hip::device_attribute_bool(
+                ordinal,
+                hip::HIP_DEVICE_ATTRIBUTE_MANAGED_MEMORY,
+            )?,
+            concurrent_managed_access: hip::device_attribute_bool(
+                ordinal,
+                hip::HIP_DEVICE_ATTRIBUTE_CONCURRENT_MANAGED_ACCESS,
+            )?,
+            direct_managed_mem_access_from_host: hip::device_attribute_bool(
+                ordinal,
+                hip::HIP_DEVICE_ATTRIBUTE_DIRECT_MANAGED_MEM_ACCESS_FROM_HOST,
+            )?,
+            can_map_host_memory: hip::device_attribute_bool(
+                ordinal,
+                hip::HIP_DEVICE_ATTRIBUTE_CAN_MAP_HOST_MEMORY,
+            )?,
+            can_use_host_pointer_for_registered_mem: hip::device_attribute_bool(
+                ordinal,
+                hip::HIP_DEVICE_ATTRIBUTE_CAN_USE_HOST_POINTER_FOR_REGISTERED_MEM,
+            )?,
+            host_native_atomic_supported: hip::device_attribute_bool(
+                ordinal,
+                hip::HIP_DEVICE_ATTRIBUTE_HOST_NATIVE_ATOMIC_SUPPORTED,
+            )?,
+            pageable_memory_access: hip::device_attribute_bool(
+                ordinal,
+                hip::HIP_DEVICE_ATTRIBUTE_PAGEABLE_MEMORY_ACCESS,
+            )?,
+            pageable_memory_access_uses_host_page_tables: hip::device_attribute_bool(
+                ordinal,
+                hip::HIP_DEVICE_ATTRIBUTE_PAGEABLE_MEMORY_ACCESS_USES_HOST_PAGE_TABLES,
+            )?,
+            memory_pools_supported: hip::device_attribute_bool(
+                ordinal,
+                hip::HIP_DEVICE_ATTRIBUTE_MEMORY_POOLS_SUPPORTED,
+            )?,
+            unified_addressing: hip::device_attribute_bool(
+                ordinal,
+                hip::HIP_DEVICE_ATTRIBUTE_UNIFIED_ADDRESSING,
+            )?,
+            host_register_supported: hip::device_attribute_bool(
+                ordinal,
+                hip::HIP_DEVICE_ATTRIBUTE_HOST_REGISTER_SUPPORTED,
+            )?,
+            async_engine_count: hip::device_attribute(
+                ordinal,
+                hip::HIP_DEVICE_ATTRIBUTE_ASYNC_ENGINE_COUNT,
+            )?,
+            multiprocessor_count: hip::device_attribute(
+                ordinal,
+                hip::HIP_DEVICE_ATTRIBUTE_MULTIPROCESSOR_COUNT,
+            )?,
+            warp_size: hip::device_attribute(ordinal, hip::HIP_DEVICE_ATTRIBUTE_WARP_SIZE)?,
+        })
+    }
+
+    pub const fn mapped_host_memory_kind(self) -> Option<AtomicMemoryKind> {
+        if self.can_map_host_memory {
+            Some(AtomicMemoryKind::MappedCoherentHost)
+        } else {
+            None
+        }
+    }
+
+    pub const fn managed_memory_kind(
+        self,
+        requested: hip::ManagedMemoryKind,
+    ) -> Option<AtomicMemoryKind> {
+        if !self.managed_memory {
+            return None;
+        }
+        match requested {
+            hip::ManagedMemoryKind::FineGrain if self.concurrent_managed_access => {
+                Some(AtomicMemoryKind::ManagedFineGrain)
+            }
+            hip::ManagedMemoryKind::FineGrain | hip::ManagedMemoryKind::CoarseGrain => {
+                Some(AtomicMemoryKind::ManagedCoarseGrain)
+            }
+        }
     }
 }
 
@@ -723,10 +868,10 @@ fn rocminfo_path() -> PathBuf {
 #[cfg(test)]
 mod tests {
     use super::{
-        AtomicMemoryKind, DeviceLimits, Dim3, KernelMetadata, LaunchConfig,
+        AtomicMemoryKind, DeviceLimits, DeviceProperties, Dim3, KernelMetadata, LaunchConfig,
         SystemScopeAtomicVisibility,
     };
-    use crate::hip::DeviceBuffer;
+    use crate::hip::{DeviceBuffer, ManagedMemoryKind};
 
     #[test]
     fn one_dimensional_launch_config_rounds_up() {
@@ -830,6 +975,65 @@ mod tests {
         );
         assert!(!AtomicMemoryKind::ManagedCoarseGrain.allows_host_concurrent_system_scope());
         assert!(AtomicMemoryKind::MappedCoherentHost.allows_host_concurrent_system_scope());
+    }
+
+    #[test]
+    fn device_properties_classify_host_visible_memory() {
+        let props = DeviceProperties {
+            ordinal: 0,
+            managed_memory: true,
+            concurrent_managed_access: true,
+            direct_managed_mem_access_from_host: true,
+            can_map_host_memory: true,
+            can_use_host_pointer_for_registered_mem: true,
+            host_native_atomic_supported: true,
+            pageable_memory_access: true,
+            pageable_memory_access_uses_host_page_tables: true,
+            memory_pools_supported: true,
+            unified_addressing: true,
+            host_register_supported: true,
+            async_engine_count: 2,
+            multiprocessor_count: 64,
+            warp_size: 32,
+        };
+        assert_eq!(
+            props.managed_memory_kind(ManagedMemoryKind::FineGrain),
+            Some(AtomicMemoryKind::ManagedFineGrain)
+        );
+        assert_eq!(
+            props.managed_memory_kind(ManagedMemoryKind::CoarseGrain),
+            Some(AtomicMemoryKind::ManagedCoarseGrain)
+        );
+        assert_eq!(
+            props.mapped_host_memory_kind(),
+            Some(AtomicMemoryKind::MappedCoherentHost)
+        );
+    }
+
+    #[test]
+    fn device_properties_downgrade_managed_without_concurrent_access() {
+        let props = DeviceProperties {
+            ordinal: 0,
+            managed_memory: true,
+            concurrent_managed_access: false,
+            direct_managed_mem_access_from_host: false,
+            can_map_host_memory: false,
+            can_use_host_pointer_for_registered_mem: false,
+            host_native_atomic_supported: false,
+            pageable_memory_access: false,
+            pageable_memory_access_uses_host_page_tables: false,
+            memory_pools_supported: false,
+            unified_addressing: false,
+            host_register_supported: false,
+            async_engine_count: 0,
+            multiprocessor_count: 1,
+            warp_size: 32,
+        };
+        assert_eq!(
+            props.managed_memory_kind(ManagedMemoryKind::FineGrain),
+            Some(AtomicMemoryKind::ManagedCoarseGrain)
+        );
+        assert_eq!(props.mapped_host_memory_kind(), None);
     }
 
     #[test]

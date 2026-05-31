@@ -35,10 +35,15 @@ features on top of stronger contracts.
 
 Local probes on 2026-05-31:
 
-- GPU agent: `gfx1201`, AMD Radeon RX 9070 XT.
+- GPU target: `gfx1201`, AMD Radeon RX 9070 XT.
 - HIP/runtime: `7.2.53211-364a905`; AMD LLVM/clang: `22.0.0git`.
 - Device limits from `rocminfo`: wavefront size 32, max workgroup size 1024,
   max waves per CU 32, 64 KB group/LDS segment.
+- HIP host-memory properties: one device; managed memory, concurrent managed
+  access, host-native atomics, host mapped memory, host registration, and memory
+  pools are available; direct host access to device-resident managed memory,
+  pageable-memory access, and registered host-pointer reuse are not reported on
+  this dGPU.
 - Current generated artifact: 15 kernels, 20 buffer contracts, max VGPR 33, max
   SGPR 26, max kernarg 368 bytes, max static LDS 1024 bytes, one
   dynamic-LDS kernel, and no dynamic stack users.
@@ -85,10 +90,10 @@ Local probes on 2026-05-31:
   - [x] add memory-pool controls around `hipMallocAsync`/`hipFreeAsync`
   - [x] preserve allocation lifetimes across queued generated operations
   - [x] document stream-ordering requirements for async buffers
-- [ ] Multi-device and host-memory coherence:
-  - [ ] model coarse/fine-grained memory pools and host visibility
-  - [ ] add pinned, managed, and peer-memory contract tests
-  - [ ] expose device properties needed by generated launch validation
+- [x] Multi-device and host-memory coherence:
+  - [x] model coarse/fine-grained memory pools and host visibility
+  - [x] add pinned, managed, and peer-memory contract tests
+  - [x] expose device properties needed by generated launch validation
 
 ### P1: Compiler Completeness
 

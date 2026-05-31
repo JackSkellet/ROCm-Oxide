@@ -211,9 +211,13 @@ execution ergonomics on ROCm:
 - synchronous pinned-buffer copies
 - explicit fine-grained device allocation through `DeviceBuffer::new_fine_grained`
 - mapped coherent pinned host buffers for host-visible GPU access
+- `ManagedBuffer<T>` for HIP managed memory with fine/coarse-grain host
+  visibility modeling
 - HIP stream-ordered `DeviceBuffer::new_async` and explicit `free_async`
 - `MemPool` controls for HIP default/current memory pools, release thresholds,
   reuse toggles, stats, trimming, and `DeviceBuffer::new_from_pool_async`
+- `Device::properties`, `Device::all`, and peer-access probes for
+  multi-device/host-memory launch validation
 - fallible allocation-size and copy-length validation instead of panics
 - lazy `DeviceOperation` values with `.sync`, `.sync_on`, `.async_on`,
   `.async_in`, `.capture_graph`, `.capture_graph_on`, `.map`, `.and_then`, and
@@ -319,6 +323,8 @@ relaxed `u32` atomic compatibility helpers so device code does not need to call
 `core::arch::amdgpu` directly.
 Atomic memory visibility rules are documented in
 [docs/atomic-scopes.md](/home/jack/Documents/GitKraken_Projects/ROCm-Oxide/docs/atomic-scopes.md).
+Host-memory coherence rules are documented in
+[docs/host-memory-coherence.md](/home/jack/Documents/GitKraken_Projects/ROCm-Oxide/docs/host-memory-coherence.md).
 Stream-ordered allocation rules are documented in
 [docs/stream-ordered-allocation.md](/home/jack/Documents/GitKraken_Projects/ROCm-Oxide/docs/stream-ordered-allocation.md).
 
@@ -331,6 +337,11 @@ This roadmap is grounded in the current local probe target:
 - AMD LLVM/clang: `22.0.0git`.
 - Device limits seen through `rocminfo`: wavefront size 32, max workgroup size
   1024, max waves per CU 32, and 64 KB group/LDS segment.
+- HIP host-memory probe: one device, managed memory, concurrent managed access,
+  host-native atomics, host mapped memory, host registration, and memory pools
+  are reported available; direct host access to device-resident managed memory,
+  pageable-memory access, and registered host-pointer reuse are not reported on
+  this dGPU.
 - Current generated artifact: 15 kernels, 20 buffer contracts, max VGPR 33, max
   SGPR 26, max kernarg 368 bytes, max static LDS 1024 bytes, one
   dynamic-LDS kernel, and no dynamic stack users.
@@ -361,8 +372,9 @@ This roadmap is grounded in the current local probe target:
 - Stream-ordered allocation maturity: memory-pool controls wrap
   `hipMallocAsync`/`hipFreeAsync`, generated operations retain queued buffer
   lifetimes, and async buffer ordering rules are documented.
-- Multi-device and host-memory coherence: model coarse/fine-grained memory pools,
-  pinned/managed/peer memory, and device properties needed by launch validation.
+- Multi-device and host-memory coherence: device properties, peer probes,
+  mapped pinned memory, and managed fine/coarse visibility are modeled and
+  verified through runtime checks.
 
 ### P1: Compiler Completeness
 
@@ -384,6 +396,9 @@ Roadmap source docs:
 [HIP launch API](https://rocm.docs.amd.com/projects/HIP/en/latest/reference/hip_runtime_api/modules/launch_api.html),
 [HIP graphs](https://rocm.docs.amd.com/projects/HIP/en/docs-6.4.0/how-to/hip_runtime_api/hipgraph.html),
 [stream ordered memory allocator](https://rocm.docs.amd.com/projects/HIP/en/docs-7.0.0/how-to/hip_runtime_api/memory_management/stream_ordered_allocator.html),
+[HIP coherence control](https://rocm.docs.amd.com/projects/HIP/en/latest/how-to/hip_runtime_api/memory_management/coherence_control.html),
+[HIP unified memory](https://rocm.docs.amd.com/projects/HIP/en/docs-6.2.0/how-to/unified_memory.html),
+[HIP peer-to-peer memory access](https://rocm.docs.amd.com/projects/HIP/en/docs-7.1.0/doxygen/html/group___peer_to_peer.html),
 [HIP atomics](https://rocm.docs.amd.com/projects/HIP/en/develop/how-to/hip_cpp_language_extensions.html#atomic-functions),
 [ROCm hardware atomics](https://rocm.docs.amd.com/en/latest/reference/gpu-atomics-operation.html),
 [AMDGPU LLVM backend](https://rocm.docs.amd.com/projects/llvm-project/en/latest/LLVM/llvm/html/AMDGPUUsage.html),

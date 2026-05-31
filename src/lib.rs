@@ -3,14 +3,17 @@ pub mod hiprtc;
 pub mod operation;
 mod runtime;
 
-pub use hip::{DeviceBuffer, Event, Global, MemPool, PinnedHostBuffer, Stream};
+pub use hip::{
+    DeviceBuffer, Event, Global, ManagedBuffer, ManagedMemoryKind, MemPool, PinnedHostBuffer,
+    Stream,
+};
 pub use operation::{
     CapturedGraph, DeviceFuture, DeviceOperation, ExecutionContext, KernelLaunchCompletion,
     StreamPool, Value,
 };
 pub use runtime::{
-    AtomicMemoryKind, Device, DeviceLimits, DeviceSlice, DeviceSliceMut, Dim3, Error, Kernel,
-    KernelMetadata, KernelResource, LaunchConfig, LaunchRecommendation, Module,
+    AtomicMemoryKind, Device, DeviceLimits, DeviceProperties, DeviceSlice, DeviceSliceMut, Dim3,
+    Error, Kernel, KernelMetadata, KernelResource, LaunchConfig, LaunchRecommendation, Module,
     OccupancyActiveBlocks, OccupancyMaxPotentialBlockSize, Result, SystemScopeAtomicVisibility,
     validate_block_x, validate_buffer_len, validate_device_buffers_disjoint,
     validate_launch_config, validate_launch_config_for_limits,
