@@ -282,9 +282,7 @@ fn handle_mouse(
 ) {
     let mouse_down = window.get_mouse_down(MouseButton::Left);
     let mouse_clicked = mouse_down && !*mouse_was_down;
-    if let Some((mx, my)) = window.get_mouse_pos(MouseMode::Discard) {
-        let x = mx.max(0.0) as usize;
-        let y = my.max(0.0) as usize;
+    if let Some((x, y)) = buffer_mouse_pos(window) {
         if mouse_down {
             handle_slider_drag(state, x, y);
         }
@@ -293,6 +291,22 @@ fn handle_mouse(
         }
     }
     *mouse_was_down = mouse_down;
+}
+
+fn buffer_mouse_pos(window: &Window) -> Option<(usize, usize)> {
+    let (mx, my) = window.get_unscaled_mouse_pos(MouseMode::Discard)?;
+    let (win_w, win_h) = window.get_size();
+    if win_w == 0 || win_h == 0 {
+        return None;
+    }
+
+    let x = ((mx.max(0.0) as f64) * WIDTH as f64 / win_w as f64)
+        .floor()
+        .clamp(0.0, (WIDTH - 1) as f64) as usize;
+    let y = ((my.max(0.0) as f64) * HEIGHT as f64 / win_h as f64)
+        .floor()
+        .clamp(0.0, (HEIGHT - 1) as f64) as usize;
+    Some((x, y))
 }
 
 fn handle_click(
