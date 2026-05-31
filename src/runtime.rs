@@ -219,6 +219,45 @@ impl KernelResource {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AtomicMemoryKind {
+    DefaultDevice,
+    FineGrainedDevice,
+    MappedCoherentHost,
+    ManagedFineGrain,
+    ManagedCoarseGrain,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SystemScopeAtomicVisibility {
+    DeviceOnly,
+    HostVisibleAfterSynchronization,
+    HostVisibleDuringKernel,
+}
+
+impl AtomicMemoryKind {
+    pub const fn system_scope_visibility(self) -> SystemScopeAtomicVisibility {
+        match self {
+            Self::DefaultDevice | Self::FineGrainedDevice => {
+                SystemScopeAtomicVisibility::DeviceOnly
+            }
+            Self::MappedCoherentHost | Self::ManagedFineGrain => {
+                SystemScopeAtomicVisibility::HostVisibleDuringKernel
+            }
+            Self::ManagedCoarseGrain => {
+                SystemScopeAtomicVisibility::HostVisibleAfterSynchronization
+            }
+        }
+    }
+
+    pub const fn allows_host_concurrent_system_scope(self) -> bool {
+        matches!(
+            self.system_scope_visibility(),
+            SystemScopeAtomicVisibility::HostVisibleDuringKernel
+        )
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct OccupancyMaxPotentialBlockSize {
     pub min_grid_size: u32,
     pub block_size: u32,
@@ -622,7 +661,10 @@ fn rocminfo_path() -> PathBuf {
 
 #[cfg(test)]
 mod tests {
-    use super::{DeviceLimits, Dim3, KernelMetadata, LaunchConfig};
+    use super::{
+        AtomicMemoryKind, DeviceLimits, Dim3, KernelMetadata, LaunchConfig,
+        SystemScopeAtomicVisibility,
+    };
     use crate::hip::DeviceBuffer;
 
     #[test]
@@ -704,6 +746,29 @@ mod tests {
             super::validate_launch_config_for_limits(config, DeviceLimits::prototype(), metadata)
                 .expect_err("dynamic LDS kernel should need dynamic bytes");
         assert!(err.to_string().contains("requested 0 dynamic bytes"));
+    }
+
+    #[test]
+    fn system_scope_visibility_does_not_promote_device_memory_to_host_concurrent() {
+        assert_eq!(
+            AtomicMemoryKind::DefaultDevice.system_scope_visibility(),
+            SystemScopeAtomicVisibility::DeviceOnly
+        );
+        assert_eq!(
+            AtomicMemoryKind::FineGrainedDevice.system_scope_visibility(),
+            SystemScopeAtomicVisibility::DeviceOnly
+        );
+        assert!(!AtomicMemoryKind::DefaultDevice.allows_host_concurrent_system_scope());
+    }
+
+    #[test]
+    fn coarse_managed_memory_limits_system_scope_to_synchronization_boundaries() {
+        assert_eq!(
+            AtomicMemoryKind::ManagedCoarseGrain.system_scope_visibility(),
+            SystemScopeAtomicVisibility::HostVisibleAfterSynchronization
+        );
+        assert!(!AtomicMemoryKind::ManagedCoarseGrain.allows_host_concurrent_system_scope());
+        assert!(AtomicMemoryKind::MappedCoherentHost.allows_host_concurrent_system_scope());
     }
 
     #[test]

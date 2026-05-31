@@ -304,6 +304,8 @@ typed device slices, math helpers for `sqrt`, `rsqrt`, `sin`, `cos`, `atan`,
 min/max, scoped `u32` atomics for workgroup/device/system intent, and the basic
 relaxed `u32` atomic compatibility helpers so device code does not need to call
 `core::arch::amdgpu` directly.
+Atomic memory visibility rules are documented in
+[docs/atomic-scopes.md](/home/jack/Documents/GitKraken_Projects/ROCm-Oxide/docs/atomic-scopes.md).
 
 ## Roadmap
 
