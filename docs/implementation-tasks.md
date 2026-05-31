@@ -107,10 +107,10 @@ Local probes on 2026-05-31:
   - [x] preserve link inputs in generated metadata
   - [x] require merged linked-HSACO metadata for every generated kernel
   - [x] investigate HIP module/library enumeration and loading APIs for artifact inspection
-- [ ] Toolchain discovery hardening:
-  - [ ] prefer `ROCM_PATH`/`HIP_PATH`, then `/opt/rocm`, then `PATH`
-  - [ ] validate `llc`, `clang`, `llvm-readelf`, `rocminfo`, and `rocm_agent_enumerator`
-  - [ ] emit one doctor report with versions, target arch, and build-std status
+- [x] Toolchain discovery hardening:
+  - [x] prefer explicit tool overrides, `ROCM_PATH`/`HIP_PATH`, `/opt/rocm`, then `PATH`
+  - [x] validate `llc`, `clang`, `llvm-readelf`, `llvm-objdump`, `rocminfo`, and `rocm_agent_enumerator`
+  - [x] emit one doctor report with versions, target arch, `rust-src`, and build-std status
 
 ### P2: ROCm-Specific Feature Parity
 

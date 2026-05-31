@@ -105,7 +105,7 @@ fn run() -> Result<(), String> {
         kernel_irs.push(kernel_ir.clone());
 
         run_command(
-            Command::new(&tools.llc)
+            Command::new(&tools.llc.path)
                 .arg("-mtriple=amdgcn-amd-amdhsa")
                 .arg(format!("-mcpu={arch}"))
                 .arg("-filetype=obj")
@@ -117,10 +117,10 @@ fn run() -> Result<(), String> {
         if crate_kernels.contains_key("lds_block_sum")
             || crate_kernels.contains_key("static_lds_reverse")
         {
-            verify_lds_artifacts(&kernel_ir, &obj, &tools.llvm_objdump)?;
+            verify_lds_artifacts(&kernel_ir, &obj, &tools.llvm_objdump.path)?;
         }
         if crate_kernels.contains_key("scoped_atomics") {
-            verify_scoped_atomic_artifacts(&kernel_ir, &obj, &tools.llvm_objdump)?;
+            verify_scoped_atomic_artifacts(&kernel_ir, &obj, &tools.llvm_objdump.path)?;
         }
         objects.push(obj.clone());
         link_inputs.push(LinkInput {
@@ -143,7 +143,7 @@ fn run() -> Result<(), String> {
     let metadata = release_dir.join(format!("{}.metadata.json", args.output_stem));
     let bindings = release_dir.join(format!("{}.bindings.rs", args.output_stem));
 
-    let mut link = Command::new(&tools.clang);
+    let mut link = Command::new(&tools.clang.path);
     link.arg("-target")
         .arg("amdgcn-amd-amdhsa")
         .arg(format!("-mcpu={arch}"));
@@ -153,8 +153,8 @@ fn run() -> Result<(), String> {
     link.arg("-o").arg(&hsaco);
     run_command(&mut link, "link AMDGPU code object with ROCm clang")?;
 
-    validate_code_object(&hsaco, &kernel_names, &tools.llvm_readelf)?;
-    let mut code_object_metadata = read_code_object_metadata(&hsaco, &tools.llvm_readelf)?;
+    validate_code_object(&hsaco, &kernel_names, &tools.llvm_readelf.path)?;
+    let mut code_object_metadata = read_code_object_metadata(&hsaco, &tools.llvm_readelf.path)?;
     for kernel_ir in &kernel_irs {
         annotate_dynamic_shared_mem_from_ir(&mut code_object_metadata, kernel_ir)?;
     }
@@ -253,16 +253,25 @@ fn doctor() -> Result<(), String> {
     report_tool("rustc", &["--version"])?;
     report_amdgpu_target()?;
     report_rust_src()?;
+    report_tool_search_order();
     let tools = ToolPaths::discover()?;
     report_rocm_tool("ROCm llc", &tools.llc)?;
     report_llc_amdgcn(&tools.llc)?;
     report_rocm_tool("ROCm clang", &tools.clang)?;
     report_rocm_tool("ROCm llvm-readelf", &tools.llvm_readelf)?;
     report_rocm_tool("ROCm llvm-objdump", &tools.llvm_objdump)?;
+    let rocminfo = find_rocm_tool("ROCMINFO", "rocminfo", ToolLayout::Bin, &[])?;
+    let rocm_agent_enumerator = find_rocm_tool(
+        "ROCM_AGENT_ENUMERATOR",
+        "rocm_agent_enumerator",
+        ToolLayout::Bin,
+        &[],
+    )?;
 
-    let arch = match detect_arch() {
+    let rocminfo_summary = report_rocminfo(&rocminfo)?;
+    let arch = match rocminfo_summary.arch {
         Some(arch) => {
-            println!("ok: detected AMD GPU architecture {arch}");
+            println!("ok: selected AMD GPU architecture {arch}");
             arch
         }
         None => {
@@ -271,9 +280,10 @@ fn doctor() -> Result<(), String> {
             );
         }
     };
+    report_rocm_agents(&rocm_agent_enumerator, &arch)?;
 
     report_core_build_probe(&arch)?;
-    println!("ok: build prerequisites are present");
+    println!("ok: doctor report complete; build prerequisites are present");
     Ok(())
 }
 
@@ -515,36 +525,8 @@ fn workspace_root() -> Result<PathBuf, String> {
 }
 
 fn detect_arch() -> Option<String> {
-    let output = Command::new(rocminfo_path()).output().ok()?;
-    if !output.status.success() {
-        return None;
-    }
-
-    String::from_utf8_lossy(&output.stdout)
-        .lines()
-        .find_map(|line| {
-            let (_, value) = line.split_once("Name:")?;
-            let value = value.trim();
-            if value.starts_with("gfx") && !value.contains('-') {
-                Some(value.to_string())
-            } else {
-                None
-            }
-        })
-}
-
-fn rocminfo_path() -> PathBuf {
-    if let Some(path) = env::var_os("ROCMINFO").filter(|value| !value.is_empty()) {
-        return PathBuf::from(path);
-    }
-    rocm_path().join("bin/rocminfo")
-}
-
-fn rocm_path() -> PathBuf {
-    env::var_os("ROCM_PATH")
-        .filter(|value| !value.is_empty())
-        .map(PathBuf::from)
-        .unwrap_or_else(|| PathBuf::from(DEFAULT_ROCM_PATH))
+    let rocminfo = find_rocm_tool("ROCMINFO", "rocminfo", ToolLayout::Bin, &[]).ok()?;
+    inspect_rocminfo(&rocminfo.path).ok()?.arch
 }
 
 fn ensure_tool(program: &str, args: &[&str]) -> Result<(), String> {
@@ -563,41 +545,122 @@ fn ensure_tool(program: &str, args: &[&str]) -> Result<(), String> {
 
 #[derive(Debug, Clone)]
 struct ToolPaths {
-    llc: PathBuf,
-    clang: PathBuf,
-    llvm_readelf: PathBuf,
-    llvm_objdump: PathBuf,
+    llc: ToolPath,
+    clang: ToolPath,
+    llvm_readelf: ToolPath,
+    llvm_objdump: ToolPath,
 }
 
 impl ToolPaths {
     fn discover() -> Result<Self, String> {
         Ok(Self {
-            llc: find_rocm_tool("ROCM_OXIDE_LLC", "llc")?,
-            clang: find_rocm_tool("ROCM_OXIDE_CLANG", "clang")?,
-            llvm_readelf: find_rocm_tool("ROCM_OXIDE_LLVM_READELF", "llvm-readelf")?,
-            llvm_objdump: find_rocm_tool("ROCM_OXIDE_LLVM_OBJDUMP", "llvm-objdump")?,
+            llc: find_rocm_tool("ROCM_OXIDE_LLC", "llc", ToolLayout::Llvm, &["--version"])?,
+            clang: find_rocm_tool(
+                "ROCM_OXIDE_CLANG",
+                "clang",
+                ToolLayout::Llvm,
+                &["--version"],
+            )?,
+            llvm_readelf: find_rocm_tool(
+                "ROCM_OXIDE_LLVM_READELF",
+                "llvm-readelf",
+                ToolLayout::Llvm,
+                &["--version"],
+            )?,
+            llvm_objdump: find_rocm_tool(
+                "ROCM_OXIDE_LLVM_OBJDUMP",
+                "llvm-objdump",
+                ToolLayout::Llvm,
+                &["--version"],
+            )?,
         })
     }
 }
 
-fn find_rocm_tool(env_var: &str, name: &str) -> Result<PathBuf, String> {
-    let mut candidates = Vec::new();
+#[derive(Debug, Clone)]
+struct ToolPath {
+    path: PathBuf,
+    source: String,
+}
+
+#[derive(Debug, Clone, Copy)]
+enum ToolLayout {
+    Llvm,
+    Bin,
+}
+
+fn find_rocm_tool(
+    env_var: &str,
+    name: &str,
+    layout: ToolLayout,
+    check_args: &[&str],
+) -> Result<ToolPath, String> {
+    let mut candidates = Vec::<ToolPath>::new();
     if let Some(path) = env::var_os(env_var).filter(|value| !value.is_empty()) {
-        candidates.push(PathBuf::from(path));
+        push_tool_candidate(&mut candidates, PathBuf::from(path), env_var);
     }
-    candidates.push(rocm_path().join("lib/llvm/bin").join(name));
-    candidates.push(Path::new(DEFAULT_ROCM_PATH).join("lib/llvm/bin").join(name));
-    candidates.push(PathBuf::from(name));
+    for (source, root) in rocm_roots() {
+        for path in rocm_tool_paths(&root, name, layout) {
+            push_tool_candidate(&mut candidates, path, &source);
+        }
+    }
+    push_tool_candidate(&mut candidates, PathBuf::from(name), "PATH");
 
     for candidate in candidates {
-        if tool_works(&candidate, &["--version"]) {
+        if tool_works(&candidate.path, check_args) {
             return Ok(candidate);
         }
     }
 
     Err(format!(
-        "could not find `{name}`; set {env_var}=/path/to/{name} or ROCM_PATH=/path/to/rocm"
+        "could not find `{name}`; set {env_var}=/path/to/{name}, ROCM_PATH=/path/to/rocm, or HIP_PATH=/path/to/rocm"
     ))
+}
+
+fn rocm_roots() -> Vec<(String, PathBuf)> {
+    let mut roots = Vec::new();
+    push_rocm_root_from_env(&mut roots, "ROCM_PATH");
+    push_rocm_root_from_env(&mut roots, "HIP_PATH");
+    push_rocm_root(&mut roots, "/opt/rocm", PathBuf::from(DEFAULT_ROCM_PATH));
+    roots
+}
+
+fn push_rocm_root_from_env(roots: &mut Vec<(String, PathBuf)>, env_var: &str) {
+    let Some(path) = env::var_os(env_var).filter(|value| !value.is_empty()) else {
+        return;
+    };
+    let path = PathBuf::from(path);
+    push_rocm_root(roots, env_var, path.clone());
+    if path.file_name().is_some_and(|name| name == "hip")
+        && let Some(parent) = path.parent()
+    {
+        push_rocm_root(roots, &format!("{env_var} parent"), parent.to_path_buf());
+    }
+}
+
+fn push_rocm_root(roots: &mut Vec<(String, PathBuf)>, source: &str, path: PathBuf) {
+    if !roots.iter().any(|(_, existing)| existing == &path) {
+        roots.push((source.to_string(), path));
+    }
+}
+
+fn rocm_tool_paths(root: &Path, name: &str, layout: ToolLayout) -> Vec<PathBuf> {
+    match layout {
+        ToolLayout::Llvm => ["lib/llvm/bin", "llvm/bin", "bin"]
+            .into_iter()
+            .map(|dir| root.join(dir).join(name))
+            .collect(),
+        ToolLayout::Bin => vec![root.join("bin").join(name), root.join(name)],
+    }
+}
+
+fn push_tool_candidate(candidates: &mut Vec<ToolPath>, path: PathBuf, source: &str) {
+    if !candidates.iter().any(|candidate| candidate.path == path) {
+        candidates.push(ToolPath {
+            path,
+            source: source.to_string(),
+        });
+    }
 }
 
 fn tool_works(program: &Path, args: &[&str]) -> bool {
@@ -609,29 +672,42 @@ fn tool_works(program: &Path, args: &[&str]) -> bool {
         .is_ok_and(|status| status.success())
 }
 
-fn report_rocm_tool(label: &str, path: &Path) -> Result<(), String> {
-    let output = Command::new(path)
+fn report_tool_search_order() {
+    let roots = rocm_roots()
+        .into_iter()
+        .map(|(source, path)| format!("{source}={}", path.display()))
+        .collect::<Vec<_>>()
+        .join(", ");
+    println!("ok: ROCm tool search order: explicit tool env, {roots}, PATH");
+}
+
+fn report_rocm_tool(label: &str, tool: &ToolPath) -> Result<(), String> {
+    let output = Command::new(&tool.path)
         .arg("--version")
         .output()
-        .map_err(|err| format!("failed to run {}: {err}", path.display()))?;
+        .map_err(|err| format!("failed to run {}: {err}", tool.path.display()))?;
     if !output.status.success() {
         return Err(format!(
             "{} --version failed:\n{}",
-            path.display(),
+            tool.path.display(),
             String::from_utf8_lossy(&output.stderr)
         ));
     }
     let stdout = String::from_utf8_lossy(&output.stdout);
     let first = stdout.lines().next().unwrap_or("<no version output>");
-    println!("ok: {label} {} ({first})", path.display());
+    println!(
+        "ok: {label} {} [{}] ({first})",
+        tool.path.display(),
+        tool.source
+    );
     Ok(())
 }
 
-fn report_llc_amdgcn(llc: &Path) -> Result<(), String> {
-    let output = Command::new(llc)
+fn report_llc_amdgcn(llc: &ToolPath) -> Result<(), String> {
+    let output = Command::new(&llc.path)
         .arg("--version")
         .output()
-        .map_err(|err| format!("failed to run {} --version: {err}", llc.display()))?;
+        .map_err(|err| format!("failed to run {} --version: {err}", llc.path.display()))?;
     let stdout = String::from_utf8_lossy(&output.stdout);
     if stdout.contains("amdgcn") {
         println!("ok: llc supports the amdgcn backend");
@@ -639,9 +715,95 @@ fn report_llc_amdgcn(llc: &Path) -> Result<(), String> {
     } else {
         Err(format!(
             "{} does not report amdgcn backend support; set ROCM_OXIDE_LLC to ROCm's llc",
-            llc.display()
+            llc.path.display()
         ))
     }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct RocminfoSummary {
+    runtime_version: Option<String>,
+    arch: Option<String>,
+}
+
+fn inspect_rocminfo(path: &Path) -> Result<RocminfoSummary, String> {
+    let output = Command::new(path)
+        .output()
+        .map_err(|err| format!("failed to run {}: {err}", path.display()))?;
+    if !output.status.success() {
+        return Err(format!(
+            "{} failed:\n{}",
+            path.display(),
+            String::from_utf8_lossy(&output.stderr)
+        ));
+    }
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    Ok(RocminfoSummary {
+        runtime_version: stdout.lines().find_map(|line| {
+            let (_, value) = line.split_once("Runtime Version:")?;
+            Some(value.trim().to_string())
+        }),
+        arch: stdout.lines().find_map(|line| {
+            let (_, value) = line.split_once("Name:")?;
+            let value = value.trim();
+            if value.starts_with("gfx") && !value.contains('-') {
+                Some(value.to_string())
+            } else {
+                None
+            }
+        }),
+    })
+}
+
+fn report_rocminfo(tool: &ToolPath) -> Result<RocminfoSummary, String> {
+    let summary = inspect_rocminfo(&tool.path)?;
+    println!(
+        "ok: ROCm rocminfo {} [{}] runtime={} detected_arch={}",
+        tool.path.display(),
+        tool.source,
+        summary.runtime_version.as_deref().unwrap_or("<unknown>"),
+        summary.arch.as_deref().unwrap_or("<none>")
+    );
+    Ok(summary)
+}
+
+fn report_rocm_agents(tool: &ToolPath, selected_arch: &str) -> Result<(), String> {
+    let output = Command::new(&tool.path)
+        .output()
+        .map_err(|err| format!("failed to run {}: {err}", tool.path.display()))?;
+    if !output.status.success() {
+        return Err(format!(
+            "{} failed:\n{}",
+            tool.path.display(),
+            String::from_utf8_lossy(&output.stderr)
+        ));
+    }
+    let agents = String::from_utf8_lossy(&output.stdout)
+        .lines()
+        .map(str::trim)
+        .filter(|line| line.starts_with("gfx") && !line.contains('-'))
+        .map(ToOwned::to_owned)
+        .collect::<Vec<_>>();
+    if agents.is_empty() {
+        return Err(format!(
+            "{} did not report any gfx agents",
+            tool.path.display()
+        ));
+    }
+    if !agents.iter().any(|agent| agent == selected_arch) {
+        return Err(format!(
+            "{} reported agents [{}], but selected arch is {selected_arch}",
+            tool.path.display(),
+            agents.join(", ")
+        ));
+    }
+    println!(
+        "ok: ROCm rocm_agent_enumerator {} [{}] agents={}",
+        tool.path.display(),
+        tool.source,
+        agents.join(", ")
+    );
+    Ok(())
 }
 
 fn ensure_amdgpu_target() -> Result<(), String> {
@@ -3677,7 +3839,7 @@ mod tests {
     };
     use std::collections::{BTreeMap, BTreeSet};
     use std::fs;
-    use std::path::Path;
+    use std::path::{Path, PathBuf};
     use std::time::{SystemTime, UNIX_EPOCH};
 
     fn kernel_map(source: &str) -> BTreeMap<String, super::KernelDecl> {
@@ -3704,6 +3866,37 @@ pub unsafe extern "C" fn helper() {}
             .map(|kernel| kernel.name)
             .collect::<BTreeSet<_>>();
         assert_eq!(names, BTreeSet::from(["vector_add".to_string()]));
+    }
+
+    #[test]
+    fn rocm_tool_candidates_cover_common_rocm_layouts() {
+        let llvm_paths = super::rocm_tool_paths(Path::new("/rocm"), "llc", super::ToolLayout::Llvm);
+        assert_eq!(
+            llvm_paths,
+            vec![
+                PathBuf::from("/rocm/lib/llvm/bin/llc"),
+                PathBuf::from("/rocm/llvm/bin/llc"),
+                PathBuf::from("/rocm/bin/llc"),
+            ]
+        );
+
+        let bin_paths =
+            super::rocm_tool_paths(Path::new("/rocm"), "rocminfo", super::ToolLayout::Bin);
+        assert_eq!(
+            bin_paths,
+            vec![
+                PathBuf::from("/rocm/bin/rocminfo"),
+                PathBuf::from("/rocm/rocminfo"),
+            ]
+        );
+    }
+
+    #[test]
+    fn rocm_root_candidates_are_deduplicated() {
+        let mut roots = Vec::new();
+        super::push_rocm_root(&mut roots, "first", PathBuf::from("/rocm"));
+        super::push_rocm_root(&mut roots, "second", PathBuf::from("/rocm"));
+        assert_eq!(roots, vec![("first".to_string(), PathBuf::from("/rocm"))]);
     }
 
     #[test]

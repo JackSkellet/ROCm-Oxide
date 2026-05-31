@@ -347,6 +347,8 @@ Host-memory coherence rules are documented in
 [docs/host-memory-coherence.md](/home/jack/Documents/GitKraken_Projects/ROCm-Oxide/docs/host-memory-coherence.md).
 Code-object linking rules are documented in
 [docs/code-object-linking.md](/home/jack/Documents/GitKraken_Projects/ROCm-Oxide/docs/code-object-linking.md).
+Toolchain discovery and doctor-report rules are documented in
+[docs/toolchain-discovery.md](/home/jack/Documents/GitKraken_Projects/ROCm-Oxide/docs/toolchain-discovery.md).
 Stream-ordered allocation rules are documented in
 [docs/stream-ordered-allocation.md](/home/jack/Documents/GitKraken_Projects/ROCm-Oxide/docs/stream-ordered-allocation.md).
 
@@ -407,9 +409,10 @@ This roadmap is grounded in the current local probe target:
   HSACO, metadata records each link input, every linked kernel resource row is
   required before host bindings emit, and HIP module/library loading APIs are
   documented for the runtime inspection path.
-- Toolchain discovery hardening: validate `ROCM_PATH`/`HIP_PATH`, `/opt/rocm`,
-  `llc`, `clang`, `llvm-readelf`, `rocminfo`, `rocm_agent_enumerator`, target
-  architecture, and Rust `build-std` readiness in one doctor report.
+- Toolchain discovery hardening: doctor now uses explicit tool overrides,
+  `ROCM_PATH`/`HIP_PATH`, `/opt/rocm`, and `PATH`; validates `llc`, `clang`,
+  `llvm-readelf`, `llvm-objdump`, `rocminfo`, `rocm_agent_enumerator`, target
+  architecture, `rust-src`, and Rust `build-std` readiness in one report.
 
 ### P2: ROCm-Specific Feature Parity
 
