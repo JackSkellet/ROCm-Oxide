@@ -45,6 +45,7 @@ fn run() -> Result<(), String> {
     let mut device_globals = BTreeMap::new();
     let mut kernel_irs = Vec::new();
     let mut objects = Vec::new();
+    let mut link_inputs = Vec::new();
 
     for device_crate in &device_crates {
         let crate_kernels = discover_kernels(device_crate)?;
@@ -93,6 +94,7 @@ fn run() -> Result<(), String> {
         let obj = release_dir.join(format!("{artifact_stem}.o"));
 
         let kernel_names = crate_kernels.keys().cloned().collect::<BTreeSet<_>>();
+        let input_kernels = crate_kernels.keys().cloned().collect::<Vec<_>>();
         let source = fs::read_to_string(&input_ir)
             .map_err(|err| format!("failed to read {}: {err}", input_ir.display()))?;
         let transformed = compiler_step("rewrite Rust-emitted LLVM IR", || {
@@ -120,7 +122,13 @@ fn run() -> Result<(), String> {
         if crate_kernels.contains_key("scoped_atomics") {
             verify_scoped_atomic_artifacts(&kernel_ir, &obj, &tools.llvm_objdump)?;
         }
-        objects.push(obj);
+        objects.push(obj.clone());
+        link_inputs.push(LinkInput {
+            package_name,
+            llvm_ir: kernel_ir,
+            object: obj,
+            kernels: input_kernels,
+        });
     }
 
     if kernels.is_empty() {
@@ -150,10 +158,12 @@ fn run() -> Result<(), String> {
     for kernel_ir in &kernel_irs {
         annotate_dynamic_shared_mem_from_ir(&mut code_object_metadata, kernel_ir)?;
     }
+    validate_code_object_metadata(&code_object_metadata, &kernel_names)?;
     write_metadata(
         &metadata,
         &arch,
         &hsaco,
+        &link_inputs,
         &kernels,
         &device_globals,
         &code_object_metadata,
@@ -293,6 +303,7 @@ fn inspect_metadata(path: &Path) -> Result<(), String> {
     let resources = parse_kernel_resource_rows(&text);
     let kernel_count = resources.len();
     let contract_count = text.matches("\"required_len\":").count();
+    let linked_object_count = text.matches("\"package\":").count();
     let max_workgroup = max_json_u32(&text, "max_flat_workgroup_size");
     let max_vgpr = max_json_u32(&text, "vgpr_count");
     let max_sgpr = max_json_u32(&text, "sgpr_count");
@@ -305,6 +316,7 @@ fn inspect_metadata(path: &Path) -> Result<(), String> {
     println!("arch: {arch}");
     println!("kernels: {kernel_count}");
     println!("buffer contracts: {contract_count}");
+    println!("linked objects: {linked_object_count}");
     if let Some(value) = max_workgroup {
         println!("max flat workgroup size: {value}");
     }
@@ -1020,6 +1032,14 @@ struct BufferContract {
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct LenExpr {
     source: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct LinkInput {
+    package_name: String,
+    llvm_ir: PathBuf,
+    object: PathBuf,
+    kernels: Vec<String>,
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
@@ -2451,6 +2471,25 @@ fn read_code_object_metadata(
     parse_code_object_metadata(&String::from_utf8_lossy(&output.stdout))
 }
 
+fn validate_code_object_metadata(
+    metadata: &CodeObjectMetadata,
+    expected_kernels: &BTreeSet<String>,
+) -> Result<(), String> {
+    let missing = expected_kernels
+        .iter()
+        .filter(|name| !metadata.kernels.contains_key(*name))
+        .cloned()
+        .collect::<Vec<_>>();
+    if missing.is_empty() {
+        Ok(())
+    } else {
+        Err(format!(
+            "linked code object metadata is missing kernel resource rows for: {}",
+            missing.join(", ")
+        ))
+    }
+}
+
 fn annotate_dynamic_shared_mem_from_ir(
     metadata: &mut CodeObjectMetadata,
     kernel_ir: &Path,
@@ -2873,6 +2912,7 @@ fn write_metadata(
     path: &Path,
     arch: &str,
     hsaco: &Path,
+    link_inputs: &[LinkInput],
     kernels: &BTreeMap<String, KernelDecl>,
     device_globals: &BTreeMap<String, DeviceGlobal>,
     code_object_metadata: &CodeObjectMetadata,
@@ -2885,6 +2925,37 @@ fn write_metadata(
         "  \"hsaco\": \"{}\",\n",
         json_escape(&hsaco.display().to_string())
     ));
+    out.push_str("  \"link\": {\n");
+    out.push_str("    \"objects\": [\n");
+    for (input_index, input) in link_inputs.iter().enumerate() {
+        if input_index > 0 {
+            out.push_str(",\n");
+        }
+        out.push_str("      {\n");
+        out.push_str(&format!(
+            "        \"package\": \"{}\",\n",
+            json_escape(&input.package_name)
+        ));
+        out.push_str(&format!(
+            "        \"llvm_ir\": \"{}\",\n",
+            json_escape(&input.llvm_ir.display().to_string())
+        ));
+        out.push_str(&format!(
+            "        \"object\": \"{}\",\n",
+            json_escape(&input.object.display().to_string())
+        ));
+        out.push_str("        \"kernels\": [");
+        for (kernel_index, kernel) in input.kernels.iter().enumerate() {
+            if kernel_index > 0 {
+                out.push_str(", ");
+            }
+            out.push_str(&format!("\"{}\"", json_escape(kernel)));
+        }
+        out.push_str("]\n");
+        out.push_str("      }");
+    }
+    out.push_str("\n    ]\n");
+    out.push_str("  },\n");
     out.push_str("  \"kernels\": [\n");
 
     for (kernel_index, kernel) in kernels.values().enumerate() {
@@ -3600,8 +3671,9 @@ mod tests {
         discover_device_globals_in_source, discover_device_structs_in_source,
         discover_kernels_in_source, generate_device_global_binding, generate_device_struct_binding,
         generate_kernel_binding, generate_kernel_resource_binding, parse_inline_path_dependency,
-        parse_kernel_resource_rows, parse_package_name, transform_ir, verify_lds_ir,
-        verify_lds_isa, verify_scoped_atomic_ir, verify_scoped_atomic_isa,
+        parse_kernel_resource_rows, parse_package_name, transform_ir,
+        validate_code_object_metadata, verify_lds_ir, verify_lds_isa, verify_scoped_atomic_ir,
+        verify_scoped_atomic_isa,
     };
     use std::collections::{BTreeMap, BTreeSet};
     use std::fs;
@@ -3673,6 +3745,27 @@ pub unsafe extern "C" fn helper() {}
         assert_eq!(rows[0].sgpr_count, Some(11));
         assert_eq!(rows[0].vgpr_spill_count, Some(1));
         assert_eq!(rows[0].uses_dynamic_stack, Some(false));
+    }
+
+    #[test]
+    fn validates_linked_code_object_metadata_for_all_kernels() {
+        let mut metadata = CodeObjectMetadata::default();
+        metadata
+            .kernels
+            .insert("present".to_string(), KernelObjectMetadata::default());
+        let expected = ["present".to_string(), "missing".to_string()]
+            .into_iter()
+            .collect::<BTreeSet<_>>();
+
+        let err = validate_code_object_metadata(&metadata, &expected)
+            .expect_err("missing linked metadata should fail");
+        assert!(err.contains("missing"));
+
+        metadata
+            .kernels
+            .insert("missing".to_string(), KernelObjectMetadata::default());
+        validate_code_object_metadata(&metadata, &expected)
+            .expect("complete linked metadata should pass");
     }
 
     #[test]

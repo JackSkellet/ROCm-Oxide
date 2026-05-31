@@ -44,9 +44,9 @@ Local probes on 2026-05-31:
   pools are available; direct host access to device-resident managed memory,
   pageable-memory access, and registered host-pointer reuse are not reported on
   this dGPU.
-- Current generated artifact: 16 kernels, 22 buffer contracts, max VGPR 33, max
-  SGPR 26, max kernarg 368 bytes, max static LDS 1024 bytes, one
-  dynamic-LDS kernel, and no dynamic stack users.
+- Current generated artifact: 16 kernels, 22 buffer contracts, one linked
+  object input, max VGPR 33, max SGPR 26, max kernarg 368 bytes, max static LDS
+  1024 bytes, one dynamic-LDS kernel, and no dynamic stack users.
 - Current scoped atomic IR emits global-memory `atomicrmw` with explicit
   `syncscope("workgroup")` or `syncscope("agent")` where requested. System scope
   intentionally uses the AMDGPU backend default because the local LLVM backend
@@ -102,10 +102,11 @@ Local probes on 2026-05-31:
   - [x] emit concrete exported entry points from the proc macro
   - [x] discover monomorphized entry points and generate typed host bindings
   - [x] verify with a real `generic_copy_u32` HSACO kernel and showcase launch
-- [ ] ROCm code-object artifact linking layer:
-  - [ ] support linking multiple generated objects
-  - [ ] preserve and merge kernel metadata
-  - [ ] investigate HIP library enumeration/loading APIs for artifact inspection
+- [x] ROCm code-object artifact linking layer:
+  - [x] support linking multiple generated objects
+  - [x] preserve link inputs in generated metadata
+  - [x] require merged linked-HSACO metadata for every generated kernel
+  - [x] investigate HIP module/library enumeration and loading APIs for artifact inspection
 - [ ] Toolchain discovery hardening:
   - [ ] prefer `ROCM_PATH`/`HIP_PATH`, then `/opt/rocm`, then `PATH`
   - [ ] validate `llc`, `clang`, `llvm-readelf`, `rocminfo`, and `rocm_agent_enumerator`

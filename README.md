@@ -345,6 +345,8 @@ Atomic memory visibility rules are documented in
 [docs/atomic-scopes.md](/home/jack/Documents/GitKraken_Projects/ROCm-Oxide/docs/atomic-scopes.md).
 Host-memory coherence rules are documented in
 [docs/host-memory-coherence.md](/home/jack/Documents/GitKraken_Projects/ROCm-Oxide/docs/host-memory-coherence.md).
+Code-object linking rules are documented in
+[docs/code-object-linking.md](/home/jack/Documents/GitKraken_Projects/ROCm-Oxide/docs/code-object-linking.md).
 Stream-ordered allocation rules are documented in
 [docs/stream-ordered-allocation.md](/home/jack/Documents/GitKraken_Projects/ROCm-Oxide/docs/stream-ordered-allocation.md).
 
@@ -362,9 +364,9 @@ This roadmap is grounded in the current local probe target:
   are reported available; direct host access to device-resident managed memory,
   pageable-memory access, and registered host-pointer reuse are not reported on
   this dGPU.
-- Current generated artifact: 16 kernels, 22 buffer contracts, max VGPR 33, max
-  SGPR 26, max kernarg 368 bytes, max static LDS 1024 bytes, one
-  dynamic-LDS kernel, and no dynamic stack users.
+- Current generated artifact: 16 kernels, 22 buffer contracts, one linked
+  object input, max VGPR 33, max SGPR 26, max kernarg 368 bytes, max static LDS
+  1024 bytes, one dynamic-LDS kernel, and no dynamic stack users.
 - Current scoped atomic IR reaches global-memory `atomicrmw` with explicit
   `syncscope("workgroup")` or `syncscope("agent")` where requested. System scope
   uses the AMDGPU backend default because this LLVM build rejects explicit
@@ -401,8 +403,10 @@ This roadmap is grounded in the current local probe target:
 - Direct exported generic-kernel monomorphization without wrapper functions:
   `#[kernel(monomorphize(...))]` now emits concrete entry points and generated
   typed host bindings.
-- ROCm code-object artifact linking: link multiple generated objects, preserve
-  metadata, and investigate HIP library enumeration/loading APIs.
+- ROCm code-object artifact linking: multiple generated objects link into one
+  HSACO, metadata records each link input, every linked kernel resource row is
+  required before host bindings emit, and HIP module/library loading APIs are
+  documented for the runtime inspection path.
 - Toolchain discovery hardening: validate `ROCM_PATH`/`HIP_PATH`, `/opt/rocm`,
   `llc`, `clang`, `llvm-readelf`, `rocminfo`, `rocm_agent_enumerator`, target
   architecture, and Rust `build-std` readiness in one doctor report.
@@ -416,6 +420,7 @@ This roadmap is grounded in the current local probe target:
 Roadmap source docs:
 [HIP runtime API](https://rocm.docs.amd.com/projects/HIP/en/latest/reference/hip_runtime_api_reference.html),
 [HIP launch API](https://rocm.docs.amd.com/projects/HIP/en/latest/reference/hip_runtime_api/modules/launch_api.html),
+[HIP module management](https://rocm.docs.amd.com/projects/HIP/en/latest/.doxygen/docBin/html/group___module.html),
 [HIP graphs](https://rocm.docs.amd.com/projects/HIP/en/docs-6.4.0/how-to/hip_runtime_api/hipgraph.html),
 [stream ordered memory allocator](https://rocm.docs.amd.com/projects/HIP/en/docs-7.0.0/how-to/hip_runtime_api/memory_management/stream_ordered_allocator.html),
 [HIP coherence control](https://rocm.docs.amd.com/projects/HIP/en/latest/how-to/hip_runtime_api/memory_management/coherence_control.html),
