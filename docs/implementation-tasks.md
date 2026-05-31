@@ -44,9 +44,9 @@ Local probes on 2026-05-31:
   pools are available; direct host access to device-resident managed memory,
   pageable-memory access, and registered host-pointer reuse are not reported on
   this dGPU.
-- Current generated artifact: 17 kernels, 23 buffer contracts, one linked
-  object input, max VGPR 33, max SGPR 26, max kernarg 368 bytes, max static LDS
-  1024 bytes, max private segment 260 bytes, one dynamic-LDS kernel, and no
+- Current generated artifact: 21 kernels, 33 buffer contracts, one linked
+  object input, max VGPR 33, max SGPR 28, max kernarg 368 bytes, max static LDS
+  1024 bytes, max private segment 260 bytes, two dynamic-LDS kernels, and no
   dynamic stack users.
 - Current scoped atomic IR emits global-memory `atomicrmw` with explicit
   `syncscope("workgroup")` or `syncscope("agent")` where requested. System scope

@@ -17,11 +17,12 @@ const HEIGHT: usize = 540;
 const PANEL_W: usize = 318;
 const BLOCK_X: u32 = 256;
 const DEFAULT_OUTPUT: &str = "target/spectral_lattice.png";
-const MODES: [&str; 4] = ["Prism", "Energy", "Facet", "BLAS"];
+const MODES: [&str; 4] = ["Core", "LDS", "Atomic", "Chain"];
 
 struct DemoArgs {
     frames: Option<u32>,
     output: PathBuf,
+    mode: Option<usize>,
 }
 
 struct PaletteSeed {
@@ -52,6 +53,16 @@ struct ResourceSnapshot {
     parity_line: String,
 }
 
+struct DemoBuffers {
+    base: DeviceBuffer<u32>,
+    post: DeviceBuffer<u32>,
+    short: DeviceBuffer<u32>,
+    tile_stats: DeviceBuffer<u32>,
+    histogram: DeviceBuffer<u32>,
+    histogram_zero: Vec<u32>,
+    tile_count: usize,
+}
+
 #[derive(Clone, Copy)]
 struct Rect {
     x: usize,
@@ -75,8 +86,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let device = Device::first()?;
     let kernels = generated::DeviceKernels::load_embedded(&device)?;
     let pixel_count = WIDTH * HEIGHT;
-    let device_frame = DeviceBuffer::<u32>::new(pixel_count)?;
-    let short_frame = DeviceBuffer::<u32>::new(pixel_count / 2)?;
+    let buffers = DemoBuffers::new(pixel_count)?;
     let mut host_frame = vec![0u32; pixel_count];
     let resources = ResourceSnapshot::new(&device, &kernels, pixel_count)?;
     let palette = derive_palette(0);
@@ -95,18 +105,26 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         fps: 0.0,
         save_requested: false,
     };
+    if let Some(mode) = args.mode {
+        set_mode(&mut state, mode);
+    }
 
     if let Some(frames) = args.frames {
         let frames = frames.max(1);
+        let mut use_post = false;
         for frame in 0..frames {
             state.frame_index = ((frame as f32) * state.speed * 2.0) as u32;
             if state.auto_cycle {
                 state.mode = ((state.frame_index / 180) as usize) % MODES.len();
             }
-            render_frame(&kernels, &device_frame, &state)?;
+            use_post = render_frame(&kernels, &buffers, &state)?;
         }
         rocm_oxide::hip::synchronize()?;
-        device_frame.copy_to_host(&mut host_frame)?;
+        if use_post {
+            buffers.post.copy_to_host(&mut host_frame)?;
+        } else {
+            buffers.base.copy_to_host(&mut host_frame)?;
+        }
         draw_overlay(&mut host_frame, &state, &resources);
         save_png(&args.output, &host_frame)?;
         println!(
@@ -134,12 +152,12 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let mut mouse_was_down = false;
     let mut saved_once = false;
     while window.is_open() && !window.is_key_down(Key::Escape) {
-        handle_keyboard(&window, &mut state, &kernels, &short_frame);
+        handle_keyboard(&window, &mut state, &kernels, &buffers.short);
         handle_mouse(
             &window,
             &mut state,
             &kernels,
-            &short_frame,
+            &buffers.short,
             &mut mouse_was_down,
         );
 
@@ -150,9 +168,13 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             }
         }
 
-        render_frame(&kernels, &device_frame, &state)?;
+        let use_post = render_frame(&kernels, &buffers, &state)?;
         rocm_oxide::hip::synchronize()?;
-        device_frame.copy_to_host(&mut host_frame)?;
+        if use_post {
+            buffers.post.copy_to_host(&mut host_frame)?;
+        } else {
+            buffers.base.copy_to_host(&mut host_frame)?;
+        }
         draw_overlay(&mut host_frame, &state, &resources);
 
         if !saved_once || state.save_requested {
@@ -193,8 +215,8 @@ impl ResourceSnapshot {
         let recommendation = kernels.recommend_1d_launch("spectral_lattice", pixel_count, 0, 0)?;
         Ok(Self {
             resource_line: format!(
-                "{}: {}v/{}s/w{}",
-                resource.name,
+                "kernels:{} core:{}v/{}s/w{}",
+                kernels.resources().len(),
                 opt_u32(resource.vgpr_count),
                 opt_u32(resource.sgpr_count),
                 opt_u32(resource.wavefront_size),
@@ -211,26 +233,41 @@ impl ResourceSnapshot {
                 on_off(libraries.rocfft.available)
             ),
             parity_line: format!(
-                "parity: {}",
+                "{}",
                 if parity.cluster_launch.requires_runtime_capability {
-                    "cooperative launch path"
+                    "parity: cooperative launch path"
                 } else {
-                    "stream tiled path"
+                    "parity: stream tiled path"
                 }
             ),
         })
     }
 }
 
+impl DemoBuffers {
+    fn new(pixel_count: usize) -> rocm_oxide::Result<Self> {
+        let tile_count = pixel_count.div_ceil(BLOCK_X as usize);
+        Ok(Self {
+            base: DeviceBuffer::<u32>::new(pixel_count)?,
+            post: DeviceBuffer::<u32>::new(pixel_count)?,
+            short: DeviceBuffer::<u32>::new(pixel_count / 2)?,
+            tile_stats: DeviceBuffer::<u32>::new(tile_count)?,
+            histogram: DeviceBuffer::<u32>::new(256)?,
+            histogram_zero: vec![0u32; 256],
+            tile_count,
+        })
+    }
+}
+
 fn render_frame(
     kernels: &generated::DeviceKernels,
-    device_frame: &DeviceBuffer<u32>,
+    buffers: &DemoBuffers,
     state: &DemoState,
-) -> rocm_oxide::Result<()> {
+) -> rocm_oxide::Result<bool> {
     unsafe {
         kernels.spectral_lattice(
             LaunchConfig::for_num_elems_with_block_size(WIDTH * HEIGHT, BLOCK_X),
-            device_frame,
+            &buffers.base,
             WIDTH as u32,
             HEIGHT as u32,
             WIDTH * HEIGHT,
@@ -241,7 +278,66 @@ fn render_frame(
             state.palette[2],
             state.warp,
             state.gain,
-        )
+        )?;
+    }
+
+    match state.mode {
+        1 => {
+            let config = LaunchConfig::for_num_elems_with_block_size(WIDTH * HEIGHT, BLOCK_X)
+                .try_with_dynamic_shared_mem::<u32>(BLOCK_X as usize)?;
+            unsafe {
+                kernels.spectral_lds_tiles(
+                    config,
+                    &buffers.post,
+                    &buffers.base,
+                    &buffers.tile_stats,
+                    WIDTH * HEIGHT,
+                    buffers.tile_count,
+                    BLOCK_X,
+                    state.mode as u32,
+                )?;
+            }
+            Ok(true)
+        }
+        2 => {
+            buffers.histogram.copy_from_host(&buffers.histogram_zero)?;
+            unsafe {
+                kernels.spectral_atomic_histogram(
+                    LaunchConfig::for_num_elems_with_block_size(WIDTH * HEIGHT, BLOCK_X),
+                    &buffers.histogram,
+                    &buffers.base,
+                    WIDTH * HEIGHT,
+                )?;
+                kernels.spectral_histogram_overlay(
+                    LaunchConfig::for_num_elems_with_block_size(WIDTH * HEIGHT, BLOCK_X),
+                    &buffers.post,
+                    &buffers.base,
+                    &buffers.histogram,
+                    WIDTH as u32,
+                    HEIGHT as u32,
+                    WIDTH * HEIGHT,
+                    state.frame_index,
+                )?;
+            }
+            Ok(true)
+        }
+        3 => {
+            unsafe {
+                kernels.spectral_post_fx(
+                    LaunchConfig::for_num_elems_with_block_size(WIDTH * HEIGHT, BLOCK_X),
+                    &buffers.post,
+                    &buffers.base,
+                    WIDTH as u32,
+                    HEIGHT as u32,
+                    WIDTH * HEIGHT,
+                    state.frame_index,
+                    state.mode as u32,
+                    state.gain,
+                )?;
+            }
+            Ok(true)
+        }
+        _ => Ok(false),
     }
 }
 
@@ -253,12 +349,12 @@ fn handle_keyboard(
 ) {
     for key in window.get_keys_pressed(KeyRepeat::No) {
         match key {
-            Key::Key1 => state.mode = 0,
-            Key::Key2 => state.mode = 1,
-            Key::Key3 => state.mode = 2,
-            Key::Key4 => state.mode = 3,
-            Key::Left => state.mode = (state.mode + MODES.len() - 1) % MODES.len(),
-            Key::Right => state.mode = (state.mode + 1) % MODES.len(),
+            Key::Key1 => set_mode(state, 0),
+            Key::Key2 => set_mode(state, 1),
+            Key::Key3 => set_mode(state, 2),
+            Key::Key4 => set_mode(state, 3),
+            Key::Left => set_mode(state, (state.mode + MODES.len() - 1) % MODES.len()),
+            Key::Right => set_mode(state, (state.mode + 1) % MODES.len()),
             Key::Up => state.warp = clamp_f32(state.warp + 0.08, 0.05, 2.25),
             Key::Down => state.warp = clamp_f32(state.warp - 0.08, 0.05, 2.25),
             Key::PageUp => state.speed = clamp_f32(state.speed + 0.15, 0.1, 3.0),
@@ -318,7 +414,7 @@ fn handle_click(
 ) {
     for index in 0..MODES.len() {
         if mode_rect(index).contains(x, y) {
-            state.mode = index;
+            set_mode(state, index);
             state.auto_cycle = false;
             return;
         }
@@ -335,6 +431,11 @@ fn handle_click(
     } else if button_rect(4).contains(x, y) {
         state.save_requested = true;
     }
+}
+
+fn set_mode(state: &mut DemoState, mode: usize) {
+    state.mode = mode % MODES.len();
+    state.status = mode_detail(state.mode).into();
 }
 
 fn handle_slider_drag(state: &mut DemoState, x: usize, y: usize) {
@@ -462,7 +563,16 @@ fn draw_overlay(frame: &mut [u32], state: &DemoState, resources: &ResourceSnapsh
         );
     }
 
-    draw_text(frame, 24, 154, "Controls", 0xffffff);
+    draw_text_clipped(
+        frame,
+        24,
+        146,
+        mode_detail(state.mode),
+        0x9adfb1,
+        PANEL_W - 42,
+    );
+
+    draw_text(frame, 24, 160, "Controls", 0xffffff);
     draw_button(frame, button_rect(0), "R BLAS Palette", 0x244b3b, false);
     draw_button(frame, button_rect(1), "C Contract", 0x483842, false);
     draw_button(
@@ -531,6 +641,15 @@ fn draw_overlay(frame: &mut [u32], state: &DemoState, resources: &ResourceSnapsh
         PANEL_W - 42,
     );
     draw_text_clipped(frame, 24, 528, &state.status, 0xffcc8a, PANEL_W - 42);
+}
+
+fn mode_detail(mode: usize) -> &'static str {
+    match mode {
+        1 => "dynamic LDS tile reduction",
+        2 => "device-scope atomic histogram",
+        3 => "kernel chain: base -> post FX",
+        _ => "typed Rust GPU kernel launch",
+    }
 }
 
 fn draw_button(frame: &mut [u32], rect: Rect, label: &str, color: u32, active: bool) {
@@ -615,6 +734,7 @@ fn save_png(path: &Path, frame: &[u32]) -> Result<(), Box<dyn std::error::Error>
 fn parse_args() -> Result<DemoArgs, Box<dyn std::error::Error>> {
     let mut frames = None;
     let mut output = PathBuf::from(DEFAULT_OUTPUT);
+    let mut mode = None;
     let mut args = std::env::args().skip(1);
     while let Some(arg) = args.next() {
         match arg.as_str() {
@@ -630,16 +750,50 @@ fn parse_args() -> Result<DemoArgs, Box<dyn std::error::Error>> {
                     .map(PathBuf::from)
                     .ok_or_else(|| "--output requires a path".to_string())?;
             }
+            "--mode" => {
+                let value = args.next().ok_or_else(|| {
+                    "--mode requires Core, LDS, Atomic, Chain, or 1-4".to_string()
+                })?;
+                mode = Some(parse_mode(&value)?);
+            }
             "--help" | "-h" => {
                 println!(
-                    "Usage: cargo run --example spectral_lattice -- [--frames N] [--output PATH]"
+                    "Usage: cargo run --example spectral_lattice -- [--frames N] [--mode MODE] [--output PATH]"
                 );
                 std::process::exit(0);
             }
             _ => return Err(format!("unknown argument `{arg}`").into()),
         }
     }
-    Ok(DemoArgs { frames, output })
+    Ok(DemoArgs {
+        frames,
+        output,
+        mode,
+    })
+}
+
+fn parse_mode(value: &str) -> Result<usize, Box<dyn std::error::Error>> {
+    if let Ok(index) = value.parse::<usize>() {
+        return if (1..=MODES.len()).contains(&index) {
+            Ok(index - 1)
+        } else if index < MODES.len() {
+            Ok(index)
+        } else {
+            Err(format!(
+                "mode index {index} is outside 0-{} or 1-{}",
+                MODES.len() - 1,
+                MODES.len()
+            )
+            .into())
+        };
+    }
+
+    MODES
+        .iter()
+        .position(|mode| mode.eq_ignore_ascii_case(value))
+        .ok_or_else(|| {
+            format!("unknown mode `{value}`; expected Core, LDS, Atomic, or Chain").into()
+        })
 }
 
 fn blend_rect(frame: &mut [u32], x: usize, y: usize, w: usize, h: usize, color: u32, alpha: u32) {

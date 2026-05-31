@@ -62,12 +62,15 @@ cargo run --example stress_test_gui
 cargo run --example stress_3d_gui
 cargo run --example spectral_lattice
 cargo run --example spectral_lattice -- --frames 3
+cargo run --example spectral_lattice -- --frames 3 --mode atomic
 ```
 
-`spectral_lattice` is an interactive visual workbench: clickable mode tabs,
-warp/gain/speed sliders, rocBLAS palette reseeding, generated-binding contract
-checks, live kernel resource facts, library availability, and a headless
-`--frames` path for CI/preview PNGs.
+`spectral_lattice` is an interactive visual workbench with clickable mode tabs
+for distinct GPU paths: the core Rust-authored kernel, a dynamic-LDS tile
+reduction pass, a device-scope atomic histogram overlay, and a chained
+post-process pass. It also includes warp/gain/speed sliders, rocBLAS palette
+reseeding, generated-binding contract checks, live kernel resource facts,
+library availability, and a headless `--frames` path for CI/preview PNGs.
 
 The root [build.rs](/home/jack/Documents/GitKraken_Projects/ROCm-Oxide/build.rs)
 generates device artifacts before the host crate compiles. It exposes these
@@ -373,9 +376,9 @@ This roadmap is grounded in the current local probe target:
   are reported available; direct host access to device-resident managed memory,
   pageable-memory access, and registered host-pointer reuse are not reported on
   this dGPU.
-- Current generated artifact: 17 kernels, 23 buffer contracts, one linked
-  object input, max VGPR 33, max SGPR 26, max kernarg 368 bytes, max static LDS
-  1024 bytes, max private segment 260 bytes, one dynamic-LDS kernel, and no
+- Current generated artifact: 21 kernels, 33 buffer contracts, one linked
+  object input, max VGPR 33, max SGPR 28, max kernarg 368 bytes, max static LDS
+  1024 bytes, max private segment 260 bytes, two dynamic-LDS kernels, and no
   dynamic stack users.
 - Current scoped atomic IR reaches global-memory `atomicrmw` with explicit
   `syncscope("workgroup")` or `syncscope("agent")` where requested. System scope

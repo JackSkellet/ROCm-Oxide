@@ -570,6 +570,197 @@ pub unsafe extern "C" fn spectral_lattice(
     unsafe { frame.write_unchecked(i, rgb) };
 }
 
+// rocm-oxide: len(out)=pixel_count
+// rocm-oxide: len(input)=pixel_count
+// rocm-oxide: len(tile_stats)=tile_count
+#[kernel]
+pub unsafe extern "C" fn spectral_lds_tiles(
+    out: gpu::DeviceSliceMut<u32>,
+    input: gpu::DeviceSlice<u32>,
+    tile_stats: gpu::DeviceSliceMut<u32>,
+    pixel_count: usize,
+    tile_count: usize,
+    block_x: u32,
+    mode: u32,
+) {
+    let block_id = gpu::block_idx_x() as usize;
+    if block_id >= tile_count {
+        return;
+    }
+
+    let local = gpu::thread_idx_x() as usize;
+    let block_dim = gpu::block_dim_x() as usize;
+    if block_dim == 0 || block_dim != block_x as usize {
+        return;
+    }
+
+    let block_base = block_id * block_dim;
+    let global = block_base + local;
+    let data_count = min_usize(pixel_count, min_usize(input.len(), out.len()));
+    let valid = if block_base >= data_count {
+        0
+    } else {
+        min_usize(block_dim, data_count - block_base)
+    };
+    let value = if global < data_count {
+        luminance(unsafe { input.read_unchecked(global) }) as u32
+    } else {
+        0
+    };
+
+    let scratch = unsafe { gpu::DynamicSharedMem::<u32>::get() };
+    unsafe { scratch.add(local).write(value) };
+    gpu::workgroup_barrier();
+
+    let mut active = block_dim;
+    while active > 1 {
+        let half = active.div_ceil(2);
+        if local < half && local + half < active {
+            let left = unsafe { scratch.add(local).read() };
+            let right = unsafe { scratch.add(local + half).read() };
+            unsafe { scratch.add(local).write(left + right) };
+        }
+        gpu::workgroup_barrier();
+        active = half;
+    }
+
+    let avg = if valid == 0 {
+        0
+    } else {
+        (unsafe { scratch.read() }) / valid as u32
+    };
+    if local == 0 && block_id < tile_stats.len() {
+        unsafe { tile_stats.write_unchecked(block_id, avg) };
+    }
+    gpu::workgroup_barrier();
+
+    if global < data_count {
+        let base = unsafe { input.read_unchecked(global) };
+        let hue = avg
+            .wrapping_add((block_id as u32).wrapping_mul(17))
+            .wrapping_add(mode.wrapping_mul(43))
+            & 255;
+        let block_color = wheel(hue, clamp_u32(90 + avg, 0, 255));
+        let edge = if (local & 31) == 0 || local >= valid.saturating_sub(1) {
+            0xffffff
+        } else {
+            block_color
+        };
+        unsafe { out.write_unchecked(global, mix_color(base, edge, 0.58)) };
+    }
+}
+
+// rocm-oxide: len(counters)=256
+// rocm-oxide: len(input)=pixel_count
+#[kernel]
+pub unsafe extern "C" fn spectral_atomic_histogram(
+    counters: gpu::DeviceSliceMut<u32>,
+    input: gpu::DeviceSlice<u32>,
+    pixel_count: usize,
+) {
+    let i = gpu::global_id_x();
+    if i >= pixel_count || i >= input.len() || counters.len() < 256 {
+        return;
+    }
+
+    let rgb = unsafe { input.read_unchecked(i) };
+    let bucket = luminance(rgb) as usize;
+    unsafe {
+        gpu::atomic::atomic_add_u32_scoped(
+            counters.as_mut_ptr().add(bucket),
+            1,
+            gpu::AtomicScope::Device,
+            gpu::AtomicOrdering::Relaxed,
+        );
+    }
+}
+
+// rocm-oxide: len(out)=pixel_count
+// rocm-oxide: len(input)=pixel_count
+// rocm-oxide: len(counters)=256
+#[kernel]
+pub unsafe extern "C" fn spectral_histogram_overlay(
+    out: gpu::DeviceSliceMut<u32>,
+    input: gpu::DeviceSlice<u32>,
+    counters: gpu::DeviceSlice<u32>,
+    width: u32,
+    height: u32,
+    pixel_count: usize,
+    frame_index: u32,
+) {
+    let i = gpu::global_id_x();
+    if width == 0
+        || height == 0
+        || i >= pixel_count
+        || i >= out.len()
+        || i >= input.len()
+        || counters.len() < 256
+    {
+        return;
+    }
+
+    let x = (i as u32) % width;
+    let y = (i as u32) / width;
+    let base = unsafe { input.read_unchecked(i) };
+    let bucket = ((x * 256) / width) as usize;
+    let count = unsafe { counters.read_unchecked(bucket) };
+    let bar_height = min_u32(height / 3, count >> 6);
+    let from_bottom = height.saturating_sub(1).saturating_sub(y);
+    let rgb = if from_bottom < bar_height {
+        wheel(
+            (bucket as u32).wrapping_add(frame_index >> 2) & 255,
+            clamp_u32(130 + (count >> 8), 0, 255),
+        )
+    } else {
+        let bucket_color = wheel(bucket as u32, clamp_u32(34 + (count >> 9), 34, 160));
+        mix_color(base, bucket_color, 0.22)
+    };
+    unsafe { out.write_unchecked(i, rgb) };
+}
+
+// rocm-oxide: len(out)=pixel_count
+// rocm-oxide: len(input)=pixel_count
+#[kernel]
+pub unsafe extern "C" fn spectral_post_fx(
+    out: gpu::DeviceSliceMut<u32>,
+    input: gpu::DeviceSlice<u32>,
+    width: u32,
+    height: u32,
+    pixel_count: usize,
+    frame_index: u32,
+    mode: u32,
+    intensity: f32,
+) {
+    let i = gpu::global_id_x();
+    if width == 0 || height == 0 || i >= pixel_count || i >= out.len() || i >= input.len() {
+        return;
+    }
+
+    let x = (i as u32) % width;
+    let y = (i as u32) / width;
+    let left = unsafe { sample_frame(input.as_ptr(), width, height, x.saturating_sub(1), y) };
+    let right = unsafe { sample_frame(input.as_ptr(), width, height, min_u32(x + 1, width - 1), y) };
+    let up = unsafe { sample_frame(input.as_ptr(), width, height, x, y.saturating_sub(1)) };
+    let down = unsafe { sample_frame(input.as_ptr(), width, height, x, min_u32(y + 1, height - 1)) };
+    let center = unsafe { input.read_unchecked(i) };
+    let edge = clamp_i32(
+        abs_i32(luminance(left) - luminance(right)) + abs_i32(luminance(up) - luminance(down)),
+        0,
+        255,
+    ) as u32;
+    let t = frame_index.wrapping_mul(5).wrapping_add(mode.wrapping_mul(53));
+    let hue = ((x ^ y).wrapping_add(edge).wrapping_add(t)) & 255;
+    let glow = wheel(hue, clamp_u32(edge + 48, 0, 255));
+    let k = clamp_f32(0.18 + intensity * 0.34, 0.0, 0.75);
+    let rgb = if (mode & 1) == 0 {
+        mix_color(center, glow, k)
+    } else {
+        let sharp = sharpen_rgb(center, glow, 7);
+        mix_color(sharp, glow, k)
+    };
+    unsafe { out.write_unchecked(i, rgb) };
+}
+
 // rocm-oxide: len(camera)=13
 #[kernel]
 pub unsafe extern "C" fn raytrace_world(
@@ -1526,6 +1717,10 @@ fn min_u32(a: u32, b: u32) -> u32 {
     if a < b { a } else { b }
 }
 
+fn min_usize(a: usize, b: usize) -> usize {
+    if a < b { a } else { b }
+}
+
 fn avg4(a: u32, b: u32, c: u32, d: u32) -> i32 {
     (((a & 255) + (b & 255) + (c & 255) + (d & 255)) >> 2) as i32
 }
@@ -1620,6 +1815,12 @@ unsafe fn sample_aux_512(input: *const f32, x: u32, y: u32, channel: u32) -> f32
 
 unsafe fn sample_history_1024(input: *const u32, x: u32, y: u32) -> u32 {
     unsafe { *input.add((min_u32(y, 575) << 10).wrapping_add(min_u32(x, 1023)) as usize) }
+}
+
+unsafe fn sample_frame(input: *const u32, width: u32, height: u32, x: u32, y: u32) -> u32 {
+    let sx = min_u32(x, width.saturating_sub(1));
+    let sy = min_u32(y, height.saturating_sub(1));
+    unsafe { *input.add(sy.wrapping_mul(width).wrapping_add(sx) as usize) }
 }
 
 fn luminance(rgb: u32) -> i32 {

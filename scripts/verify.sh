@@ -23,4 +23,7 @@ cargo run --example depth_aware_upscale
 cargo run --example temporal_upscale
 cargo run --example bvh_raytrace_benchmark
 cargo run --example spectral_lattice -- --frames 3 --output target/spectral_lattice.png
+for mode in core lds atomic chain; do
+  cargo run --example spectral_lattice -- --frames 3 --mode "$mode" --output "target/spectral_lattice_${mode}.png"
+done
 cargo run
