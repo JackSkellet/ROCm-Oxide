@@ -2,7 +2,7 @@ use font8x8::{BASIC_FONTS, UnicodeFonts};
 use image::{Rgb, RgbImage};
 use minifb::{Key, KeyRepeat, MouseButton, MouseMode, Scale, Window, WindowOptions};
 use rocm_oxide::{
-    Device, DeviceBuffer, LaunchConfig, RocBlas, RocmLibraryReport, SgemmLayout,
+    Device, DeviceBuffer, Event, LaunchConfig, RocBlas, RocmLibraryReport, SgemmLayout, Stream,
     rocm_feature_parity_for_device,
 };
 use std::path::{Path, PathBuf};
@@ -17,6 +17,8 @@ const BLOCK_X: u32 = 256;
 const DEFAULT_OUTPUT: &str = "target/spectral_lattice.png";
 const MODES: [&str; 4] = ["Core", "LDS", "Atomic", "Chain"];
 const FPS_LIMITS: [usize; 7] = [30, 60, 90, 120, 144, 240, 0];
+const GPU_WORK_PRESETS: [usize; 11] = [1, 2, 4, 8, 16, 32, 64, 128, 256, 512, 1024];
+const DEFAULT_GPU_WORK: usize = 64;
 const RESOLUTION_PRESETS: [ResolutionPreset; 5] = [
     ResolutionPreset::new("540p", 960, 540),
     ResolutionPreset::new("720p", 1280, 720),
@@ -31,6 +33,7 @@ struct DemoArgs {
     mode: Option<usize>,
     size: RenderSize,
     fps_limit: usize,
+    gpu_work: usize,
 }
 
 struct PaletteSeed {
@@ -51,7 +54,10 @@ struct DemoState {
     palette_source: String,
     status: String,
     fps: f64,
+    gpu_ms: f32,
+    copy_ms: f64,
     fps_limit: usize,
+    gpu_work: usize,
     render_size: RenderSize,
     save_requested: bool,
 }
@@ -154,7 +160,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         palette_source: palette.source,
         status: "ready: core + libs + contracts".into(),
         fps: 0.0,
+        gpu_ms: 0.0,
+        copy_ms: 0.0,
         fps_limit: args.fps_limit,
+        gpu_work: args.gpu_work,
         render_size: args.size,
         save_requested: false,
     };
@@ -170,10 +179,13 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             if state.auto_cycle {
                 state.mode = ((state.frame_index / 180) as usize) % MODES.len();
             }
-            use_post = render_frame(&kernels, &buffers, &state)?;
+            let (post, gpu_ms) = render_workload_timed(&kernels, &buffers, &state)?;
+            use_post = post;
+            state.gpu_ms = gpu_ms;
         }
-        rocm_oxide::hip::synchronize()?;
+        let copy_start = Instant::now();
         copy_display_frame(&buffers, use_post, &mut host_frame)?;
+        state.copy_ms = copy_start.elapsed().as_secs_f64() * 1000.0;
         draw_overlay(&mut host_frame, buffers.size, &state, &resources);
         save_png(&args.output, &host_frame, buffers.size)?;
         println!(
@@ -222,9 +234,11 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             }
         }
 
-        let use_post = render_frame(&kernels, &buffers, &state)?;
-        rocm_oxide::hip::synchronize()?;
+        let (use_post, gpu_ms) = render_workload_timed(&kernels, &buffers, &state)?;
+        state.gpu_ms = gpu_ms;
+        let copy_start = Instant::now();
         copy_display_frame(&buffers, use_post, &mut host_frame)?;
+        state.copy_ms = copy_start.elapsed().as_secs_f64() * 1000.0;
         draw_overlay(&mut host_frame, buffers.size, &state, &resources);
 
         if !saved_once || state.save_requested {
@@ -245,7 +259,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 buffers.size.label(),
                 state.fps,
                 fps_label(state.fps_limit),
-                MODES[state.mode]
+                MODES[state.mode],
             ));
         }
     }
@@ -342,10 +356,34 @@ impl DemoBuffers {
     }
 }
 
+fn render_workload(
+    kernels: &generated::DeviceKernels,
+    buffers: &DemoBuffers,
+    state: &DemoState,
+) -> rocm_oxide::Result<bool> {
+    render_frame(kernels, buffers, state, state.frame_index)
+}
+
+fn render_workload_timed(
+    kernels: &generated::DeviceKernels,
+    buffers: &DemoBuffers,
+    state: &DemoState,
+) -> Result<(bool, f32), Box<dyn std::error::Error>> {
+    let stream = Stream::null();
+    let start = Event::new()?;
+    let stop = Event::new()?;
+    start.record(&stream)?;
+    let use_post = render_workload(kernels, buffers, state)?;
+    stop.record(&stream)?;
+    stop.synchronize()?;
+    Ok((use_post, start.elapsed_ms_until(&stop)?))
+}
+
 fn render_frame(
     kernels: &generated::DeviceKernels,
     buffers: &DemoBuffers,
     state: &DemoState,
+    frame_index: u32,
 ) -> rocm_oxide::Result<bool> {
     unsafe {
         kernels.spectral_lattice(
@@ -354,13 +392,14 @@ fn render_frame(
             buffers.size.width as u32,
             buffers.size.height as u32,
             buffers.size.pixel_count(),
-            state.frame_index,
+            frame_index,
             state.mode as u32,
             state.palette[0],
             state.palette[1],
             state.palette[2],
             state.warp,
             state.gain,
+            state.gpu_work as u32,
         )?;
     }
 
@@ -406,7 +445,7 @@ fn render_frame(
                     buffers.size.width as u32,
                     buffers.size.height as u32,
                     buffers.size.pixel_count(),
-                    state.frame_index,
+                    frame_index,
                 )?;
             }
             Ok(true)
@@ -423,7 +462,7 @@ fn render_frame(
                     buffers.size.width as u32,
                     buffers.size.height as u32,
                     buffers.size.pixel_count(),
-                    state.frame_index,
+                    frame_index,
                     state.mode as u32,
                     state.gain,
                 )?;
@@ -456,6 +495,8 @@ fn handle_keyboard(
             Key::Equal => step_fps_limit(state, 1),
             Key::Comma => cycle_resolution(state, -1),
             Key::Period => cycle_resolution(state, 1),
+            Key::LeftBracket => step_gpu_work(state, -1),
+            Key::RightBracket => step_gpu_work(state, 1),
             Key::Space => state.paused = !state.paused,
             Key::A => state.auto_cycle = !state.auto_cycle,
             Key::R => reseed_palette(state),
@@ -548,6 +589,8 @@ fn handle_slider_drag(state: &mut DemoState, x: usize, y: usize) {
         state.speed = slider_value(x, scale_rect(slider_rect(2), scale), 0.1, 3.0);
     } else if scale_rect(slider_rect(3), scale).contains(x, y) {
         set_fps_limit_from_slider(state, x);
+    } else if scale_rect(slider_rect(4), scale).contains(x, y) {
+        set_gpu_work_from_slider(state, x);
     }
 }
 
@@ -613,6 +656,35 @@ fn fps_label(limit: usize) -> String {
     }
 }
 
+fn set_gpu_work_from_slider(state: &mut DemoState, x: usize) {
+    let rect = scale_rect(slider_rect(4), ui_scale(state.render_size));
+    let t = ((x.saturating_sub(rect.x)) as f32 / rect.w.max(1) as f32).clamp(0.0, 1.0);
+    let index = (t * (GPU_WORK_PRESETS.len() - 1) as f32).round() as usize;
+    state.gpu_work = GPU_WORK_PRESETS[index.min(GPU_WORK_PRESETS.len() - 1)];
+}
+
+fn step_gpu_work(state: &mut DemoState, delta: isize) {
+    let current = gpu_work_index(state.gpu_work);
+    let len = GPU_WORK_PRESETS.len() as isize;
+    let next = (current as isize + delta).rem_euclid(len) as usize;
+    state.gpu_work = GPU_WORK_PRESETS[next];
+    state.status = format!("GPU work set to {}x", state.gpu_work);
+}
+
+fn gpu_work_index(work: usize) -> usize {
+    GPU_WORK_PRESETS
+        .iter()
+        .position(|value| *value == work)
+        .unwrap_or_else(|| {
+            GPU_WORK_PRESETS
+                .iter()
+                .enumerate()
+                .min_by_key(|(_, value)| value.abs_diff(work))
+                .map(|(index, _)| index)
+                .unwrap_or(0)
+        })
+}
+
 fn reseed_palette(state: &mut DemoState) {
     state.palette_seed = state.palette_seed.wrapping_add(1);
     let palette = derive_palette(state.palette_seed);
@@ -641,6 +713,7 @@ fn run_contract_check(
             state.palette[2],
             state.warp,
             state.gain,
+            state.gpu_work as u32,
         )
     };
     state.status = match result {
@@ -885,13 +958,20 @@ fn draw_overlay(
         scale_rect(slider_rect(3), scale),
         state.fps_limit,
     );
+    draw_gpu_work_slider(
+        frame,
+        size,
+        scale,
+        scale_rect(slider_rect(4), scale),
+        state.gpu_work,
+    );
 
     draw_text(
         frame,
         size,
         scale,
         24 * scale,
-        448 * scale,
+        468 * scale,
         "Runtime",
         0xffffff,
     );
@@ -900,7 +980,7 @@ fn draw_overlay(
         size,
         scale,
         24 * scale,
-        468 * scale,
+        486 * scale,
         &resources.resource_line,
         0xc7d4e0,
         (PANEL_W - 42) * scale,
@@ -910,7 +990,7 @@ fn draw_overlay(
         size,
         scale,
         24 * scale,
-        486 * scale,
+        504 * scale,
         &resources.launch_line,
         0xc7d4e0,
         (PANEL_W - 42) * scale,
@@ -920,7 +1000,7 @@ fn draw_overlay(
         size,
         scale,
         24 * scale,
-        504 * scale,
+        522 * scale,
         &resources.library_line,
         0xc7d4e0,
         (PANEL_W - 42) * scale,
@@ -930,18 +1010,31 @@ fn draw_overlay(
         size,
         scale,
         24 * scale,
-        522 * scale,
-        &resources.parity_line,
-        0xc7d4e0,
+        540 * scale,
+        &format!(
+            "gpu{:.2} copy{:.2} work{}x",
+            state.gpu_ms, state.copy_ms, state.gpu_work
+        ),
+        0x9adfb1,
         (PANEL_W - 42) * scale,
     );
-    if size.height >= 560 * scale {
+    if size.height >= 596 * scale {
         draw_text_clipped(
             frame,
             size,
             scale,
             24 * scale,
-            540 * scale,
+            558 * scale,
+            &resources.parity_line,
+            0xc7d4e0,
+            (PANEL_W - 42) * scale,
+        );
+        draw_text_clipped(
+            frame,
+            size,
+            scale,
+            24 * scale,
+            576 * scale,
             &format!("palette: {}", state.palette_source),
             0x9adfb1,
             (PANEL_W - 42) * scale,
@@ -951,7 +1044,7 @@ fn draw_overlay(
             size,
             scale,
             24 * scale,
-            558 * scale,
+            594 * scale,
             &state.status,
             0xffcc8a,
             (PANEL_W - 42) * scale,
@@ -962,7 +1055,7 @@ fn draw_overlay(
             size,
             scale,
             24 * scale,
-            528 * scale,
+            558 * scale,
             &state.status,
             0xffcc8a,
             (PANEL_W - 42) * scale,
@@ -1085,6 +1178,38 @@ fn draw_fps_slider(
     draw_rect_outline(frame, size, rect.x, rect.y, rect.w, rect.h, 0x66889e);
 }
 
+fn draw_gpu_work_slider(
+    frame: &mut [u32],
+    size: RenderSize,
+    scale: usize,
+    rect: Rect,
+    work: usize,
+) {
+    draw_text(
+        frame,
+        size,
+        scale,
+        rect.x,
+        rect.y.saturating_sub(18 * scale),
+        &format!("GPU Work {}x", work),
+        0xdce8f4,
+    );
+    blend_rect(frame, size, rect.x, rect.y, rect.w, rect.h, 0x142434, 210);
+    let index = gpu_work_index(work);
+    let t = index as f32 / (GPU_WORK_PRESETS.len() - 1) as f32;
+    let fill = ((rect.w - 4) as f32 * t) as usize;
+    draw_rect(
+        frame,
+        size,
+        rect.x + 2,
+        rect.y + 2,
+        fill,
+        rect.h - 4,
+        0x2b8ee8,
+    );
+    draw_rect_outline(frame, size, rect.x, rect.y, rect.w, rect.h, 0x66889e);
+}
+
 fn mode_rect(index: usize) -> Rect {
     Rect::new(18 + index * 72, 106, 66, 32)
 }
@@ -1096,7 +1221,7 @@ fn button_rect(index: usize) -> Rect {
 }
 
 fn slider_rect(index: usize) -> Rect {
-    Rect::new(24, 306 + index * 36, PANEL_W - 48, 16)
+    Rect::new(24, 292 + index * 34, PANEL_W - 48, 14)
 }
 
 fn ui_scale(size: RenderSize) -> usize {
@@ -1157,6 +1282,7 @@ fn parse_args() -> Result<DemoArgs, Box<dyn std::error::Error>> {
     let mut mode = None;
     let mut size = RESOLUTION_PRESETS[0].size;
     let mut fps_limit = 60usize;
+    let mut gpu_work = DEFAULT_GPU_WORK;
     let mut args = std::env::args().skip(1);
     while let Some(arg) = args.next() {
         match arg.as_str() {
@@ -1190,9 +1316,15 @@ fn parse_args() -> Result<DemoArgs, Box<dyn std::error::Error>> {
                     .ok_or_else(|| "--fps-limit requires a number or uncapped".to_string())?;
                 fps_limit = parse_fps_limit(&value)?;
             }
+            "--gpu-work" | "--work" => {
+                let value = args
+                    .next()
+                    .ok_or_else(|| "--gpu-work requires an iteration count".to_string())?;
+                gpu_work = parse_gpu_work(&value)?;
+            }
             "--help" | "-h" => {
                 println!(
-                    "Usage: cargo run --example spectral_lattice -- [--frames N] [--mode MODE] [--resolution 4k|WIDTHxHEIGHT] [--fps-limit FPS|uncapped] [--output PATH]"
+                    "Usage: cargo run --example spectral_lattice -- [--frames N] [--mode MODE] [--resolution 4k|WIDTHxHEIGHT] [--fps-limit FPS|uncapped] [--gpu-work ITERATIONS] [--output PATH]"
                 );
                 std::process::exit(0);
             }
@@ -1205,6 +1337,7 @@ fn parse_args() -> Result<DemoArgs, Box<dyn std::error::Error>> {
         mode,
         size,
         fps_limit,
+        gpu_work,
     })
 }
 
@@ -1280,6 +1413,17 @@ fn parse_fps_limit(value: &str) -> Result<usize, Box<dyn std::error::Error>> {
         );
     }
     Ok(fps)
+}
+
+fn parse_gpu_work(value: &str) -> Result<usize, Box<dyn std::error::Error>> {
+    let iterations = value.parse::<usize>()?;
+    if !(1..=1024).contains(&iterations) {
+        return Err(format!(
+            "GPU work iteration count {iterations} is outside supported bounds 1..1024"
+        )
+        .into());
+    }
+    Ok(iterations)
 }
 
 fn blend_rect(

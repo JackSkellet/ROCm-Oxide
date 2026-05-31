@@ -63,7 +63,7 @@ cargo run --example stress_3d_gui
 cargo run --example spectral_lattice
 cargo run --example spectral_lattice -- --frames 3
 cargo run --example spectral_lattice -- --frames 3 --mode atomic
-cargo run --example spectral_lattice -- --frames 1 --resolution 4k --fps-limit 120
+cargo run --example spectral_lattice -- --frames 1 --resolution 4k --fps-limit 120 --gpu-work 256
 ```
 
 `spectral_lattice` is an interactive visual workbench with clickable mode tabs
@@ -72,7 +72,9 @@ reduction pass, a device-scope atomic histogram overlay, and a chained
 post-process pass. It also includes warp/gain/speed sliders, rocBLAS palette
 reseeding, generated-binding contract checks, live kernel resource facts,
 library availability, runtime FPS-limit and resolution controls up to 4K, and a
-headless `--frames` path for CI/preview PNGs.
+headless `--frames` path for CI/preview PNGs. The `--gpu-work` CLI flag and
+matching GUI slider increase per-pixel ALU work inside the Rust-authored kernel,
+while the overlay reports GPU event time separately from the host readback path.
 
 The root [build.rs](/home/jack/Documents/GitKraken_Projects/ROCm-Oxide/build.rs)
 generates device artifacts before the host crate compiles. It exposes these

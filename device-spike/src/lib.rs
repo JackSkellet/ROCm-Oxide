@@ -484,6 +484,7 @@ pub unsafe extern "C" fn spectral_lattice(
     palette_c: f32,
     warp: f32,
     gain: f32,
+    work_iterations: u32,
 ) {
     let i = gpu::global_id_x();
     if width == 0 || height == 0 || i >= pixel_count || i >= frame.len() {
@@ -510,6 +511,26 @@ pub unsafe extern "C" fn spectral_lattice(
     let prism = abs_f32(gpu::math::sin_f32((px + py) * 9.0 + radius * 13.0 - t * 2.1));
     let bloom = 1.0 / (1.0 + radius * radius * 4.2);
     let center = 1.0 - clamp_f32(radius * 0.72, 0.0, 1.0);
+    let work_iterations = min_u32(work_iterations, 1024);
+    let mut work_detail = 0.0f32;
+    let mut qx = px + palette_a * 0.031;
+    let mut qy = py - palette_b * 0.027;
+    let mut work = 0u32;
+    while work < work_iterations {
+        let step = work as f32;
+        let phase = t * 0.13 + step * 0.119;
+        let sx = gpu::math::sin_f32(qx * (3.0 + step * 0.017) + qy * 1.7 + phase);
+        let cy = gpu::math::cos_f32(qy * (2.5 + step * 0.013) - qx * 1.3 - phase);
+        work_detail += sx * cy;
+        qx += sx * 0.006 + cy * 0.002;
+        qy += cy * 0.006 - sx * 0.002;
+        work = work.wrapping_add(1);
+    }
+    let work_detail = if work_iterations == 0 {
+        0.0
+    } else {
+        work_detail / work_iterations as f32
+    };
     let h = hash32((x << 16) ^ y);
     let spark = if (h & 4095) < 6 + ((center * 18.0) as u32) {
         let phase = ((h >> 12) & 255) as f32 * 0.024_543_693;
@@ -520,7 +541,8 @@ pub unsafe extern "C" fn spectral_lattice(
     };
 
     let energy = clamp_f32(
-        (0.06 + ridge * 0.44 + prism * 0.2 + bloom * 0.5 + spark) * gain,
+        (0.06 + ridge * 0.44 + prism * 0.2 + bloom * 0.5 + spark + work_detail * 0.045)
+            * gain,
         0.0,
         1.0,
     );

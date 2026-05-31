@@ -26,5 +26,5 @@ cargo run --example spectral_lattice -- --frames 3 --output target/spectral_latt
 for mode in core lds atomic chain; do
   cargo run --example spectral_lattice -- --frames 3 --mode "$mode" --output "target/spectral_lattice_${mode}.png"
 done
-cargo run --example spectral_lattice -- --frames 1 --mode chain --resolution 4k --fps-limit 120 --output target/spectral_lattice_4k.png
+cargo run --example spectral_lattice -- --frames 1 --mode chain --resolution 4k --fps-limit 120 --gpu-work 256 --output target/spectral_lattice_4k.png
 cargo run
