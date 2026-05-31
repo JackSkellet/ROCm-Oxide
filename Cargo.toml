@@ -1,0 +1,14 @@
+[package]
+name = "rocm-oxide"
+version = "0.1.0"
+edition = "2024"
+description = "ROCm-Oxide: a Rust-hosted ROCm/HIPRTC runtime and Rust device-code prototype."
+license = "MIT OR Apache-2.0"
+
+[build-dependencies]
+
+[dependencies]
+font8x8 = "0.3"
+image = "0.25"
+minifb = "0.28"
+xcap = "0.9"

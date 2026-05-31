@@ -1,0 +1,2306 @@
+use std::collections::{BTreeMap, BTreeSet};
+use std::env;
+use std::ffi::OsStr;
+use std::fs;
+use std::panic::{self, AssertUnwindSafe};
+use std::path::{Path, PathBuf};
+use std::process::{Command, Stdio};
+
+const TARGET: &str = "amdgcn-amd-amdhsa";
+const ROCM_LLVM: &str = "/opt/rocm/lib/llvm/bin";
+
+fn main() {
+    if let Err(err) = run() {
+        eprintln!("error: {err}");
+        std::process::exit(1);
+    }
+}
+
+fn run() -> Result<(), String> {
+    let args = Args::parse()?;
+    if args.doctor {
+        return doctor();
+    }
+    if let Some(path) = &args.inspect_metadata {
+        return inspect_metadata(path);
+    }
+
+    let root = workspace_root()?;
+    let device_crate = root.join(&args.device_crate);
+    let arch = args.arch.or_else(detect_arch).ok_or_else(|| {
+        "failed to detect ROCm GPU architecture; pass --arch gfx... or set ROCM_OXIDE_ARCH"
+            .to_string()
+    })?;
+
+    ensure_tool("cargo", &["--version"])?;
+    ensure_tool("rustc", &["+nightly", "--version"])?;
+    ensure_file(Path::new(ROCM_LLVM).join("llc"))?;
+    ensure_file(Path::new(ROCM_LLVM).join("clang"))?;
+    ensure_file(Path::new(ROCM_LLVM).join("llvm-readelf"))?;
+
+    let device_crates = discover_device_crate_bundle(&device_crate)?;
+    let mut kernels = BTreeMap::new();
+    let mut device_structs = BTreeMap::new();
+    let mut objects = Vec::new();
+
+    for device_crate in &device_crates {
+        let crate_kernels = discover_kernels(device_crate)?;
+        for device_struct in discover_device_structs(device_crate)?.values() {
+            if let Some(previous) =
+                device_structs.insert(device_struct.name.clone(), device_struct.clone())
+            {
+                return Err(format!(
+                    "duplicate repr(C) device struct `{}`\n  first: {}\n  again: {}",
+                    device_struct.name, previous.span, device_struct.span
+                ));
+            }
+        }
+        if crate_kernels.is_empty() {
+            continue;
+        }
+        for kernel in crate_kernels.values() {
+            if let Some(previous) = kernels.insert(kernel.name.clone(), kernel.clone()) {
+                return Err(format!(
+                    "duplicate #[kernel] symbol `{}`\n  first: {}\n  again: {}",
+                    kernel.name, previous.span, kernel.span
+                ));
+            }
+        }
+        build_device_crate(device_crate, &arch)?;
+        let package_name = package_name(device_crate)?;
+        let artifact_stem = if device_crate == &device_crates[0] {
+            args.output_stem.clone()
+        } else {
+            format!("{}_{}", args.output_stem, package_name.replace('-', "_"))
+        };
+        let release_dir = device_crate.join("target").join(TARGET).join("release");
+        let deps_dir = release_dir.join("deps");
+        let input_ir = newest_llvm_ir(&deps_dir, &package_name)?;
+        let kernel_ir = release_dir.join(format!("{artifact_stem}.kernel.ll"));
+        let obj = release_dir.join(format!("{artifact_stem}.o"));
+
+        let kernel_names = crate_kernels.keys().cloned().collect::<BTreeSet<_>>();
+        let source = fs::read_to_string(&input_ir)
+            .map_err(|err| format!("failed to read {}: {err}", input_ir.display()))?;
+        let transformed = compiler_step("rewrite Rust-emitted LLVM IR", || {
+            transform_ir(&source, &kernel_names, &crate_kernels)
+        })?;
+        fs::write(&kernel_ir, transformed)
+            .map_err(|err| format!("failed to write {}: {err}", kernel_ir.display()))?;
+
+        run_command(
+            Command::new(Path::new(ROCM_LLVM).join("llc"))
+                .arg("-mtriple=amdgcn-amd-amdhsa")
+                .arg(format!("-mcpu={arch}"))
+                .arg("-filetype=obj")
+                .arg(&kernel_ir)
+                .arg("-o")
+                .arg(&obj),
+            "lower LLVM IR with ROCm llc",
+        )?;
+        objects.push(obj);
+    }
+
+    if kernels.is_empty() {
+        return Err("no #[kernel] functions found in device crate bundle".to_string());
+    }
+
+    let kernel_names = kernels.keys().cloned().collect::<BTreeSet<_>>();
+    let release_dir = device_crate.join("target").join(TARGET).join("release");
+    fs::create_dir_all(&release_dir)
+        .map_err(|err| format!("failed to create {}: {err}", release_dir.display()))?;
+    let hsaco = release_dir.join(format!("{}.hsaco", args.output_stem));
+    let metadata = release_dir.join(format!("{}.metadata.json", args.output_stem));
+    let bindings = release_dir.join(format!("{}.bindings.rs", args.output_stem));
+
+    let mut link = Command::new(Path::new(ROCM_LLVM).join("clang"));
+    link.arg("-target")
+        .arg("amdgcn-amd-amdhsa")
+        .arg(format!("-mcpu={arch}"));
+    for obj in &objects {
+        link.arg(obj);
+    }
+    link.arg("-o").arg(&hsaco);
+    run_command(&mut link, "link AMDGPU code object with ROCm clang")?;
+
+    validate_code_object(&hsaco, &kernel_names)?;
+    let code_object_metadata = read_code_object_metadata(&hsaco)?;
+    write_metadata(&metadata, &arch, &hsaco, &kernels, &code_object_metadata)?;
+    write_bindings(&bindings, &hsaco, &kernels, &device_structs)?;
+    println!("{}", hsaco.display());
+    Ok(())
+}
+
+#[derive(Debug)]
+struct Args {
+    device_crate: PathBuf,
+    arch: Option<String>,
+    output_stem: String,
+    doctor: bool,
+    inspect_metadata: Option<PathBuf>,
+}
+
+impl Args {
+    fn parse() -> Result<Self, String> {
+        let mut device_crate = PathBuf::from("device-spike");
+        let mut arch = env::var("ROCM_OXIDE_ARCH").ok().filter(|s| !s.is_empty());
+        let mut output_stem = "rocm_oxide_device_spike".to_string();
+        let mut doctor = false;
+        let mut inspect_metadata = None;
+
+        let mut iter = env::args().skip(1);
+        while let Some(arg) = iter.next() {
+            match arg.as_str() {
+                "--doctor" => doctor = true,
+                "--inspect-metadata" => {
+                    inspect_metadata = Some(iter.next().map(PathBuf::from).ok_or_else(|| {
+                        "--inspect-metadata requires a metadata path".to_string()
+                    })?);
+                }
+                "--crate" => {
+                    device_crate = iter
+                        .next()
+                        .map(PathBuf::from)
+                        .ok_or_else(|| "--crate requires a path".to_string())?;
+                }
+                "--arch" => {
+                    arch = Some(
+                        iter.next()
+                            .ok_or_else(|| "--arch requires a gfx target".to_string())?,
+                    );
+                }
+                "--output-stem" => {
+                    output_stem = iter
+                        .next()
+                        .ok_or_else(|| "--output-stem requires a filename stem".to_string())?;
+                }
+                "--help" | "-h" => {
+                    print_help();
+                    std::process::exit(0);
+                }
+                _ => return Err(format!("unknown argument: {arg}")),
+            }
+        }
+
+        Ok(Self {
+            device_crate,
+            arch,
+            output_stem,
+            doctor,
+            inspect_metadata,
+        })
+    }
+}
+
+fn print_help() {
+    println!(
+        "Usage: rocm-oxide-build [--crate device-spike] [--arch gfx1201] [--output-stem name]\n       rocm-oxide-build --doctor\n       rocm-oxide-build --inspect-metadata path/to/metadata.json"
+    );
+}
+
+fn doctor() -> Result<(), String> {
+    println!("ROCm-Oxide doctor");
+    report_tool("cargo", &["--version"])?;
+    report_tool("rustc", &["+nightly", "--version"])?;
+    report_file("ROCm llc", &Path::new(ROCM_LLVM).join("llc"))?;
+    report_file("ROCm clang", &Path::new(ROCM_LLVM).join("clang"))?;
+    report_file(
+        "ROCm llvm-readelf",
+        &Path::new(ROCM_LLVM).join("llvm-readelf"),
+    )?;
+
+    match detect_arch() {
+        Some(arch) => println!("ok: detected AMD GPU architecture {arch}"),
+        None => {
+            return Err(
+                "failed to detect AMD GPU architecture; set ROCM_OXIDE_ARCH=gfx...".to_string(),
+            );
+        }
+    }
+
+    println!("ok: build prerequisites are present");
+    Ok(())
+}
+
+fn report_tool(program: &str, args: &[&str]) -> Result<(), String> {
+    let output = Command::new(program)
+        .args(args)
+        .output()
+        .map_err(|err| format!("failed to run {program}: {err}"))?;
+    if !output.status.success() {
+        return Err(format!(
+            "{program} {:?} failed:\n{}",
+            args,
+            String::from_utf8_lossy(&output.stderr)
+        ));
+    }
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let first = stdout.lines().next().unwrap_or("<no version output>");
+    println!("ok: {program} {first}");
+    Ok(())
+}
+
+fn report_file(label: &str, path: &Path) -> Result<(), String> {
+    if path.is_file() {
+        println!("ok: {label} {}", path.display());
+        Ok(())
+    } else {
+        Err(format!("missing {label}: {}", path.display()))
+    }
+}
+
+fn inspect_metadata(path: &Path) -> Result<(), String> {
+    let text = fs::read_to_string(path)
+        .map_err(|err| format!("failed to read {}: {err}", path.display()))?;
+    let arch = find_json_string(&text, "arch").unwrap_or_else(|| "<unknown>".to_string());
+    let target = find_json_string(&text, "target").unwrap_or_else(|| "<unknown>".to_string());
+    let resources = parse_kernel_resource_rows(&text);
+    let kernel_count = resources.len();
+    let contract_count = text.matches("\"required_len\":").count();
+    let max_workgroup = max_json_u32(&text, "max_flat_workgroup_size");
+    let max_vgpr = max_json_u32(&text, "vgpr_count");
+    let max_sgpr = max_json_u32(&text, "sgpr_count");
+    let max_lds = max_json_u32(&text, "group_segment_fixed_size");
+    let max_private = max_json_u32(&text, "private_segment_fixed_size");
+    let dynamic_stack = text.matches("\"uses_dynamic_stack\": true").count();
+    println!("metadata: {}", path.display());
+    println!("target: {target}");
+    println!("arch: {arch}");
+    println!("kernels: {kernel_count}");
+    println!("buffer contracts: {contract_count}");
+    if let Some(value) = max_workgroup {
+        println!("max flat workgroup size: {value}");
+    }
+    if let Some(value) = max_vgpr {
+        println!("max VGPR count: {value}");
+    }
+    if let Some(value) = max_sgpr {
+        println!("max SGPR count: {value}");
+    }
+    if let Some(value) = max_lds {
+        println!("max static LDS bytes: {value}");
+    }
+    if let Some(value) = max_private {
+        println!("max private segment bytes: {value}");
+    }
+    println!("kernels using dynamic stack: {dynamic_stack}");
+    if !resources.is_empty() {
+        println!();
+        println!("per-kernel resources:");
+        println!(
+            "{:<30} {:>5} {:>5} {:>5} {:>7} {:>7} {:>8} {:>5} {:>5}",
+            "kernel", "vgpr", "sgpr", "wave", "lds", "private", "kernarg", "spill", "stack"
+        );
+        for row in resources {
+            println!(
+                "{:<30} {:>5} {:>5} {:>5} {:>7} {:>7} {:>8} {:>5} {:>5}",
+                row.name,
+                display_opt(row.vgpr_count),
+                display_opt(row.sgpr_count),
+                display_opt(row.wavefront_size),
+                display_opt(row.group_segment_fixed_size),
+                display_opt(row.private_segment_fixed_size),
+                display_opt(row.kernarg_segment_size),
+                display_spills(row.sgpr_spill_count, row.vgpr_spill_count),
+                display_bool(row.uses_dynamic_stack),
+            );
+        }
+    }
+    Ok(())
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+struct KernelResourceRow {
+    name: String,
+    kernarg_segment_size: Option<u32>,
+    max_flat_workgroup_size: Option<u32>,
+    group_segment_fixed_size: Option<u32>,
+    private_segment_fixed_size: Option<u32>,
+    sgpr_count: Option<u32>,
+    vgpr_count: Option<u32>,
+    sgpr_spill_count: Option<u32>,
+    vgpr_spill_count: Option<u32>,
+    wavefront_size: Option<u32>,
+    uses_dynamic_stack: Option<bool>,
+}
+
+fn parse_kernel_resource_rows(text: &str) -> Vec<KernelResourceRow> {
+    let mut rows = Vec::new();
+    let mut current: Option<KernelResourceRow> = None;
+    let mut in_code_object = false;
+
+    for line in text.lines() {
+        if line.starts_with("      \"name\":") {
+            if let Some(row) = current.take() {
+                rows.push(row);
+            }
+            current = find_json_string(line, "name").map(|name| KernelResourceRow {
+                name,
+                ..KernelResourceRow::default()
+            });
+            in_code_object = false;
+            continue;
+        }
+
+        let trimmed = line.trim();
+        if trimmed == "\"code_object\": {" {
+            in_code_object = true;
+            continue;
+        }
+        if !in_code_object {
+            continue;
+        }
+        if trimmed.trim_end_matches(',') == "}" {
+            in_code_object = false;
+            continue;
+        }
+
+        if let Some(row) = current.as_mut() {
+            parse_kernel_resource_field(row, trimmed);
+        }
+    }
+
+    if let Some(row) = current {
+        rows.push(row);
+    }
+    rows
+}
+
+fn parse_kernel_resource_field(row: &mut KernelResourceRow, line: &str) {
+    if let Some(value) = json_u32_field(line, "kernarg_segment_size") {
+        row.kernarg_segment_size = Some(value);
+    } else if let Some(value) = json_u32_field(line, "max_flat_workgroup_size") {
+        row.max_flat_workgroup_size = Some(value);
+    } else if let Some(value) = json_u32_field(line, "group_segment_fixed_size") {
+        row.group_segment_fixed_size = Some(value);
+    } else if let Some(value) = json_u32_field(line, "private_segment_fixed_size") {
+        row.private_segment_fixed_size = Some(value);
+    } else if let Some(value) = json_u32_field(line, "sgpr_count") {
+        row.sgpr_count = Some(value);
+    } else if let Some(value) = json_u32_field(line, "vgpr_count") {
+        row.vgpr_count = Some(value);
+    } else if let Some(value) = json_u32_field(line, "sgpr_spill_count") {
+        row.sgpr_spill_count = Some(value);
+    } else if let Some(value) = json_u32_field(line, "vgpr_spill_count") {
+        row.vgpr_spill_count = Some(value);
+    } else if let Some(value) = json_u32_field(line, "wavefront_size") {
+        row.wavefront_size = Some(value);
+    } else if let Some(value) = json_bool_field(line, "uses_dynamic_stack") {
+        row.uses_dynamic_stack = Some(value);
+    }
+}
+
+fn json_u32_field(line: &str, key: &str) -> Option<u32> {
+    let needle = format!("\"{key}\": ");
+    let value = line.trim().strip_prefix(&needle)?;
+    value.trim_end_matches(',').parse::<u32>().ok()
+}
+
+fn json_bool_field(line: &str, key: &str) -> Option<bool> {
+    let needle = format!("\"{key}\": ");
+    match line.trim().strip_prefix(&needle)?.trim_end_matches(',') {
+        "true" => Some(true),
+        "false" => Some(false),
+        _ => None,
+    }
+}
+
+fn display_opt(value: Option<u32>) -> String {
+    value.map_or_else(|| "-".to_string(), |value| value.to_string())
+}
+
+fn display_bool(value: Option<bool>) -> &'static str {
+    match value {
+        Some(true) => "yes",
+        Some(false) => "no",
+        None => "-",
+    }
+}
+
+fn display_spills(sgpr: Option<u32>, vgpr: Option<u32>) -> String {
+    match (sgpr, vgpr) {
+        (Some(sgpr), Some(vgpr)) => format!("{sgpr}/{vgpr}"),
+        (Some(sgpr), None) => format!("{sgpr}/-"),
+        (None, Some(vgpr)) => format!("-/{vgpr}"),
+        (None, None) => "-".to_string(),
+    }
+}
+
+fn find_json_string(text: &str, key: &str) -> Option<String> {
+    let needle = format!("\"{key}\": \"");
+    let start = text.find(&needle)? + needle.len();
+    let rest = &text[start..];
+    let end = rest.find('"')?;
+    Some(rest[..end].to_string())
+}
+
+fn max_json_u32(text: &str, key: &str) -> Option<u32> {
+    let needle = format!("\"{key}\": ");
+    text.lines()
+        .filter_map(|line| {
+            let value = line.trim().strip_prefix(&needle)?;
+            value.trim_end_matches(',').parse::<u32>().ok()
+        })
+        .max()
+}
+
+fn workspace_root() -> Result<PathBuf, String> {
+    env::current_dir().map_err(|err| format!("failed to get current directory: {err}"))
+}
+
+fn detect_arch() -> Option<String> {
+    let output = Command::new("/opt/rocm/bin/rocminfo").output().ok()?;
+    if !output.status.success() {
+        return None;
+    }
+
+    String::from_utf8_lossy(&output.stdout)
+        .lines()
+        .find_map(|line| {
+            let (_, value) = line.split_once("Name:")?;
+            let value = value.trim();
+            if value.starts_with("gfx") && !value.contains('-') {
+                Some(value.to_string())
+            } else {
+                None
+            }
+        })
+}
+
+fn ensure_tool(program: &str, args: &[&str]) -> Result<(), String> {
+    let status = Command::new(program)
+        .args(args)
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .status()
+        .map_err(|err| format!("failed to run {program}: {err}"))?;
+    if status.success() {
+        Ok(())
+    } else {
+        Err(format!("{program} {:?} failed", args))
+    }
+}
+
+fn ensure_file(path: PathBuf) -> Result<(), String> {
+    if path.is_file() {
+        Ok(())
+    } else {
+        Err(format!("required tool not found: {}", path.display()))
+    }
+}
+
+fn build_device_crate(device_crate: &Path, arch: &str) -> Result<(), String> {
+    run_command(
+        Command::new("cargo")
+            .arg("+nightly")
+            .arg("rustc")
+            .arg("-Z")
+            .arg("build-std=core")
+            .arg("--target")
+            .arg(TARGET)
+            .arg("--release")
+            .arg("--")
+            .arg("--emit=llvm-ir")
+            .current_dir(device_crate)
+            .env_remove("CARGO_ENCODED_RUSTFLAGS")
+            .env_remove("RUSTC")
+            .env_remove("RUSTC_WRAPPER")
+            .env_remove("RUSTDOC")
+            .env("RUSTFLAGS", format!("-C target-cpu={arch}")),
+        "compile Rust device crate to AMDGPU LLVM IR",
+    )
+}
+
+fn discover_device_crate_bundle(root_crate: &Path) -> Result<Vec<PathBuf>, String> {
+    let mut discovered = Vec::new();
+    let mut seen = BTreeSet::new();
+    discover_device_crate_bundle_inner(root_crate, true, &mut seen, &mut discovered)?;
+    Ok(discovered)
+}
+
+fn discover_device_crate_bundle_inner(
+    crate_path: &Path,
+    include_even_without_kernels: bool,
+    seen: &mut BTreeSet<PathBuf>,
+    discovered: &mut Vec<PathBuf>,
+) -> Result<(), String> {
+    let canonical = crate_path
+        .canonicalize()
+        .map_err(|err| format!("failed to canonicalize {}: {err}", crate_path.display()))?;
+    if !seen.insert(canonical.clone()) {
+        return Ok(());
+    }
+
+    if include_even_without_kernels || crate_contains_kernel_attribute(&canonical)? {
+        discovered.push(canonical.clone());
+    }
+
+    for dependency in path_dependencies(&canonical)? {
+        discover_device_crate_bundle_inner(&dependency, false, seen, discovered)?;
+    }
+    Ok(())
+}
+
+fn crate_contains_kernel_attribute(crate_path: &Path) -> Result<bool, String> {
+    let src = crate_path.join("src");
+    if !src.is_dir() {
+        return Ok(false);
+    }
+    contains_kernel_attribute_in_dir(&src)
+}
+
+fn contains_kernel_attribute_in_dir(dir: &Path) -> Result<bool, String> {
+    for entry in
+        fs::read_dir(dir).map_err(|err| format!("failed to read {}: {err}", dir.display()))?
+    {
+        let entry = entry.map_err(|err| format!("failed to read directory entry: {err}"))?;
+        let path = entry.path();
+        if path.is_dir() {
+            if contains_kernel_attribute_in_dir(&path)? {
+                return Ok(true);
+            }
+        } else if path.extension() == Some(OsStr::new("rs")) {
+            let source = fs::read_to_string(&path)
+                .map_err(|err| format!("failed to read {}: {err}", path.display()))?;
+            if source.lines().any(|line| is_kernel_attribute(line.trim())) {
+                return Ok(true);
+            }
+        }
+    }
+    Ok(false)
+}
+
+fn path_dependencies(crate_path: &Path) -> Result<Vec<PathBuf>, String> {
+    let manifest = crate_path.join("Cargo.toml");
+    let text = fs::read_to_string(&manifest)
+        .map_err(|err| format!("failed to read {}: {err}", manifest.display()))?;
+    let mut deps = Vec::new();
+    for line in text.lines() {
+        let Some(path) = parse_inline_path_dependency(line) else {
+            continue;
+        };
+        let dependency = crate_path.join(path);
+        if dependency.join("Cargo.toml").is_file() {
+            deps.push(dependency);
+        }
+    }
+    Ok(deps)
+}
+
+fn parse_inline_path_dependency(line: &str) -> Option<PathBuf> {
+    let line = line.trim();
+    if line.starts_with('#') || !line.contains("path") {
+        return None;
+    }
+    let path_pos = line.find("path")?;
+    let after_path = &line[path_pos + "path".len()..];
+    let (_, value) = after_path.split_once('=')?;
+    let value = value.trim();
+    let value = value.strip_prefix('"')?;
+    let end = value.find('"')?;
+    Some(PathBuf::from(&value[..end]))
+}
+
+fn package_name(device_crate: &Path) -> Result<String, String> {
+    let manifest = device_crate.join("Cargo.toml");
+    let text = fs::read_to_string(&manifest)
+        .map_err(|err| format!("failed to read {}: {err}", manifest.display()))?;
+    parse_package_name(&text)
+        .ok_or_else(|| format!("failed to find [package] name in {}", manifest.display()))
+}
+
+fn parse_package_name(manifest: &str) -> Option<String> {
+    let mut in_package = false;
+    for line in manifest.lines() {
+        let line = line.trim();
+        if line.starts_with('[') {
+            in_package = line == "[package]";
+            continue;
+        }
+        if in_package && line.starts_with("name") {
+            let (_, value) = line.split_once('=')?;
+            return Some(value.trim().trim_matches('"').to_string());
+        }
+    }
+    None
+}
+
+fn newest_llvm_ir(deps_dir: &Path, package_name: &str) -> Result<PathBuf, String> {
+    let stem = package_name.replace('-', "_");
+    let entries = fs::read_dir(deps_dir)
+        .map_err(|err| format!("failed to read {}: {err}", deps_dir.display()))?;
+    let mut candidates = Vec::new();
+    for entry in entries {
+        let entry = entry.map_err(|err| format!("failed to read directory entry: {err}"))?;
+        let path = entry.path();
+        let Some(name) = path.file_name().and_then(OsStr::to_str) else {
+            continue;
+        };
+        if path.extension() == Some(OsStr::new("ll"))
+            && !name.ends_with(".kernel.ll")
+            && name.starts_with(&format!("{stem}-"))
+        {
+            let modified = entry
+                .metadata()
+                .and_then(|m| m.modified())
+                .map_err(|err| format!("failed to stat {}: {err}", path.display()))?;
+            candidates.push((modified, path));
+        }
+    }
+
+    candidates
+        .into_iter()
+        .max_by_key(|(modified, _)| *modified)
+        .map(|(_, path)| path)
+        .ok_or_else(|| {
+            format!(
+                "no rustc-emitted .ll file for package `{package_name}` found in {}",
+                deps_dir.display()
+            )
+        })
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct KernelDecl {
+    name: String,
+    args: Vec<KernelArg>,
+    contracts: Vec<BufferContract>,
+    span: SourceSpan,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct SourceSpan {
+    path: PathBuf,
+    line: usize,
+    signature: String,
+}
+
+impl std::fmt::Display for SourceSpan {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            f,
+            "{}:{}: {}",
+            self.path.display(),
+            self.line,
+            self.signature.trim()
+        )
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct KernelArg {
+    name: String,
+    ty: String,
+    kind: ArgKind,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct DeviceStruct {
+    name: String,
+    fields: Vec<DeviceStructField>,
+    span: SourceSpan,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct DeviceStructField {
+    name: String,
+    ty: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum ArgKind {
+    MutPtr(String),
+    ConstPtr(String),
+    Scalar,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct BufferContract {
+    buffer: String,
+    required_len: LenExpr,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct LenExpr {
+    source: String,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+struct CodeObjectMetadata {
+    kernels: BTreeMap<String, KernelObjectMetadata>,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+struct KernelObjectMetadata {
+    kernarg_segment_size: Option<u32>,
+    kernarg_segment_align: Option<u32>,
+    max_flat_workgroup_size: Option<u32>,
+    group_segment_fixed_size: Option<u32>,
+    private_segment_fixed_size: Option<u32>,
+    sgpr_count: Option<u32>,
+    vgpr_count: Option<u32>,
+    sgpr_spill_count: Option<u32>,
+    vgpr_spill_count: Option<u32>,
+    wavefront_size: Option<u32>,
+    uses_dynamic_stack: Option<bool>,
+    args: BTreeMap<String, KernelArgObjectMetadata>,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+struct KernelArgObjectMetadata {
+    address_space: Option<String>,
+    offset: Option<u32>,
+    size: Option<u32>,
+    value_kind: Option<String>,
+}
+
+fn discover_kernels(device_crate: &Path) -> Result<BTreeMap<String, KernelDecl>, String> {
+    let src_dir = device_crate.join("src");
+    let mut kernels = BTreeMap::new();
+    discover_kernels_in_dir(&src_dir, &mut kernels)?;
+    Ok(kernels)
+}
+
+fn discover_kernels_in_dir(
+    dir: &Path,
+    kernels: &mut BTreeMap<String, KernelDecl>,
+) -> Result<(), String> {
+    for entry in
+        fs::read_dir(dir).map_err(|err| format!("failed to read {}: {err}", dir.display()))?
+    {
+        let entry = entry.map_err(|err| format!("failed to read directory entry: {err}"))?;
+        let path = entry.path();
+        if path.is_dir() {
+            discover_kernels_in_dir(&path, kernels)?;
+        } else if path.extension() == Some(OsStr::new("rs")) {
+            let source = fs::read_to_string(&path)
+                .map_err(|err| format!("failed to read {}: {err}", path.display()))?;
+            for kernel in discover_kernels_in_source_at(&source, &path)? {
+                if kernels
+                    .insert(kernel.name.clone(), kernel.clone())
+                    .is_some()
+                {
+                    return Err(format!("duplicate #[kernel] function: {}", kernel.name));
+                }
+            }
+        }
+    }
+    Ok(())
+}
+
+#[cfg(test)]
+fn discover_kernels_in_source(source: &str) -> Result<Vec<KernelDecl>, String> {
+    discover_kernels_in_source_at(source, Path::new("<source>"))
+}
+
+fn discover_kernels_in_source_at(source: &str, path: &Path) -> Result<Vec<KernelDecl>, String> {
+    let mut kernels = Vec::new();
+    let mut expect_function = false;
+    let mut signature = String::new();
+    let mut pending_contracts = Vec::new();
+    let mut signature_start_line = 0usize;
+
+    for (line_index, line) in source.lines().enumerate() {
+        let trimmed = line.trim();
+        if let Some(contract) = parse_contract_comment(trimmed)? {
+            pending_contracts.push(contract);
+            continue;
+        }
+
+        if is_kernel_attribute(trimmed) {
+            expect_function = true;
+            signature_start_line = line_index + 1;
+            continue;
+        }
+
+        if expect_function {
+            signature.push(' ');
+            signature.push_str(trimmed);
+
+            if trimmed.contains('{') {
+                let span = SourceSpan {
+                    path: path.to_path_buf(),
+                    line: signature_start_line,
+                    signature: signature.clone(),
+                };
+                let mut kernel = parse_kernel_decl(&signature, span)?;
+                kernel.contracts = std::mem::take(&mut pending_contracts);
+                validate_contracts(&kernel)?;
+                kernels.push(kernel);
+                signature.clear();
+                expect_function = false;
+            } else if !trimmed.starts_with("#[") && !trimmed.is_empty() {
+                continue;
+            }
+        } else if !trimmed.starts_with("#[") && !trimmed.is_empty() {
+            pending_contracts.clear();
+        }
+    }
+
+    Ok(kernels)
+}
+
+fn discover_device_structs(device_crate: &Path) -> Result<BTreeMap<String, DeviceStruct>, String> {
+    let src_dir = device_crate.join("src");
+    let mut structs = BTreeMap::new();
+    discover_device_structs_in_dir(&src_dir, &mut structs)?;
+    Ok(structs)
+}
+
+fn discover_device_structs_in_dir(
+    dir: &Path,
+    structs: &mut BTreeMap<String, DeviceStruct>,
+) -> Result<(), String> {
+    for entry in
+        fs::read_dir(dir).map_err(|err| format!("failed to read {}: {err}", dir.display()))?
+    {
+        let entry = entry.map_err(|err| format!("failed to read directory entry: {err}"))?;
+        let path = entry.path();
+        if path.is_dir() {
+            discover_device_structs_in_dir(&path, structs)?;
+        } else if path.extension() == Some(OsStr::new("rs")) {
+            let source = fs::read_to_string(&path)
+                .map_err(|err| format!("failed to read {}: {err}", path.display()))?;
+            for device_struct in discover_device_structs_in_source_at(&source, &path)? {
+                structs.insert(device_struct.name.clone(), device_struct);
+            }
+        }
+    }
+    Ok(())
+}
+
+#[cfg(test)]
+fn discover_device_structs_in_source(source: &str) -> Result<Vec<DeviceStruct>, String> {
+    discover_device_structs_in_source_at(source, Path::new("<source>"))
+}
+
+fn discover_device_structs_in_source_at(
+    source: &str,
+    path: &Path,
+) -> Result<Vec<DeviceStruct>, String> {
+    let mut structs = Vec::new();
+    let mut saw_repr_c = false;
+    let mut struct_source = String::new();
+    let mut struct_start_line = 0usize;
+
+    for (line_index, line) in source.lines().enumerate() {
+        let trimmed = line.trim();
+        if trimmed == "#[repr(C)]" {
+            saw_repr_c = true;
+            struct_start_line = line_index + 1;
+            continue;
+        }
+        if saw_repr_c && trimmed.starts_with("#[") {
+            continue;
+        }
+        if saw_repr_c && (trimmed.starts_with("pub struct ") || trimmed.starts_with("struct ")) {
+            struct_source.push_str(trimmed);
+            if trimmed.contains('}') {
+                structs.push(parse_device_struct(
+                    &struct_source,
+                    SourceSpan {
+                        path: path.to_path_buf(),
+                        line: struct_start_line,
+                        signature: struct_source.clone(),
+                    },
+                )?);
+                struct_source.clear();
+                saw_repr_c = false;
+            }
+            continue;
+        }
+        if !struct_source.is_empty() {
+            struct_source.push(' ');
+            struct_source.push_str(trimmed);
+            if trimmed.contains('}') {
+                structs.push(parse_device_struct(
+                    &struct_source,
+                    SourceSpan {
+                        path: path.to_path_buf(),
+                        line: struct_start_line,
+                        signature: struct_source.clone(),
+                    },
+                )?);
+                struct_source.clear();
+                saw_repr_c = false;
+            }
+            continue;
+        }
+        if saw_repr_c && !trimmed.is_empty() {
+            saw_repr_c = false;
+        }
+    }
+
+    Ok(structs)
+}
+
+fn parse_device_struct(source: &str, span: SourceSpan) -> Result<DeviceStruct, String> {
+    let struct_pos = source
+        .find("struct ")
+        .ok_or_else(|| format!("{}: malformed repr(C) struct", span))?
+        + "struct ".len();
+    let name_end = source[struct_pos..]
+        .find(|ch: char| ch == '{' || ch.is_whitespace())
+        .ok_or_else(|| format!("{}: malformed repr(C) struct name", span))?
+        + struct_pos;
+    let name = source[struct_pos..name_end].trim().to_string();
+    if name.contains('<') {
+        return Err(format!(
+            "{}: generic repr(C) device structs are not supported in generated host bindings",
+            span
+        ));
+    }
+    let body_start = source
+        .find('{')
+        .ok_or_else(|| format!("{}: missing struct body", span))?
+        + 1;
+    let body_end = source
+        .rfind('}')
+        .ok_or_else(|| format!("{}: missing struct body terminator", span))?;
+    let body = &source[body_start..body_end];
+    let fields = body
+        .split(',')
+        .map(str::trim)
+        .filter(|field| !field.is_empty())
+        .map(|field| {
+            let field = field.strip_prefix("pub ").unwrap_or(field).trim();
+            let (name, ty) = field
+                .split_once(':')
+                .ok_or_else(|| format!("{}: malformed field `{field}`", span))?;
+            Ok(DeviceStructField {
+                name: name.trim().to_string(),
+                ty: ty.trim().to_string(),
+            })
+        })
+        .collect::<Result<Vec<_>, String>>()?;
+    Ok(DeviceStruct { name, fields, span })
+}
+
+fn is_kernel_attribute(line: &str) -> bool {
+    matches!(
+        line,
+        "#[kernel]" | "#[rocm_oxide_kernel::kernel]" | "#[::rocm_oxide_kernel::kernel]"
+    )
+}
+
+fn parse_kernel_decl(signature: &str, span: SourceSpan) -> Result<KernelDecl, String> {
+    let fn_pos = signature
+        .find("fn ")
+        .ok_or_else(|| format!("{}: malformed #[kernel] signature", span))?
+        + 3;
+    let name_start = fn_pos;
+    let name_end = signature[name_start..]
+        .find('(')
+        .ok_or_else(|| format!("{}: malformed #[kernel] signature", span))?
+        + name_start;
+    let raw_name = signature[name_start..name_end].trim();
+    if raw_name.contains('<') {
+        return Err(format!(
+            "{}: generic #[kernel] functions are not exported directly yet; add a monomorphic wrapper such as `fn {}_f32(...)` that calls the generic helper",
+            span,
+            raw_name.split('<').next().unwrap_or(raw_name)
+        ));
+    }
+    let name = raw_name.to_string();
+    if name.is_empty() {
+        return Err(format!(
+            "{}: missing function name in #[kernel] signature",
+            span
+        ));
+    }
+
+    let args_start = name_end + 1;
+    let args_end = signature[args_start..]
+        .find(')')
+        .ok_or_else(|| format!("{}: malformed #[kernel] argument list", span))?
+        + args_start;
+    let args = signature[args_start..args_end]
+        .split(',')
+        .map(str::trim)
+        .filter(|arg| !arg.is_empty())
+        .map(parse_kernel_arg)
+        .collect::<Result<Vec<_>, _>>()?;
+
+    Ok(KernelDecl {
+        name,
+        args,
+        contracts: Vec::new(),
+        span,
+    })
+}
+
+fn parse_kernel_arg(arg: &str) -> Result<KernelArg, String> {
+    let (name, ty) = arg
+        .split_once(':')
+        .ok_or_else(|| format!("malformed kernel argument: {arg}"))?;
+    let name = name.trim().to_string();
+    let ty = ty.trim().to_string();
+    if name.is_empty() || ty.is_empty() {
+        return Err(format!("malformed kernel argument: {arg}"));
+    }
+
+    let kind = if let Some(inner) = ty.strip_prefix("*mut ") {
+        ArgKind::MutPtr(inner.trim().to_string())
+    } else if let Some(inner) = ty.strip_prefix("*const ") {
+        ArgKind::ConstPtr(inner.trim().to_string())
+    } else {
+        ArgKind::Scalar
+    };
+
+    Ok(KernelArg { name, ty, kind })
+}
+
+fn parse_contract_comment(line: &str) -> Result<Option<BufferContract>, String> {
+    let Some(rest) = line.strip_prefix("// rocm-oxide:") else {
+        return Ok(None);
+    };
+    let rest = rest.trim();
+    let Some(rest) = rest.strip_prefix("len(") else {
+        return Err(format!("unsupported rocm-oxide contract: {line}"));
+    };
+    let (buffer, rest) = rest
+        .split_once(")=")
+        .ok_or_else(|| format!("malformed rocm-oxide length contract: {line}"))?;
+    let buffer = buffer.trim();
+    if !is_identifier(buffer) {
+        return Err(format!(
+            "invalid buffer name in rocm-oxide contract: {line}"
+        ));
+    }
+
+    let expr = rest.trim();
+    validate_len_expr(expr)?;
+    Ok(Some(BufferContract {
+        buffer: buffer.to_string(),
+        required_len: LenExpr {
+            source: expr.to_string(),
+        },
+    }))
+}
+
+fn validate_contracts(kernel: &KernelDecl) -> Result<(), String> {
+    let pointer_args = kernel
+        .args
+        .iter()
+        .filter(|arg| !matches!(arg.kind, ArgKind::Scalar))
+        .map(|arg| arg.name.as_str())
+        .collect::<BTreeSet<_>>();
+    let scalar_args = kernel
+        .args
+        .iter()
+        .filter(|arg| matches!(arg.kind, ArgKind::Scalar))
+        .map(|arg| arg.name.as_str())
+        .collect::<BTreeSet<_>>();
+
+    let mut seen = BTreeSet::new();
+    for contract in &kernel.contracts {
+        if !seen.insert(contract.buffer.as_str()) {
+            return Err(format!(
+                "duplicate length contract for `{}` in kernel `{}`",
+                contract.buffer, kernel.name
+            ));
+        }
+        if !pointer_args.contains(contract.buffer.as_str()) {
+            return Err(format!(
+                "length contract for `{}` in kernel `{}` does not match a pointer argument",
+                contract.buffer, kernel.name
+            ));
+        }
+        for ident in contract.required_len.identifiers() {
+            if !scalar_args.contains(ident.as_str()) {
+                return Err(format!(
+                    "length contract for `{}` in kernel `{}` references non-scalar `{ident}`",
+                    contract.buffer, kernel.name
+                ));
+            }
+        }
+    }
+
+    Ok(())
+}
+
+fn validate_len_expr(expr: &str) -> Result<(), String> {
+    let tokens = tokenize_len_expr(expr)?;
+    if tokens.is_empty() {
+        return Err("empty length contract expression".to_string());
+    }
+    let mut expect_value = true;
+    for token in tokens {
+        if expect_value {
+            if !is_identifier(&token) && !token.chars().all(|ch| ch.is_ascii_digit()) {
+                return Err(format!("invalid length expression token `{token}`"));
+            }
+        } else if token != "*" && token != "/" && token != "+" && token != "-" {
+            return Err(format!("invalid length expression operator `{token}`"));
+        }
+        expect_value = !expect_value;
+    }
+    if expect_value {
+        return Err(format!("length expression ends with an operator: {expr}"));
+    }
+    Ok(())
+}
+
+fn tokenize_len_expr(expr: &str) -> Result<Vec<String>, String> {
+    let mut tokens = Vec::new();
+    let mut current = String::new();
+    for ch in expr.chars() {
+        if ch.is_ascii_alphanumeric() || ch == '_' {
+            current.push(ch);
+        } else if matches!(ch, '*' | '/' | '+' | '-') {
+            if current.is_empty() {
+                return Err(format!("operator `{ch}` without left operand in `{expr}`"));
+            }
+            tokens.push(std::mem::take(&mut current));
+            tokens.push(ch.to_string());
+        } else if ch.is_whitespace() {
+            if !current.is_empty() {
+                tokens.push(std::mem::take(&mut current));
+            }
+        } else {
+            return Err(format!(
+                "unsupported character `{ch}` in length expression `{expr}`"
+            ));
+        }
+    }
+    if !current.is_empty() {
+        tokens.push(current);
+    }
+    Ok(tokens)
+}
+
+fn is_identifier(value: &str) -> bool {
+    let mut chars = value.chars();
+    let Some(first) = chars.next() else {
+        return false;
+    };
+    (first == '_' || first.is_ascii_alphabetic())
+        && chars.all(|ch| ch == '_' || ch.is_ascii_alphanumeric())
+}
+
+fn transform_ir(
+    source: &str,
+    kernel_names: &BTreeSet<String>,
+    kernels: &BTreeMap<String, KernelDecl>,
+) -> Result<String, String> {
+    let mut output = Vec::new();
+    let mut lines = source.lines().peekable();
+    let mut found_kernels = Vec::new();
+
+    while let Some(line) = lines.next() {
+        if let Some(kernel) = KernelSignature::parse(line, kernel_names)? {
+            found_kernels.push(kernel.name.clone());
+            let mut body = vec![kernel.rewritten_signature()];
+            for line in lines.by_ref() {
+                body.push(line.to_string());
+                if line == "}" {
+                    break;
+                }
+            }
+            output.extend(rewrite_kernel_body(body, kernel.global_pointer_args));
+        } else {
+            output.push(rewrite_kernel_attributes(line));
+        }
+    }
+
+    if found_kernels.is_empty() {
+        return Err(format!(
+            "none of the marked kernels were found in LLVM IR:\n{}",
+            kernel_names
+                .iter()
+                .map(|name| {
+                    kernels
+                        .get(name)
+                        .map(|kernel| format!("  - {name} declared at {}", kernel.span))
+                        .unwrap_or_else(|| format!("  - {name}"))
+                })
+                .collect::<Vec<_>>()
+                .join("\n")
+        ));
+    }
+
+    let found = found_kernels.iter().cloned().collect::<BTreeSet<_>>();
+    let missing = kernel_names.difference(&found).cloned().collect::<Vec<_>>();
+    if !missing.is_empty() {
+        return Err(format!(
+            "marked kernels missing from LLVM IR:\n{}",
+            missing
+                .into_iter()
+                .map(|name| {
+                    kernels
+                        .get(&name)
+                        .map(|kernel| format!("  - {name} declared at {}", kernel.span))
+                        .unwrap_or_else(|| format!("  - {name}"))
+                })
+                .collect::<Vec<_>>()
+                .join("\n")
+        ));
+    }
+
+    Ok(output.join("\n") + "\n")
+}
+
+#[derive(Debug)]
+struct KernelSignature {
+    name: String,
+    rewritten: String,
+    global_pointer_args: BTreeSet<String>,
+}
+
+impl KernelSignature {
+    fn parse(line: &str, kernel_names: &BTreeSet<String>) -> Result<Option<Self>, String> {
+        if !line.starts_with("define void @") {
+            return Ok(None);
+        }
+
+        let name_start = line
+            .find('@')
+            .ok_or_else(|| format!("malformed kernel signature: {line}"))?
+            + 1;
+        let name_end = line[name_start..]
+            .find('(')
+            .ok_or_else(|| format!("malformed kernel signature: {line}"))?
+            + name_start;
+        let name = line[name_start..name_end].to_string();
+        if !kernel_names.contains(&name) {
+            return Ok(None);
+        }
+
+        let args_end = line
+            .rfind(')')
+            .ok_or_else(|| format!("malformed kernel signature: {line}"))?;
+        let args = &line[name_end + 1..args_end];
+        let mut global_pointer_args = BTreeSet::new();
+        let rewritten_args = split_args(args)
+            .into_iter()
+            .map(|arg| {
+                let trimmed = arg.trim();
+                if trimmed.starts_with("ptr ") {
+                    if let Some(name) = argument_name(trimmed) {
+                        global_pointer_args.insert(name);
+                    }
+                    trimmed.replacen("ptr ", "ptr addrspace(1) ", 1)
+                } else {
+                    trimmed.to_string()
+                }
+            })
+            .collect::<Vec<_>>()
+            .join(", ");
+
+        let suffix = line[args_end + 1..].replace(" unnamed_addr", " local_unnamed_addr");
+        let rewritten =
+            format!("define protected amdgpu_kernel void @{name}({rewritten_args}){suffix}");
+
+        Ok(Some(Self {
+            name,
+            rewritten,
+            global_pointer_args,
+        }))
+    }
+
+    fn rewritten_signature(&self) -> String {
+        self.rewritten.clone()
+    }
+}
+
+fn split_args(args: &str) -> Vec<&str> {
+    if args.trim().is_empty() {
+        Vec::new()
+    } else {
+        args.split(',').collect()
+    }
+}
+
+fn argument_name(arg: &str) -> Option<String> {
+    arg.split_whitespace()
+        .last()
+        .and_then(|token| token.strip_prefix('%'))
+        .map(ToOwned::to_owned)
+}
+
+fn rewrite_kernel_body(lines: Vec<String>, mut global_pointers: BTreeSet<String>) -> Vec<String> {
+    let mut rewritten = Vec::with_capacity(lines.len());
+
+    for line in lines {
+        let mut current = line;
+        for name in &global_pointers {
+            current = current.replace(
+                &format!("ptr %{name}"),
+                &format!("ptr addrspace(1) %{name}"),
+            );
+        }
+        if current.contains(" phi ptr ")
+            && global_pointers
+                .iter()
+                .any(|name| current.contains(&format!("%{name}")))
+        {
+            current = current.replacen(" phi ptr ", " phi ptr addrspace(1) ", 1);
+        }
+        if current.contains(" load ptr, ptr addrspace(1)") {
+            current = current.replacen(" load ptr,", " load ptr addrspace(1),", 1);
+        }
+
+        if produces_global_pointer(&current)
+            && let Some(result) = assigned_value(&current)
+        {
+            global_pointers.insert(result);
+        }
+
+        rewritten.push(rewrite_kernel_attributes(&current));
+    }
+
+    rewritten
+}
+
+fn produces_global_pointer(line: &str) -> bool {
+    line.contains("ptr addrspace(1)")
+        && (line.contains("getelementptr")
+            || line.contains("addrspacecast")
+            || line.contains("bitcast")
+            || line.contains("select ")
+            || line.contains(" phi ")
+            || line.contains(" load ptr"))
+}
+
+fn assigned_value(line: &str) -> Option<String> {
+    let trimmed = line.trim_start();
+    let rest = trimmed.strip_prefix('%')?;
+    let (name, _) = rest.split_once(" = ")?;
+    Some(name.to_string())
+}
+
+fn rewrite_kernel_attributes(line: &str) -> String {
+    let line = line.replace(" nocreateundeforpoison", "");
+    if !line.starts_with("attributes #")
+        || !line.contains("\"target-cpu\"=")
+        || line.contains("\"amdgpu-flat-work-group-size\"=")
+    {
+        return line;
+    }
+    line.replacen(
+        "\"target-cpu\"=",
+        "\"amdgpu-flat-work-group-size\"=\"1,1024\" \"target-cpu\"=",
+        1,
+    )
+}
+
+fn validate_code_object(hsaco: &Path, expected_kernels: &BTreeSet<String>) -> Result<(), String> {
+    let output = Command::new(Path::new(ROCM_LLVM).join("llvm-readelf"))
+        .arg("-s")
+        .arg(hsaco)
+        .output()
+        .map_err(|err| format!("failed to run llvm-readelf: {err}"))?;
+    if !output.status.success() {
+        return Err(format!(
+            "llvm-readelf failed:\n{}",
+            String::from_utf8_lossy(&output.stderr)
+        ));
+    }
+
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let mut kernels = BTreeSet::new();
+    let mut descriptors = BTreeSet::new();
+    for line in stdout.lines() {
+        let is_function = line.contains(" FUNC ");
+        let is_object = line.contains(" OBJECT ");
+        for token in line.split_whitespace() {
+            if let Some(name) = token.strip_suffix(".kd") {
+                if is_object && expected_kernels.contains(name) {
+                    descriptors.insert(name.to_string());
+                }
+            } else if is_function && expected_kernels.contains(token) {
+                kernels.insert(token.to_string());
+            }
+        }
+    }
+
+    let missing_functions = expected_kernels
+        .difference(&kernels)
+        .cloned()
+        .collect::<Vec<_>>();
+    if !missing_functions.is_empty() {
+        return Err(format!(
+            "linked code object is missing kernel functions for: {}",
+            missing_functions.join(", ")
+        ));
+    }
+
+    let missing = expected_kernels
+        .difference(&descriptors)
+        .cloned()
+        .collect::<Vec<_>>();
+    if !missing.is_empty() {
+        return Err(format!(
+            "linked code object is missing kernel descriptors for: {}",
+            missing.join(", ")
+        ));
+    }
+
+    Ok(())
+}
+
+fn read_code_object_metadata(hsaco: &Path) -> Result<CodeObjectMetadata, String> {
+    let output = Command::new(Path::new(ROCM_LLVM).join("llvm-readelf"))
+        .arg("-n")
+        .arg(hsaco)
+        .output()
+        .map_err(|err| format!("failed to run llvm-readelf -n: {err}"))?;
+    if !output.status.success() {
+        return Err(format!(
+            "llvm-readelf -n failed:\n{}",
+            String::from_utf8_lossy(&output.stderr)
+        ));
+    }
+    parse_code_object_metadata(&String::from_utf8_lossy(&output.stdout))
+}
+
+fn parse_code_object_metadata(text: &str) -> Result<CodeObjectMetadata, String> {
+    let mut metadata = CodeObjectMetadata::default();
+    let mut block = Vec::new();
+    for line in text.lines() {
+        if line.trim() == "- .args:" {
+            parse_kernel_metadata_block(&mut metadata, &block)?;
+            block.clear();
+        }
+        if !block.is_empty() || line.trim() == "- .args:" {
+            block.push(line.to_string());
+        }
+    }
+    parse_kernel_metadata_block(&mut metadata, &block)?;
+    Ok(metadata)
+}
+
+fn parse_kernel_metadata_block(
+    metadata: &mut CodeObjectMetadata,
+    block: &[String],
+) -> Result<(), String> {
+    if block.is_empty() {
+        return Ok(());
+    }
+    let Some(name) = block
+        .iter()
+        .find_map(|line| line.strip_prefix("    .name:").map(clean_metadata_string))
+    else {
+        return Ok(());
+    };
+
+    let mut kernel = KernelObjectMetadata::default();
+    let mut pending_arg = KernelArgObjectMetadata::default();
+    let mut pending_arg_name: Option<String> = None;
+    for line in block {
+        let trimmed = line.trim();
+        if let Some(field) = line.strip_prefix("      - ") {
+            flush_kernel_arg(&mut kernel, &mut pending_arg_name, &mut pending_arg);
+            parse_arg_metadata_field(field.trim(), &mut pending_arg, &mut pending_arg_name);
+            continue;
+        }
+        if let Some(field) = line.strip_prefix("        .") {
+            parse_arg_metadata_field(
+                &format!(".{}", field.trim()),
+                &mut pending_arg,
+                &mut pending_arg_name,
+            );
+            continue;
+        }
+
+        if let Some(value) = metadata_u32(trimmed, ".kernarg_segment_size:") {
+            kernel.kernarg_segment_size = Some(value);
+        } else if let Some(value) = metadata_u32(trimmed, ".kernarg_segment_align:") {
+            kernel.kernarg_segment_align = Some(value);
+        } else if let Some(value) = metadata_u32(trimmed, ".max_flat_workgroup_size:") {
+            kernel.max_flat_workgroup_size = Some(value);
+        } else if let Some(value) = metadata_u32(trimmed, ".group_segment_fixed_size:") {
+            kernel.group_segment_fixed_size = Some(value);
+        } else if let Some(value) = metadata_u32(trimmed, ".private_segment_fixed_size:") {
+            kernel.private_segment_fixed_size = Some(value);
+        } else if let Some(value) = metadata_u32(trimmed, ".sgpr_count:") {
+            kernel.sgpr_count = Some(value);
+        } else if let Some(value) = metadata_u32(trimmed, ".vgpr_count:") {
+            kernel.vgpr_count = Some(value);
+        } else if let Some(value) = metadata_u32(trimmed, ".sgpr_spill_count:") {
+            kernel.sgpr_spill_count = Some(value);
+        } else if let Some(value) = metadata_u32(trimmed, ".vgpr_spill_count:") {
+            kernel.vgpr_spill_count = Some(value);
+        } else if let Some(value) = metadata_u32(trimmed, ".wavefront_size:") {
+            kernel.wavefront_size = Some(value);
+        } else if let Some(value) = metadata_bool(trimmed, ".uses_dynamic_stack:") {
+            kernel.uses_dynamic_stack = Some(value);
+        }
+    }
+    flush_kernel_arg(&mut kernel, &mut pending_arg_name, &mut pending_arg);
+    metadata.kernels.insert(name, kernel);
+    Ok(())
+}
+
+fn parse_arg_metadata_field(
+    field: &str,
+    arg: &mut KernelArgObjectMetadata,
+    arg_name: &mut Option<String>,
+) {
+    if let Some(value) = metadata_scalar(field, ".address_space:") {
+        arg.address_space = Some(clean_metadata_string(value));
+    } else if let Some(value) = metadata_scalar(field, ".name:") {
+        *arg_name = Some(clean_metadata_string(value));
+    } else if let Some(value) = metadata_u32(field, ".offset:") {
+        arg.offset = Some(value);
+    } else if let Some(value) = metadata_u32(field, ".size:") {
+        arg.size = Some(value);
+    } else if let Some(value) = metadata_scalar(field, ".value_kind:") {
+        arg.value_kind = Some(clean_metadata_string(value));
+    }
+}
+
+fn flush_kernel_arg(
+    kernel: &mut KernelObjectMetadata,
+    arg_name: &mut Option<String>,
+    arg: &mut KernelArgObjectMetadata,
+) {
+    if let Some(name) = arg_name.take() {
+        kernel.args.insert(name, std::mem::take(arg));
+    } else {
+        *arg = KernelArgObjectMetadata::default();
+    }
+}
+
+fn metadata_scalar<'a>(line: &'a str, key: &str) -> Option<&'a str> {
+    line.strip_prefix(key).map(str::trim)
+}
+
+fn metadata_u32(line: &str, key: &str) -> Option<u32> {
+    metadata_scalar(line, key)?.parse::<u32>().ok()
+}
+
+fn metadata_bool(line: &str, key: &str) -> Option<bool> {
+    match metadata_scalar(line, key)? {
+        "true" => Some(true),
+        "false" => Some(false),
+        _ => None,
+    }
+}
+
+fn clean_metadata_string(value: &str) -> String {
+    value
+        .trim()
+        .strip_prefix("!str ")
+        .unwrap_or(value.trim())
+        .trim_matches('"')
+        .to_string()
+}
+
+fn write_metadata(
+    path: &Path,
+    arch: &str,
+    hsaco: &Path,
+    kernels: &BTreeMap<String, KernelDecl>,
+    code_object_metadata: &CodeObjectMetadata,
+) -> Result<(), String> {
+    let mut out = String::new();
+    out.push_str("{\n");
+    out.push_str(&format!("  \"target\": \"{}\",\n", json_escape(TARGET)));
+    out.push_str(&format!("  \"arch\": \"{}\",\n", json_escape(arch)));
+    out.push_str(&format!(
+        "  \"hsaco\": \"{}\",\n",
+        json_escape(&hsaco.display().to_string())
+    ));
+    out.push_str("  \"kernels\": [\n");
+
+    for (kernel_index, kernel) in kernels.values().enumerate() {
+        if kernel_index > 0 {
+            out.push_str(",\n");
+        }
+        out.push_str("    {\n");
+        out.push_str(&format!(
+            "      \"name\": \"{}\",\n",
+            json_escape(&kernel.name)
+        ));
+        let object_metadata = code_object_metadata.kernels.get(&kernel.name);
+        out.push_str("      \"args\": [\n");
+        for (arg_index, arg) in kernel.args.iter().enumerate() {
+            if arg_index > 0 {
+                out.push_str(",\n");
+            }
+            out.push_str("        {\n");
+            out.push_str(&format!(
+                "          \"name\": \"{}\",\n",
+                json_escape(&arg.name)
+            ));
+            out.push_str(&format!(
+                "          \"type\": \"{}\",\n",
+                json_escape(&arg.ty)
+            ));
+            out.push_str(&format!("          \"kind\": \"{}\"", arg.kind.as_str()));
+            if let Some(object_arg) = object_metadata.and_then(|m| m.args.get(&arg.name)) {
+                if let Some(value) = object_arg.address_space.as_deref() {
+                    out.push_str(&format!(
+                        ",\n          \"address_space\": \"{}\"",
+                        json_escape(value)
+                    ));
+                }
+                if let Some(value) = object_arg.offset {
+                    out.push_str(&format!(",\n          \"offset\": {value}"));
+                }
+                if let Some(value) = object_arg.size {
+                    out.push_str(&format!(",\n          \"abi_size\": {value}"));
+                }
+                if let Some(value) = object_arg.value_kind.as_deref() {
+                    out.push_str(&format!(
+                        ",\n          \"value_kind\": \"{}\"",
+                        json_escape(value)
+                    ));
+                }
+            } else {
+                out.push_str(&format!(
+                    ",\n          \"abi_size\": {}",
+                    fallback_abi_size(arg)
+                ));
+                if !matches!(arg.kind, ArgKind::Scalar) {
+                    out.push_str(",\n          \"address_space\": \"global\"");
+                }
+            }
+            out.push('\n');
+            out.push_str("        }");
+        }
+        out.push_str("\n      ],\n");
+        out.push_str("      \"contracts\": [\n");
+        for (contract_index, contract) in kernel.contracts.iter().enumerate() {
+            if contract_index > 0 {
+                out.push_str(",\n");
+            }
+            out.push_str("        {\n");
+            out.push_str(&format!(
+                "          \"buffer\": \"{}\",\n",
+                json_escape(&contract.buffer)
+            ));
+            out.push_str(&format!(
+                "          \"required_len\": \"{}\"\n",
+                json_escape(&contract.required_len.source)
+            ));
+            out.push_str("        }");
+        }
+        out.push_str("\n      ],\n");
+        out.push_str("      \"code_object\": ");
+        write_kernel_object_metadata(&mut out, object_metadata);
+        out.push('\n');
+        out.push_str("    }");
+    }
+
+    out.push_str("\n  ]\n");
+    out.push_str("}\n");
+    fs::write(path, out).map_err(|err| format!("failed to write {}: {err}", path.display()))
+}
+
+fn write_kernel_object_metadata(out: &mut String, metadata: Option<&KernelObjectMetadata>) {
+    let Some(metadata) = metadata else {
+        out.push_str("null");
+        return;
+    };
+
+    out.push_str("{\n");
+    write_json_u32_field(
+        out,
+        "kernarg_segment_size",
+        metadata.kernarg_segment_size,
+        true,
+    );
+    write_json_u32_field(
+        out,
+        "kernarg_segment_align",
+        metadata.kernarg_segment_align,
+        false,
+    );
+    write_json_u32_field(
+        out,
+        "max_flat_workgroup_size",
+        metadata.max_flat_workgroup_size,
+        false,
+    );
+    write_json_u32_field(
+        out,
+        "group_segment_fixed_size",
+        metadata.group_segment_fixed_size,
+        false,
+    );
+    write_json_u32_field(
+        out,
+        "private_segment_fixed_size",
+        metadata.private_segment_fixed_size,
+        false,
+    );
+    write_json_u32_field(out, "sgpr_count", metadata.sgpr_count, false);
+    write_json_u32_field(out, "vgpr_count", metadata.vgpr_count, false);
+    write_json_u32_field(out, "sgpr_spill_count", metadata.sgpr_spill_count, false);
+    write_json_u32_field(out, "vgpr_spill_count", metadata.vgpr_spill_count, false);
+    write_json_u32_field(out, "wavefront_size", metadata.wavefront_size, false);
+    if let Some(value) = metadata.uses_dynamic_stack {
+        out.push_str(&format!(",\n        \"uses_dynamic_stack\": {value}"));
+    }
+    out.push_str("\n      }");
+}
+
+fn write_json_u32_field(out: &mut String, key: &str, value: Option<u32>, first: bool) {
+    if let Some(value) = value {
+        if !first {
+            out.push_str(",\n");
+        }
+        out.push_str(&format!("        \"{key}\": {value}"));
+    }
+}
+
+fn fallback_abi_size(arg: &KernelArg) -> u32 {
+    match &arg.kind {
+        ArgKind::MutPtr(_) | ArgKind::ConstPtr(_) => 8,
+        ArgKind::Scalar => match arg.ty.as_str() {
+            "usize" | "isize" | "u64" | "i64" | "f64" => 8,
+            "u32" | "i32" | "f32" => 4,
+            "u16" | "i16" => 2,
+            "u8" | "i8" | "bool" => 1,
+            _ => 8,
+        },
+    }
+}
+
+fn write_bindings(
+    path: &Path,
+    hsaco: &Path,
+    kernels: &BTreeMap<String, KernelDecl>,
+    device_structs: &BTreeMap<String, DeviceStruct>,
+) -> Result<(), String> {
+    let mut out = String::new();
+    out.push_str("// Generated by rocm-oxide-build. Do not edit by hand.\n");
+    out.push_str("use std::path::Path;\n\n");
+    let hsaco_file = hsaco
+        .file_name()
+        .and_then(OsStr::to_str)
+        .ok_or_else(|| format!("invalid hsaco path: {}", hsaco.display()))?;
+    out.push_str(&format!(
+        "pub const DEVICE_HSACO_BYTES: &[u8] = include_bytes!(\"{}\");\n\n",
+        hsaco_file
+    ));
+    for device_struct in device_structs.values() {
+        out.push_str(&generate_device_struct_binding(device_struct));
+        out.push('\n');
+    }
+    out.push_str("#[allow(dead_code)]\n");
+    out.push_str("pub struct DeviceKernels {\n");
+    out.push_str("    module: rocm_oxide::Module,\n");
+    out.push_str("}\n\n");
+    out.push_str("#[allow(dead_code)]\n");
+    out.push_str("impl DeviceKernels {\n");
+    out.push_str("    pub fn load(device: &rocm_oxide::Device, hsaco: impl AsRef<Path>) -> rocm_oxide::Result<Self> {\n");
+    out.push_str("        Ok(Self { module: device.load_code_object_file(hsaco)? })\n");
+    out.push_str("    }\n\n");
+    out.push_str("    pub fn load_embedded(device: &rocm_oxide::Device) -> rocm_oxide::Result<Self> {\n");
+    out.push_str("        Ok(Self { module: device.load_code_object(DEVICE_HSACO_BYTES)? })\n");
+    out.push_str("    }\n\n");
+
+    for kernel in kernels.values() {
+        out.push_str(&generate_kernel_binding(kernel)?);
+        out.push('\n');
+    }
+
+    out.push_str("}\n");
+    fs::write(path, out).map_err(|err| format!("failed to write {}: {err}", path.display()))
+}
+
+fn generate_device_struct_binding(device_struct: &DeviceStruct) -> String {
+    let mut out = String::new();
+    out.push_str("#[repr(C)]\n");
+    out.push_str("#[derive(Clone, Copy, Debug, Default)]\n");
+    out.push_str(&format!("pub struct {} {{\n", device_struct.name));
+    for field in &device_struct.fields {
+        out.push_str(&format!("    pub {}: {},\n", field.name, field.ty));
+    }
+    out.push_str("}\n");
+    out
+}
+
+fn generate_kernel_binding(kernel: &KernelDecl) -> Result<String, String> {
+    let mut params = vec!["config: rocm_oxide::LaunchConfig".to_string()];
+    let mut launch_args = Vec::new();
+    let mut pointer_arg_names = Vec::new();
+    let has_len_arg = kernel
+        .args
+        .iter()
+        .any(|arg| arg.name == "n" && matches!(arg.kind, ArgKind::Scalar));
+    let has_block_x_arg = kernel
+        .args
+        .iter()
+        .any(|arg| arg.name == "block_x" && matches!(arg.kind, ArgKind::Scalar));
+
+    for arg in &kernel.args {
+        match &arg.kind {
+            ArgKind::MutPtr(inner) => {
+                params.push(format!(
+                    "{}: &rocm_oxide::DeviceBuffer<{}>",
+                    arg.name, inner
+                ));
+                launch_args.push(format!("{}.as_mut_ptr()", arg.name));
+                pointer_arg_names.push(arg.name.clone());
+            }
+            ArgKind::ConstPtr(inner) => {
+                params.push(format!(
+                    "{}: &rocm_oxide::DeviceBuffer<{}>",
+                    arg.name, inner
+                ));
+                launch_args.push(format!("{}.as_ptr()", arg.name));
+                pointer_arg_names.push(arg.name.clone());
+            }
+            ArgKind::Scalar => {
+                params.push(format!("{}: {}", arg.name, arg.ty));
+                launch_args.push(arg.name.clone());
+            }
+        }
+    }
+
+    let mut out = String::new();
+    out.push_str(&format!(
+        "    pub unsafe fn {}(&self, {}) -> rocm_oxide::Result<()> {{\n",
+        kernel.name,
+        params.join(", ")
+    ));
+    out.push_str("        rocm_oxide::validate_launch_config(config)?;\n");
+    if kernel.contracts.is_empty() && has_len_arg {
+        for arg_name in &pointer_arg_names {
+            out.push_str(&format!(
+                "        rocm_oxide::validate_buffer_len(\"{arg_name}\", {arg_name}.len(), n)?;\n"
+            ));
+        }
+    }
+    for contract in &kernel.contracts {
+        out.push_str(&format!(
+            "        rocm_oxide::validate_buffer_len(\"{}\", {}.len(), {})?;\n",
+            contract.buffer,
+            contract.buffer,
+            contract.required_len.as_rust()
+        ));
+    }
+    if has_block_x_arg {
+        out.push_str("        rocm_oxide::validate_block_x(config, block_x)?;\n");
+    }
+    out.push_str(&format!(
+        "        let kernel = self.module.kernel(c\"{}\")?;\n",
+        kernel.name
+    ));
+    out.push_str("        unsafe {\n");
+    out.push_str("            rocm_oxide::launch!(\n");
+    out.push_str("                kernel,\n");
+    out.push_str("                config");
+    for arg in launch_args {
+        out.push_str(",\n                ");
+        out.push_str(&arg);
+    }
+    out.push_str(",\n            )\n");
+    out.push_str("        }\n");
+    out.push_str("    }\n");
+    Ok(out)
+}
+
+impl ArgKind {
+    fn as_str(&self) -> &'static str {
+        match self {
+            Self::MutPtr(_) => "mut_ptr",
+            Self::ConstPtr(_) => "const_ptr",
+            Self::Scalar => "scalar",
+        }
+    }
+}
+
+impl LenExpr {
+    fn identifiers(&self) -> Vec<String> {
+        tokenize_len_expr(&self.source)
+            .unwrap_or_default()
+            .into_iter()
+            .filter(|token| is_identifier(token))
+            .collect()
+    }
+
+    fn as_rust(&self) -> String {
+        self.source.clone()
+    }
+}
+
+fn json_escape(value: &str) -> String {
+    value
+        .replace('\\', "\\\\")
+        .replace('"', "\\\"")
+        .replace('\n', "\\n")
+}
+
+fn run_command(command: &mut Command, label: &str) -> Result<(), String> {
+    let output = command
+        .output()
+        .map_err(|err| format!("failed to {label}: {err}"))?;
+    if output.status.success() {
+        Ok(())
+    } else {
+        Err(format!(
+            "failed to {label}\nstatus: {}\nstdout:\n{}\nstderr:\n{}",
+            output.status,
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        ))
+    }
+}
+
+fn compiler_step<T, F>(label: &str, f: F) -> Result<T, String>
+where
+    F: FnOnce() -> Result<T, String>,
+{
+    match panic::catch_unwind(AssertUnwindSafe(f)) {
+        Ok(result) => result,
+        Err(payload) => {
+            let message = payload
+                .downcast_ref::<&str>()
+                .map(|message| (*message).to_string())
+                .or_else(|| payload.downcast_ref::<String>().cloned())
+                .unwrap_or_else(|| "unknown panic payload".to_string());
+            Err(format!(
+                "internal compiler panic while trying to {label}: {message}\n\
+                 this is a rocm-oxide-build bug; rerun with the generated .ll file preserved and report the kernel source span above if present"
+            ))
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{
+        ArgKind, compiler_step, discover_device_crate_bundle, discover_device_structs_in_source,
+        discover_kernels_in_source, generate_device_struct_binding, generate_kernel_binding,
+        parse_inline_path_dependency, parse_kernel_resource_rows, parse_package_name, transform_ir,
+    };
+    use std::collections::{BTreeMap, BTreeSet};
+    use std::fs;
+    use std::path::Path;
+    use std::time::{SystemTime, UNIX_EPOCH};
+
+    fn kernel_map(source: &str) -> BTreeMap<String, super::KernelDecl> {
+        discover_kernels_in_source(source)
+            .expect("source should parse")
+            .into_iter()
+            .map(|kernel| (kernel.name.clone(), kernel))
+            .collect()
+    }
+
+    #[test]
+    fn discovers_marked_kernel_names() {
+        let input = r#"
+use rocm_oxide_kernel::kernel;
+
+#[kernel]
+pub unsafe extern "C" fn vector_add() {}
+
+pub unsafe extern "C" fn helper() {}
+"#;
+        let kernels = discover_kernels_in_source(input).expect("source should parse");
+        let names = kernels
+            .into_iter()
+            .map(|kernel| kernel.name)
+            .collect::<BTreeSet<_>>();
+        assert_eq!(names, BTreeSet::from(["vector_add".to_string()]));
+    }
+
+    #[test]
+    fn parses_per_kernel_resource_rows_from_metadata_json() {
+        let input = r#"{
+  "kernels": [
+    {
+      "name": "vector_add",
+      "args": [],
+      "contracts": [],
+      "code_object": {
+        "kernarg_segment_size": 296,
+        "max_flat_workgroup_size": 1024,
+        "group_segment_fixed_size": 0,
+        "private_segment_fixed_size": 4,
+        "sgpr_count": 11,
+        "vgpr_count": 4,
+        "sgpr_spill_count": 0,
+        "vgpr_spill_count": 1,
+        "wavefront_size": 32,
+        "uses_dynamic_stack": false
+      }
+    }
+  ]
+}"#;
+        let rows = parse_kernel_resource_rows(input);
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].name, "vector_add");
+        assert_eq!(rows[0].vgpr_count, Some(4));
+        assert_eq!(rows[0].sgpr_count, Some(11));
+        assert_eq!(rows[0].vgpr_spill_count, Some(1));
+        assert_eq!(rows[0].uses_dynamic_stack, Some(false));
+    }
+
+    #[test]
+    fn rewrites_marked_function_into_kernel() {
+        let input = r#"; ModuleID = 'sample'
+target triple = "amdgcn-amd-amdhsa"
+
+define void @vector_add(ptr noundef writeonly %out, ptr noundef readonly %input, i64 noundef %n) unnamed_addr #0 {
+start:
+  %idx = tail call i32 @llvm.amdgcn.workitem.id.x()
+  %i = zext i32 %idx to i64
+  %dst = getelementptr inbounds float, ptr %out, i64 %i
+  %src = getelementptr inbounds float, ptr %input, i64 %i
+  %value = load float, ptr %src, align 4
+  store float %value, ptr %dst, align 4
+  ret void
+}
+
+attributes #0 = { nounwind "target-cpu"="gfx1201" }
+"#;
+
+        let decls = kernel_map(
+            r#"
+#[kernel]
+pub unsafe extern "C" fn vector_add(out: *mut f32, input: *const f32, n: usize) {}
+"#,
+        );
+        let kernels = decls.keys().cloned().collect::<BTreeSet<_>>();
+        let output = transform_ir(input, &kernels, &decls).expect("transform should succeed");
+        assert!(output.contains("define protected amdgpu_kernel void @vector_add"));
+        assert!(output.contains("ptr addrspace(1) noundef writeonly %out"));
+        assert!(output.contains("ptr addrspace(1) noundef readonly %input"));
+        assert!(output.contains("load float, ptr addrspace(1) %src"));
+        assert!(output.contains("store float %value, ptr addrspace(1) %dst"));
+        assert!(output.contains("\"amdgpu-flat-work-group-size\"=\"1,1024\""));
+    }
+
+    #[test]
+    fn rejects_modules_without_exported_kernels() {
+        let decls = kernel_map(
+            r#"
+#[kernel]
+pub unsafe extern "C" fn vector_add(out: *mut f32) {}
+"#,
+        );
+        let kernels = decls.keys().cloned().collect::<BTreeSet<_>>();
+        let err = transform_ir("define void @helper() {\n  ret void\n}\n", &kernels, &decls)
+            .expect_err("module without kernels should fail");
+        assert!(err.contains("none of the marked kernels"));
+        assert!(err.contains("<source>:2"));
+    }
+
+    #[test]
+    fn generates_typed_host_binding() {
+        let kernels = discover_kernels_in_source(
+            r#"
+#[kernel]
+pub unsafe extern "C" fn vector_add(
+    out: *mut f32,
+    a: *const f32,
+    n: usize,
+) {}
+"#,
+        )
+        .expect("source should parse");
+
+        assert_eq!(kernels[0].args[0].kind, ArgKind::MutPtr("f32".to_string()));
+        assert_eq!(
+            kernels[0].args[1].kind,
+            ArgKind::ConstPtr("f32".to_string())
+        );
+        assert_eq!(kernels[0].args[2].kind, ArgKind::Scalar);
+
+        let binding = generate_kernel_binding(&kernels[0]).expect("binding should generate");
+        assert!(binding.contains("out: &rocm_oxide::DeviceBuffer<f32>"));
+        assert!(binding.contains("a: &rocm_oxide::DeviceBuffer<f32>"));
+        assert!(binding.contains("n: usize"));
+        assert!(binding.contains("validate_launch_config(config)?"));
+        assert!(binding.contains("validate_buffer_len(\"out\", out.len(), n)?"));
+        assert!(binding.contains("validate_buffer_len(\"a\", a.len(), n)?"));
+        assert!(binding.contains("out.as_mut_ptr()"));
+        assert!(binding.contains("a.as_ptr()"));
+    }
+
+    #[test]
+    fn parses_length_contracts_into_generated_validation() {
+        let kernels = discover_kernels_in_source(
+            r#"
+// rocm-oxide: len(frame)=pixel_count
+// rocm-oxide: len(color)=pixel_count/4
+// rocm-oxide: len(aux)=pixel_count/4*3
+#[kernel]
+pub unsafe extern "C" fn temporal(
+    frame: *mut u32,
+    color: *const u32,
+    aux: *const f32,
+    pixel_count: usize,
+) {}
+"#,
+        )
+        .expect("source should parse");
+
+        let binding = generate_kernel_binding(&kernels[0]).expect("binding should generate");
+        assert!(binding.contains("validate_buffer_len(\"frame\", frame.len(), pixel_count)?"));
+        assert!(binding.contains("validate_buffer_len(\"color\", color.len(), pixel_count/4)?"));
+        assert!(binding.contains("validate_buffer_len(\"aux\", aux.len(), pixel_count/4*3)?"));
+    }
+
+    #[test]
+    fn rejects_contracts_that_reference_non_scalar_args() {
+        let err = discover_kernels_in_source(
+            r#"
+// rocm-oxide: len(out)=input
+#[kernel]
+pub unsafe extern "C" fn bad(out: *mut f32, input: *const f32) {}
+"#,
+        )
+        .expect_err("contract should fail");
+
+        assert!(err.contains("references non-scalar"));
+    }
+
+    #[test]
+    fn propagates_global_pointer_address_space_through_more_ir_ops() {
+        let input = r#"; ModuleID = 'sample'
+target triple = "amdgcn-amd-amdhsa"
+
+define void @pointer_ops(ptr noundef %out, ptr noundef %fallback, i1 noundef %cond) unnamed_addr #0 {
+start:
+  %gep = getelementptr inbounds i32, ptr %out, i64 1
+  %selected = select i1 %cond, ptr %gep, ptr %fallback
+  %phi = phi ptr [ %selected, %start ], [ %gep, %start ]
+  store i32 7, ptr %phi, align 4
+  ret void
+}
+
+attributes #0 = { nounwind "target-cpu"="gfx1201" }
+"#;
+        let decls = kernel_map(
+            r#"
+#[kernel]
+pub unsafe extern "C" fn pointer_ops(out: *mut u32, fallback: *mut u32, cond: bool) {}
+"#,
+        );
+        let kernels = decls.keys().cloned().collect::<BTreeSet<_>>();
+        let output = transform_ir(input, &kernels, &decls).expect("transform should succeed");
+        assert!(output.contains(
+            "%selected = select i1 %cond, ptr addrspace(1) %gep, ptr addrspace(1) %fallback"
+        ));
+        assert!(
+            output.contains("%phi = phi ptr addrspace(1) [ %selected, %start ], [ %gep, %start ]")
+        );
+        assert!(output.contains("store i32 7, ptr addrspace(1) %phi"));
+    }
+
+    #[test]
+    fn generic_kernel_diagnostic_points_to_source_span() {
+        let err = discover_kernels_in_source(
+            r#"
+#[kernel]
+pub unsafe extern "C" fn copy_generic<T>(out: *mut T, input: *const T, n: usize) {}
+"#,
+        )
+        .expect_err("generic kernels should get an actionable diagnostic");
+        assert!(err.contains("<source>:2"));
+        assert!(err.contains("generic #[kernel] functions are not exported directly yet"));
+        assert!(err.contains("monomorphic wrapper"));
+    }
+
+    #[test]
+    fn generic_helpers_can_be_wrapped_by_monomorphic_kernels() {
+        let kernels = discover_kernels_in_source(
+            r#"
+unsafe fn copy_generic<T: Copy>(out: *mut T, input: *const T, i: usize) {
+    unsafe { *out.add(i) = *input.add(i); }
+}
+
+#[kernel]
+pub unsafe extern "C" fn copy_u32(out: *mut u32, input: *const u32, n: usize) {}
+"#,
+        )
+        .expect("monomorphic wrapper should parse");
+        assert_eq!(kernels.len(), 1);
+        assert_eq!(kernels[0].name, "copy_u32");
+    }
+
+    #[test]
+    fn emits_repr_c_device_structs_for_captured_environment_abi() {
+        let structs = discover_device_structs_in_source(
+            r#"
+#[repr(C)]
+#[derive(Clone, Copy)]
+pub struct AffineParams {
+    pub scale: f32,
+    pub bias: f32,
+}
+"#,
+        )
+        .expect("repr C struct should parse");
+        assert_eq!(structs.len(), 1);
+        let binding = generate_device_struct_binding(&structs[0]);
+        assert!(binding.contains("#[repr(C)]"));
+        assert!(binding.contains("pub struct AffineParams"));
+        assert!(binding.contains("pub scale: f32"));
+        assert!(binding.contains("pub bias: f32"));
+    }
+
+    #[test]
+    fn catches_internal_compiler_panics() {
+        let err = compiler_step::<(), _>("rewrite test IR", || panic!("boom"))
+            .expect_err("panic should be converted into a diagnostic");
+        assert!(err.contains("internal compiler panic"));
+        assert!(err.contains("rewrite test IR"));
+        assert!(err.contains("boom"));
+    }
+
+    #[test]
+    fn parses_inline_path_dependencies() {
+        let dep = parse_inline_path_dependency(
+            r#"shared-kernels = { path = "../shared-kernels", version = "0.1" }"#,
+        )
+        .expect("path dependency should parse");
+        assert_eq!(dep, Path::new("../shared-kernels"));
+        assert!(parse_package_name("[package]\nname = \"gpu-kernels\"\n").is_some());
+    }
+
+    #[test]
+    fn discovers_cross_crate_kernel_bundle_members() {
+        let suffix = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("system clock should be valid")
+            .as_nanos();
+        let root = std::env::temp_dir().join(format!("rocm-oxide-build-test-{suffix}"));
+        let app = root.join("app");
+        let shared = root.join("shared");
+        fs::create_dir_all(app.join("src")).expect("create app src");
+        fs::create_dir_all(shared.join("src")).expect("create shared src");
+        fs::write(
+            app.join("Cargo.toml"),
+            r#"[package]
+name = "app"
+version = "0.1.0"
+
+[dependencies]
+shared = { path = "../shared" }
+"#,
+        )
+        .expect("write app manifest");
+        fs::write(app.join("src/lib.rs"), "#![no_std]\n").expect("write app source");
+        fs::write(
+            shared.join("Cargo.toml"),
+            r#"[package]
+name = "shared"
+version = "0.1.0"
+"#,
+        )
+        .expect("write shared manifest");
+        fs::write(
+            shared.join("src/lib.rs"),
+            r#"
+#[kernel]
+pub unsafe extern "C" fn shared_kernel(out: *mut u32, n: usize) {}
+"#,
+        )
+        .expect("write shared source");
+
+        let bundle = discover_device_crate_bundle(&app).expect("bundle discovery should work");
+        assert_eq!(bundle.len(), 2);
+        assert!(bundle.iter().any(|path| path.ends_with("app")));
+        assert!(bundle.iter().any(|path| path.ends_with("shared")));
+
+        let _ = fs::remove_dir_all(root);
+    }
+}

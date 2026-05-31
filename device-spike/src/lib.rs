@@ -1,0 +1,1438 @@
+#![no_std]
+#![feature(stdarch_amdgpu)]
+#![allow(improper_ctypes_definitions)]
+
+use rocm_oxide_device as gpu;
+use rocm_oxide_kernel::kernel;
+
+#[repr(C)]
+#[derive(Clone, Copy)]
+pub struct AffineParams {
+    pub scale: f32,
+    pub bias: f32,
+}
+
+#[kernel]
+pub unsafe extern "C" fn add_one(out: *mut f32, input: *const f32, n: usize) {
+    let i = gpu::thread_idx_x() as usize;
+    if i < n {
+        unsafe {
+            *out.add(i) = *input.add(i) + 1.0;
+        }
+    }
+}
+
+#[kernel]
+pub unsafe extern "C" fn vector_add(
+    out: *mut f32,
+    a: *const f32,
+    b: *const f32,
+    n: usize,
+    block_x: u32,
+) {
+    let i = gpu::global_id_x(block_x);
+    if i < n {
+        unsafe {
+            *out.add(i) = *a.add(i) + *b.add(i);
+        }
+    }
+}
+
+// rocm-oxide: len(out)=n
+// rocm-oxide: len(input)=n
+// rocm-oxide: len(params)=1
+#[kernel]
+pub unsafe extern "C" fn affine_transform(
+    out: *mut f32,
+    input: *const f32,
+    params: *const AffineParams,
+    n: usize,
+    block_x: u32,
+) {
+    let i = gpu::global_id_x(block_x);
+    if i < n {
+        let env = unsafe { *params };
+        unsafe {
+            *out.add(i) = *input.add(i) * env.scale + env.bias;
+        }
+    }
+}
+
+#[kernel]
+pub unsafe extern "C" fn rainbow_geometry(
+    frame: *mut u32,
+    n: usize,
+    width: u32,
+    height: u32,
+    frame_index: u32,
+    block_x: u32,
+) {
+    let i = gpu::global_id_x(block_x);
+    if i >= n {
+        return;
+    }
+
+    let x = (i as u32) & (width - 1);
+    let y = (i as u32) >> 10;
+    let cx = (width >> 1) as i32;
+    let cy = (height >> 1) as i32;
+    let dx = x as i32 - cx;
+    let dy = y as i32 - cy;
+
+    let ax = abs_i32(dx) as u32;
+    let ay = abs_i32(dy) as u32;
+    let r2 = (dx * dx + dy * dy) as u32;
+    let t = frame_index.wrapping_mul(5);
+
+    let rings = (r2 >> 7).wrapping_add(t);
+    let diagonals = (x ^ y).wrapping_add(t.wrapping_mul(3));
+    let diamonds = (ax + ay).wrapping_mul(3).wrapping_add(t);
+    let hue = rings.wrapping_add(diagonals).wrapping_add(diamonds) & 255;
+
+    let grid = if ((x.wrapping_add(frame_index)) & 31) < 2
+        || ((y.wrapping_add(frame_index.wrapping_mul(2))) & 31) < 2
+    {
+        70
+    } else {
+        0
+    };
+    let pulse = 96 + ((rings ^ diagonals) & 127);
+    let rgb = wheel(hue, clamp_u32(pulse + grid, 0, 255));
+
+    unsafe {
+        *frame.add(i) = rgb;
+    }
+}
+
+#[kernel]
+pub unsafe extern "C" fn stress_pattern(
+    frame: *mut u32,
+    n: usize,
+    frame_index: u32,
+    mode: u32,
+    work_iters: u32,
+    block_x: u32,
+) {
+    let i = gpu::global_id_x(block_x);
+    if i >= n {
+        return;
+    }
+
+    let x = (i as u32) & 1023;
+    let y = (i as u32) >> 10;
+    let cx = 512i32;
+    let cy = 256i32;
+    let dx = x as i32 - cx;
+    let dy = y as i32 - cy;
+    let ax = abs_i32(dx) as u32;
+    let ay = abs_i32(dy) as u32;
+    let r2 = (dx * dx + dy * dy) as u32;
+
+    let mut v = hash32((i as u32).wrapping_add(frame_index.wrapping_mul(747_796_405)));
+    let mut k = 0u32;
+    while k < work_iters {
+        v = hash32(
+            v.wrapping_add(x.wrapping_mul(1_103_515_245))
+                .wrapping_add(y.wrapping_mul(12_345))
+                .wrapping_add(k.wrapping_mul(2_654_435_761)),
+        );
+        k = k.wrapping_add(1);
+    }
+
+    let t = frame_index.wrapping_mul(3);
+    let m = mode & 7;
+    let hue = if m == 0 {
+        (x.wrapping_mul(3) ^ y.wrapping_mul(5))
+            .wrapping_add(t)
+            .wrapping_add(v >> 24)
+    } else if m == 1 {
+        (r2 >> 6)
+            .wrapping_add(t.wrapping_mul(2))
+            .wrapping_add(v >> 25)
+    } else if m == 2 {
+        ((x.wrapping_add(t) & y.wrapping_add(t.wrapping_mul(2))) << 1).wrapping_add(v >> 24)
+    } else if m == 3 {
+        ax.wrapping_add(ay)
+            .wrapping_mul(4)
+            .wrapping_add(t)
+            .wrapping_add(v >> 24)
+    } else if m == 4 {
+        ((x ^ y).wrapping_add((ax | ay) << 2)).wrapping_add(t.wrapping_mul(5))
+    } else if m == 5 {
+        v ^ (r2 >> 4) ^ t
+    } else if m == 6 {
+        ((x.wrapping_mul(y.wrapping_add(1))) >> 3).wrapping_add(v >> 24)
+    } else {
+        (ax.wrapping_mul(ax).wrapping_add(ay.wrapping_mul(ay)) >> 5)
+            .wrapping_add(v >> 23)
+            .wrapping_add(t)
+    } & 255;
+
+    let edge = if (x & 63) < 2 || (y & 63) < 2 { 60 } else { 0 };
+    let intensity = 128 + ((v >> 24) & 95) + edge;
+    let rgb = wheel(hue, clamp_u32(intensity, 0, 255));
+
+    unsafe {
+        *frame.add(i) = rgb;
+    }
+}
+
+#[kernel]
+pub unsafe extern "C" fn stress_3d(
+    frame: *mut u32,
+    n: usize,
+    frame_index: u32,
+    mode: u32,
+    work_iters: u32,
+    block_x: u32,
+) {
+    let i = gpu::global_id_x(block_x);
+    if i >= n {
+        return;
+    }
+
+    let x = (i as u32) & 1023;
+    let y = (i as u32) >> 10;
+    let px = x as i32 - 512;
+    let py = y as i32 - 256;
+    let t = frame_index.wrapping_mul(7);
+    let m = mode & 7;
+
+    let cam_x = (((frame_index.wrapping_mul(5)) & 511) as i32) - 256;
+    let cam_y = (((frame_index.wrapping_mul(3)) & 255) as i32) - 128;
+    let mut hit = 0u32;
+    let mut hit_depth = work_iters;
+    let mut hit_hash = 0u32;
+    let mut hit_face = 0u32;
+    let mut k = 2u32;
+
+    while k <= work_iters {
+        let z = 96 + (k << 3);
+        let bend = (((z + t) & 255) as i32) - 128;
+        let wx = ((px * z as i32) >> 8) + cam_x + ((bend * py) >> 10);
+        let wy = ((py * z as i32) >> 8) + cam_y - ((bend * px) >> 11);
+        let wz = z as i32 + ((t as i32) << 2);
+
+        let cell_x = wx >> 6;
+        let cell_y = wy >> 6;
+        let cell_z = wz >> 6;
+        let lx = abs_i32((wx & 63) - 32) as u32;
+        let ly = abs_i32((wy & 63) - 32) as u32;
+        let lz = abs_i32((wz & 63) - 32) as u32;
+
+        let tunnel = (cell_x * cell_x + cell_y * cell_y) as u32;
+        let h = hash32(
+            (cell_x as u32).wrapping_mul(73_856_093)
+                ^ (cell_y as u32).wrapping_mul(19_349_663)
+                ^ (cell_z as u32).wrapping_mul(83_492_791)
+                ^ mode.wrapping_mul(912_931),
+        );
+
+        let shell = lx > 24 || ly > 24 || lz > 24;
+        let occupied = if m == 0 {
+            (h & 7) == 0 && tunnel > 4
+        } else if m == 1 {
+            ((cell_x ^ cell_y ^ cell_z) & 3) == 0 && tunnel > 9
+        } else if m == 2 {
+            (h & 15) < 3 && (cell_z & 1) == 0
+        } else if m == 3 {
+            tunnel > 16 && ((cell_z + cell_x - cell_y) & 3) == 0
+        } else if m == 4 {
+            (cell_x & cell_y & cell_z) != 0 && (h & 3) == 0
+        } else if m == 5 {
+            (h & 31) < 6
+        } else if m == 6 {
+            tunnel > 25 && ((cell_x | cell_y | cell_z) & 5) == 0
+        } else {
+            (h & 15) < 4 && tunnel > 6
+        };
+
+        if occupied && shell {
+            hit = 1;
+            hit_depth = k;
+            hit_hash = h;
+            hit_face = if lx >= ly && lx >= lz {
+                0
+            } else if ly >= lx && ly >= lz {
+                1
+            } else {
+                2
+            };
+            break;
+        }
+
+        k = k.wrapping_add(1);
+    }
+
+    let rgb = if hit != 0 {
+        let depth_fog = 255u32.saturating_sub((hit_depth.wrapping_mul(220)) >> 8);
+        let face_light = if hit_face == 0 {
+            70
+        } else if hit_face == 1 {
+            35
+        } else {
+            0
+        };
+        let value = clamp_u32(
+            depth_fog
+                .wrapping_add(face_light)
+                .wrapping_add(hit_hash & 31),
+            0,
+            255,
+        );
+        let hue = hit_hash
+            .wrapping_add(hit_depth.wrapping_mul(3))
+            .wrapping_add(t)
+            .wrapping_add(mode.wrapping_mul(29))
+            & 255;
+        wheel(hue, value)
+    } else {
+        let sky = ((py + 256) as u32) >> 2;
+        let star = if (hash32((x << 12) ^ y ^ (t >> 2)) & 511) == 0 {
+            150
+        } else {
+            0
+        };
+        let hue = (160 + (sky >> 1) + (t >> 3)) & 255;
+        wheel(hue, clamp_u32(18 + sky + star, 0, 190))
+    };
+
+    unsafe {
+        *frame.add(i) = rgb;
+    }
+}
+
+// rocm-oxide: len(frame)=pixel_count
+// rocm-oxide: len(camera)=13
+#[kernel]
+pub unsafe extern "C" fn raytrace_world(
+    frame: *mut u32,
+    camera: *const f32,
+    pixel_count: usize,
+    frame_index: u32,
+    block_x: u32,
+) {
+    let i = gpu::global_id_x(block_x);
+    if i >= pixel_count {
+        return;
+    }
+
+    let x = (i as u32) & 1023;
+    let y = (i as u32) >> 10;
+
+    let cx = unsafe { *camera.add(0) };
+    let cy = unsafe { *camera.add(1) };
+    let cz = unsafe { *camera.add(2) };
+    let rx = unsafe { *camera.add(3) };
+    let ry = unsafe { *camera.add(4) };
+    let rz = unsafe { *camera.add(5) };
+    let ux = unsafe { *camera.add(6) };
+    let uy = unsafe { *camera.add(7) };
+    let uz = unsafe { *camera.add(8) };
+    let fx = unsafe { *camera.add(9) };
+    let fy = unsafe { *camera.add(10) };
+    let fz = unsafe { *camera.add(11) };
+    let flags = unsafe { *camera.add(12) } as u32;
+
+    let sx = ((x as f32) - 512.0) * (1.0 / 512.0);
+    let sy = (288.0 - (y as f32)) * (1.0 / 512.0);
+    let mut dx = fx + rx * sx * 1.28 + ux * sy;
+    let mut dy = fy + ry * sx * 1.28 + uy * sy;
+    let mut dz = fz + rz * sx * 1.28 + uz * sy;
+    let inv_len = inv_sqrt(dx * dx + dy * dy + dz * dz);
+    dx *= inv_len;
+    dy *= inv_len;
+    dz *= inv_len;
+
+    let (t, nx, ny, nz, mr, mg, mb, material) = scene_hit(cx, cy, cz, dx, dy, dz, frame_index, 1);
+    let rgb = if t < 9_000.0 {
+        let px = cx + dx * t;
+        let py = cy + dy * t;
+        let pz = cz + dz * t;
+        let mut shade = shade_hit(px, py, pz, nx, ny, nz, mr, mg, mb, frame_index, flags);
+
+        if material == 2 && (flags & 2) != 0 {
+            let nd = nx * dx + ny * dy + nz * dz;
+            let rdx = dx - nx * (2.0 * nd);
+            let rdy = dy - ny * (2.0 * nd);
+            let rdz = dz - nz * (2.0 * nd);
+            let (rt, rnx, rny, rnz, rr, rg, rb, _) = scene_hit(
+                px + nx * 0.04,
+                py + ny * 0.04,
+                pz + nz * 0.04,
+                rdx,
+                rdy,
+                rdz,
+                frame_index,
+                1,
+            );
+            let reflected = if rt < 9_000.0 {
+                let rpx = px + nx * 0.04 + rdx * rt;
+                let rpy = py + ny * 0.04 + rdy * rt;
+                let rpz = pz + nz * 0.04 + rdz * rt;
+                shade_hit(rpx, rpy, rpz, rnx, rny, rnz, rr, rg, rb, frame_index, flags)
+            } else {
+                sky_color(rdy)
+            };
+            shade = mix_color(shade, reflected, 0.42);
+        }
+
+        shade
+    } else {
+        sky_color(dy)
+    };
+
+    unsafe {
+        *frame.add(i) = rgb;
+    }
+}
+
+// rocm-oxide: len(frame)=pixel_count
+// rocm-oxide: len(input)=pixel_count
+#[kernel]
+pub unsafe extern "C" fn window_fx(
+    frame: *mut u32,
+    input: *const u32,
+    pixel_count: usize,
+    frame_index: u32,
+    mode: u32,
+    block_x: u32,
+) {
+    let i = gpu::global_id_x(block_x);
+    if i >= pixel_count {
+        return;
+    }
+
+    let x = (i as u32) & 1023;
+    let y = (i as u32) >> 10;
+    let m = mode & 15;
+    let sharpness = ((mode >> 4) & 7) as i32;
+    let upscale = (mode >> 8) & 3;
+    let src_w = if upscale == 0 {
+        1024u32
+    } else if upscale == 1 {
+        768u32
+    } else if upscale == 2 {
+        640u32
+    } else {
+        512u32
+    };
+    let src_h = if upscale == 0 {
+        576u32
+    } else if upscale == 1 {
+        432u32
+    } else if upscale == 2 {
+        360u32
+    } else {
+        288u32
+    };
+
+    let mut src_xf = ((x as f32) + 0.5) * (src_w as f32) * (1.0 / 1024.0) - 0.5;
+    let mut src_yf = ((y as f32) + 0.5) * (src_h as f32) * (1.0 / 576.0) - 0.5;
+
+    if m == 5 {
+        let fx = (x as f32 - 512.0) * (1.0 / 512.0);
+        let fy = (y as f32 - 288.0) * (1.0 / 512.0);
+        let tilt = ((frame_index & 255) as f32 - 128.0) * (1.0 / 420.0);
+        let depth = 1.0 + fx * tilt;
+        let wx = fx / depth;
+        let wy = fy / depth;
+        let is_outside = wx < -1.0 || wx > 1.0 || wy < -0.5625 || wy > 0.5625;
+        if is_outside {
+            unsafe {
+                *frame.add(i) = wheel((x ^ y).wrapping_add(frame_index) & 255, 26);
+            }
+            return;
+        }
+        src_xf = wx * (src_w as f32 * 0.5) + (src_w as f32 * 0.5);
+        src_yf = wy * (src_h as f32 * 0.5) + (src_h as f32 * 0.5);
+    }
+
+    src_xf = clamp_f32(src_xf, 0.0, (src_w - 1) as f32);
+    src_yf = clamp_f32(src_yf, 0.0, (src_h - 1) as f32);
+    let sx = src_xf as u32;
+    let sy = src_yf as u32;
+    let fx = src_xf - sx as f32;
+    let fy = src_yf - sy as f32;
+    let sx1 = min_u32(sx + 1, src_w - 1);
+    let sy1 = min_u32(sy + 1, src_h - 1);
+
+    let center = unsafe { bilinear_input(input, sx, sy, sx1, sy1, fx, fy) };
+    let left = unsafe { sample_input(input, sx.saturating_sub(1), sy) };
+    let right = unsafe { sample_input(input, min_u32(sx + 1, src_w - 1), sy) };
+    let up = unsafe { sample_input(input, sx, sy.saturating_sub(1)) };
+    let down = unsafe { sample_input(input, sx, min_u32(sy + 1, src_h - 1)) };
+
+    let cr = ((center >> 16) & 255) as i32;
+    let cg = ((center >> 8) & 255) as i32;
+    let cb = (center & 255) as i32;
+    let blur_r = avg4(left >> 16, right >> 16, up >> 16, down >> 16);
+    let blur_g = avg4(left >> 8, right >> 8, up >> 8, down >> 8);
+    let blur_b = avg4(left, right, up, down);
+
+    let t = frame_index.wrapping_mul(5);
+    let sharpen_num = 2 + sharpness;
+    let mut r = clamp_i32(cr + ((cr - blur_r) * sharpen_num) / 8, 0, 255) as u32;
+    let mut g = clamp_i32(cg + ((cg - blur_g) * sharpen_num) / 8, 0, 255) as u32;
+    let mut b = clamp_i32(cb + ((cb - blur_b) * sharpen_num) / 8, 0, 255) as u32;
+
+    if m == 4 {
+        let lx = luminance(left);
+        let rx = luminance(right);
+        let uy = luminance(up);
+        let dy = luminance(down);
+        let nx = clamp_i32(128 + (lx - rx), 0, 255) as u32;
+        let ny = clamp_i32(128 + (uy - dy), 0, 255) as u32;
+        let nz = 220u32.saturating_sub(((abs_i32(lx - rx) + abs_i32(uy - dy)) as u32) >> 1);
+        unsafe {
+            *frame.add(i) = (nx << 16) | (ny << 8) | nz;
+        }
+        return;
+    } else if m == 6 {
+        let depth = luminance(center) as u32;
+        unsafe {
+            *frame.add(i) = wheel(
+                (170u32.saturating_sub(depth >> 1)).wrapping_add(t) & 255,
+                depth,
+            );
+        }
+        return;
+    }
+
+    if m == 1 {
+        let hue = ((x ^ y).wrapping_add(t)) & 255;
+        let glow = 48 + ((hash32(i as u32 ^ t) >> 25) & 63);
+        let tint = wheel(hue, glow);
+        r = min_u32(r + ((tint >> 16) & 255), 255);
+        g = min_u32(g + ((tint >> 8) & 255), 255);
+        b = min_u32(b + (tint & 255), 255);
+    } else if m == 2 {
+        let scan = if ((y + t) & 15) < 3 { 58 } else { 0 };
+        let chroma = (((x + t) & 7) as i32) - 3;
+        r = clamp_i32(r as i32 + scan + chroma * 10, 0, 255) as u32;
+        g = clamp_i32(g as i32 + scan / 2, 0, 255) as u32;
+        b = clamp_i32(b as i32 + scan - chroma * 10, 0, 255) as u32;
+    } else if m == 3 {
+        let dx = x as i32 - 512;
+        let dy = y as i32 - 288;
+        let dist = ((dx * dx + dy * dy) as u32) >> 11;
+        let wave = ((dist + t) & 255) as i32 - 128;
+        r = clamp_i32(r as i32 + wave / 3, 0, 255) as u32;
+        g = clamp_i32(g as i32 + abs_i32(wave) / 4, 0, 255) as u32;
+        b = clamp_i32(b as i32 - wave / 3, 0, 255) as u32;
+    } else if m == 5 {
+        let shade = 210 + (((x as i32 - 512) * (((frame_index & 255) as i32) - 128)) >> 11);
+        r = clamp_i32((r as i32 * shade) >> 8, 0, 255) as u32;
+        g = clamp_i32((g as i32 * shade) >> 8, 0, 255) as u32;
+        b = clamp_i32((b as i32 * shade) >> 8, 0, 255) as u32;
+    }
+
+    unsafe {
+        *frame.add(i) = (r << 16) | (g << 8) | b;
+    }
+}
+
+// rocm-oxide: len(frame)=pixel_count
+// rocm-oxide: len(color)=pixel_count/4
+// rocm-oxide: len(depth)=pixel_count/4
+#[kernel]
+pub unsafe extern "C" fn depth_aware_upscale(
+    frame: *mut u32,
+    color: *const u32,
+    depth: *const f32,
+    pixel_count: usize,
+    mode: u32,
+    block_x: u32,
+) {
+    let i = gpu::global_id_x(block_x);
+    if i >= pixel_count {
+        return;
+    }
+
+    let x = (i as u32) & 1023;
+    let y = (i as u32) >> 10;
+    let src_xf = ((x as f32) + 0.5) * 0.5 - 0.5;
+    let src_yf = ((y as f32) + 0.5) * 0.5 - 0.5;
+    let src_xf = clamp_f32(src_xf, 0.0, 511.0);
+    let src_yf = clamp_f32(src_yf, 0.0, 287.0);
+    let sx = src_xf as u32;
+    let sy = src_yf as u32;
+    let sx1 = min_u32(sx + 1, 511);
+    let sy1 = min_u32(sy + 1, 287);
+    let fx = src_xf - sx as f32;
+    let fy = src_yf - sy as f32;
+
+    let d00 = unsafe { sample_depth_512(depth, sx, sy) };
+    let d10 = unsafe { sample_depth_512(depth, sx1, sy) };
+    let d01 = unsafe { sample_depth_512(depth, sx, sy1) };
+    let d11 = unsafe { sample_depth_512(depth, sx1, sy1) };
+    let min_d = min_f32(min_f32(d00, d10), min_f32(d01, d11));
+    let max_d = max_f32(max_f32(d00, d10), max_f32(d01, d11));
+    let edge = max_d - min_d;
+
+    let nearest_x = if fx < 0.5 { sx } else { sx1 };
+    let nearest_y = if fy < 0.5 { sy } else { sy1 };
+    let nearest = unsafe { sample_color_512(color, nearest_x, nearest_y) };
+    let smooth = unsafe { bilinear_color_512(color, sx, sy, sx1, sy1, fx, fy) };
+    let mut rgb = if edge > 0.09 { nearest } else { smooth };
+
+    if (mode & 15) == 1 {
+        let d = clamp_i32(((1.0 - d00) * 255.0) as i32, 0, 255) as u32;
+        rgb = (d << 16) | (d << 8) | d;
+    } else if (mode & 15) == 2 {
+        let e = clamp_i32((edge * 900.0) as i32, 0, 255) as u32;
+        rgb = (e << 16) | ((255 - e) << 8) | 32;
+    } else {
+        let sharp = ((mode >> 4) & 7) as i32;
+        rgb = sharpen_rgb(rgb, nearest, sharp);
+    }
+
+    unsafe {
+        *frame.add(i) = rgb;
+    }
+}
+
+// rocm-oxide: len(frame)=pixel_count
+// rocm-oxide: len(history_out)=pixel_count
+// rocm-oxide: len(color)=pixel_count/4
+// rocm-oxide: len(depth)=pixel_count/4
+// rocm-oxide: len(motion_reactive)=pixel_count/4*3
+// rocm-oxide: len(prev_history)=pixel_count
+#[kernel]
+pub unsafe extern "C" fn temporal_reconstruct_upscale(
+    frame: *mut u32,
+    history_out: *mut u32,
+    color: *const u32,
+    depth: *const f32,
+    motion_reactive: *const f32,
+    prev_history: *const u32,
+    pixel_count: usize,
+    mode: u32,
+    block_x: u32,
+) {
+    let i = gpu::global_id_x(block_x);
+    if i >= pixel_count {
+        return;
+    }
+
+    let x = (i as u32) & 1023;
+    let y = (i as u32) >> 10;
+    let src_xf = ((x as f32) + 0.5) * 0.5 - 0.5;
+    let src_yf = ((y as f32) + 0.5) * 0.5 - 0.5;
+    let src_xf = clamp_f32(src_xf, 0.0, 511.0);
+    let src_yf = clamp_f32(src_yf, 0.0, 287.0);
+    let sx = src_xf as u32;
+    let sy = src_yf as u32;
+    let sx1 = min_u32(sx + 1, 511);
+    let sy1 = min_u32(sy + 1, 287);
+    let fx = src_xf - sx as f32;
+    let fy = src_yf - sy as f32;
+
+    let current_smooth = unsafe { bilinear_color_512(color, sx, sy, sx1, sy1, fx, fy) };
+    let current_nearest = unsafe {
+        sample_color_512(
+            color,
+            if fx < 0.5 { sx } else { sx1 },
+            if fy < 0.5 { sy } else { sy1 },
+        )
+    };
+    let current = sharpen_rgb(current_smooth, current_nearest, ((mode >> 4) & 7) as i32);
+
+    let mut nearest_depth = 10_000.0;
+    let mut farthest_depth = -10_000.0;
+    let mut motion_x = 0.0;
+    let mut motion_y = 0.0;
+    let mut reactive = 0.0;
+    let base_x = sx as i32;
+    let base_y = sy as i32;
+    let mut oy = -1i32;
+    while oy <= 1 {
+        let mut ox = -1i32;
+        while ox <= 1 {
+            let nx = clamp_i32(base_x + ox, 0, 511) as u32;
+            let ny = clamp_i32(base_y + oy, 0, 287) as u32;
+            let d = unsafe { sample_depth_512(depth, nx, ny) };
+            farthest_depth = max_f32(farthest_depth, d);
+            if d < nearest_depth {
+                nearest_depth = d;
+                motion_x = unsafe { sample_aux_512(motion_reactive, nx, ny, 0) };
+                motion_y = unsafe { sample_aux_512(motion_reactive, nx, ny, 1) };
+                reactive = unsafe { sample_aux_512(motion_reactive, nx, ny, 2) };
+            }
+            ox += 1;
+        }
+        oy += 1;
+    }
+
+    let edge = clamp_f32((farthest_depth - nearest_depth) * 7.0, 0.0, 1.0);
+    let prev_x = clamp_f32(x as f32 + motion_x, 0.0, 1023.0);
+    let prev_y = clamp_f32(y as f32 + motion_y, 0.0, 575.0);
+    let history = unsafe { bilinear_history_1024(prev_history, prev_x, prev_y) };
+
+    let current_weight = clamp_f32(0.14 + reactive * 0.86 + edge * 0.48, 0.10, 1.0);
+    let mut rgb = mix_color(history, current, current_weight);
+
+    let debug = mode & 15;
+    if debug == 1 {
+        let mr = clamp_i32((128.0 + motion_x * 2.0) as i32, 0, 255) as u32;
+        let mg = clamp_i32((128.0 + motion_y * 2.0) as i32, 0, 255) as u32;
+        let mb = clamp_i32(
+            (32.0 + (abs_f32(motion_x) + abs_f32(motion_y)) * 3.0) as i32,
+            0,
+            255,
+        ) as u32;
+        rgb = (mr << 16) | (mg << 8) | mb;
+    } else if debug == 2 {
+        let v = clamp_i32((reactive * 255.0) as i32, 0, 255) as u32;
+        rgb = (v << 16) | ((v >> 1) << 8) | (255 - v);
+    } else if debug == 3 {
+        let near = clamp_i32(((1.0 - nearest_depth) * 255.0) as i32, 0, 255) as u32;
+        let e = clamp_i32((edge * 255.0) as i32, 0, 255) as u32;
+        rgb = (e << 16) | (near << 8) | (255 - near);
+    } else if debug == 4 {
+        let h = clamp_i32(((1.0 - current_weight) * 255.0) as i32, 0, 255) as u32;
+        let c = clamp_i32((current_weight * 255.0) as i32, 0, 255) as u32;
+        rgb = (c << 16) | (h << 8) | 48;
+    }
+
+    unsafe {
+        *frame.add(i) = rgb;
+        *history_out.add(i) = rgb;
+    }
+}
+
+// rocm-oxide: len(frame)=pixel_count
+#[kernel]
+pub unsafe extern "C" fn bvh_raytrace(
+    frame: *mut u32,
+    scene: *const f32,
+    pixel_count: usize,
+    mode: u32,
+    block_x: u32,
+) {
+    let i = gpu::global_id_x(block_x);
+    if i >= pixel_count {
+        return;
+    }
+
+    let x = (i as u32) & 1023;
+    let y = (i as u32) >> 10;
+    let px = (x as f32 - 512.0) * (1.0 / 512.0);
+    let py = (288.0 - y as f32) * (1.0 / 512.0);
+    let ox = 0.0;
+    let oy = 0.2;
+    let oz = -5.0;
+    let mut dx = px;
+    let mut dy = py;
+    let mut dz = 1.35;
+    let inv_len = inv_sqrt(dx * dx + dy * dy + dz * dz);
+    dx *= inv_len;
+    dy *= inv_len;
+    dz *= inv_len;
+
+    let sphere_count = unsafe { *scene.add(0) } as u32;
+    let node_count = unsafe { *scene.add(1) } as u32;
+    let node_offset = unsafe { *scene.add(2) } as u32;
+
+    let (hit_t, hit_index) = if (mode & 1) == 0 {
+        trace_spheres_brute(scene, sphere_count, ox, oy, oz, dx, dy, dz)
+    } else {
+        trace_spheres_bvh(
+            scene,
+            sphere_count,
+            node_count,
+            node_offset,
+            ox,
+            oy,
+            oz,
+            dx,
+            dy,
+            dz,
+        )
+    };
+
+    let rgb = if hit_index >= 0 {
+        shade_scene_sphere(scene, hit_index as u32, ox, oy, oz, dx, dy, dz, hit_t)
+    } else if dy < -0.0001 {
+        let t = (-1.35 - oy) / dy;
+        let gx = ox + dx * t;
+        let gz = oz + dz * t;
+        let checker = (((gx * 1.4) as i32) ^ ((gz * 1.4) as i32)) & 1;
+        if checker == 0 { 0x2d3440 } else { 0x1b2028 }
+    } else {
+        sky_color(dy)
+    };
+
+    unsafe {
+        *frame.add(i) = rgb;
+    }
+}
+
+fn trace_spheres_brute(
+    scene: *const f32,
+    sphere_count: u32,
+    ox: f32,
+    oy: f32,
+    oz: f32,
+    dx: f32,
+    dy: f32,
+    dz: f32,
+) -> (f32, i32) {
+    let mut best_t = 10_000.0;
+    let mut best_i = -1;
+    let mut i = 0u32;
+    while i < sphere_count {
+        let t = unsafe { packed_sphere_hit(scene, i, ox, oy, oz, dx, dy, dz) };
+        if t > 0.03 && t < best_t {
+            best_t = t;
+            best_i = i as i32;
+        }
+        i = i.wrapping_add(1);
+    }
+    (best_t, best_i)
+}
+
+#[allow(clippy::too_many_arguments)]
+fn trace_spheres_bvh(
+    scene: *const f32,
+    sphere_count: u32,
+    node_count: u32,
+    node_offset: u32,
+    ox: f32,
+    oy: f32,
+    oz: f32,
+    dx: f32,
+    dy: f32,
+    dz: f32,
+) -> (f32, i32) {
+    let mut stack = [0u32; 64];
+    let mut stack_len = 1u32;
+    let mut best_t = 10_000.0;
+    let mut best_i = -1;
+    unsafe {
+        *stack.as_mut_ptr() = 0;
+    }
+
+    while stack_len > 0 {
+        stack_len = stack_len.wrapping_sub(1);
+        let node = unsafe { *stack.as_ptr().add(stack_len as usize) };
+        if node >= node_count {
+            continue;
+        }
+        let node_base = node_offset.wrapping_add(node.wrapping_mul(8));
+        let box_t = unsafe { packed_aabb_hit(scene, node_base, ox, oy, oz, dx, dy, dz, best_t) };
+        if box_t >= best_t {
+            continue;
+        }
+
+        let left = unsafe { *scene.add((node_base + 6) as usize) } as u32;
+        let right_or_count = unsafe { *scene.add((node_base + 7) as usize) };
+        if right_or_count < 0.0 {
+            let count = (-right_or_count) as u32;
+            let mut j = 0u32;
+            while j < count {
+                let index = left.wrapping_add(j);
+                if index < sphere_count {
+                    let t = unsafe { packed_sphere_hit(scene, index, ox, oy, oz, dx, dy, dz) };
+                    if t > 0.03 && t < best_t {
+                        best_t = t;
+                        best_i = index as i32;
+                    }
+                }
+                j = j.wrapping_add(1);
+            }
+        } else if stack_len + 2 < 64 {
+            unsafe {
+                *stack.as_mut_ptr().add(stack_len as usize) = right_or_count as u32;
+            }
+            stack_len = stack_len.wrapping_add(1);
+            unsafe {
+                *stack.as_mut_ptr().add(stack_len as usize) = left;
+            }
+            stack_len = stack_len.wrapping_add(1);
+        }
+    }
+    (best_t, best_i)
+}
+
+unsafe fn packed_sphere_hit(
+    scene: *const f32,
+    index: u32,
+    ox: f32,
+    oy: f32,
+    oz: f32,
+    dx: f32,
+    dy: f32,
+    dz: f32,
+) -> f32 {
+    let base = 8u32.wrapping_add(index.wrapping_mul(8));
+    let cx = unsafe { *scene.add(base as usize) };
+    let cy = unsafe { *scene.add((base + 1) as usize) };
+    let cz = unsafe { *scene.add((base + 2) as usize) };
+    let radius = unsafe { *scene.add((base + 3) as usize) };
+    let ocx = ox - cx;
+    let ocy = oy - cy;
+    let ocz = oz - cz;
+    let b = ocx * dx + ocy * dy + ocz * dz;
+    let c = ocx * ocx + ocy * ocy + ocz * ocz - radius * radius;
+    let h = b * b - c;
+    if h <= 0.0 {
+        10_000.0
+    } else {
+        -b - h * inv_sqrt(h)
+    }
+}
+
+unsafe fn packed_aabb_hit(
+    scene: *const f32,
+    base: u32,
+    ox: f32,
+    oy: f32,
+    oz: f32,
+    dx: f32,
+    dy: f32,
+    dz: f32,
+    best_t: f32,
+) -> f32 {
+    let min_x = unsafe { *scene.add(base as usize) };
+    let min_y = unsafe { *scene.add((base + 1) as usize) };
+    let min_z = unsafe { *scene.add((base + 2) as usize) };
+    let max_x = unsafe { *scene.add((base + 3) as usize) };
+    let max_y = unsafe { *scene.add((base + 4) as usize) };
+    let max_z = unsafe { *scene.add((base + 5) as usize) };
+    let inv_x = 1.0 / dx;
+    let inv_y = 1.0 / dy;
+    let inv_z = 1.0 / dz;
+    let tx0 = (min_x - ox) * inv_x;
+    let tx1 = (max_x - ox) * inv_x;
+    let ty0 = (min_y - oy) * inv_y;
+    let ty1 = (max_y - oy) * inv_y;
+    let tz0 = (min_z - oz) * inv_z;
+    let tz1 = (max_z - oz) * inv_z;
+    let t_near = max_f32(
+        max_f32(min_f32(tx0, tx1), min_f32(ty0, ty1)),
+        min_f32(tz0, tz1),
+    );
+    let t_far = min_f32(
+        min_f32(max_f32(tx0, tx1), max_f32(ty0, ty1)),
+        max_f32(tz0, tz1),
+    );
+    if t_far < max_f32(t_near, 0.03) || t_near > best_t {
+        10_000.0
+    } else {
+        t_near
+    }
+}
+
+unsafe fn shade_scene_sphere(
+    scene: *const f32,
+    index: u32,
+    ox: f32,
+    oy: f32,
+    oz: f32,
+    dx: f32,
+    dy: f32,
+    dz: f32,
+    hit_t: f32,
+) -> u32 {
+    let base = 8u32.wrapping_add(index.wrapping_mul(8));
+    let cx = unsafe { *scene.add(base as usize) };
+    let cy = unsafe { *scene.add((base + 1) as usize) };
+    let cz = unsafe { *scene.add((base + 2) as usize) };
+    let radius = unsafe { *scene.add((base + 3) as usize) };
+    let r = unsafe { *scene.add((base + 4) as usize) };
+    let g = unsafe { *scene.add((base + 5) as usize) };
+    let b = unsafe { *scene.add((base + 6) as usize) };
+    let px = ox + dx * hit_t;
+    let py = oy + dy * hit_t;
+    let pz = oz + dz * hit_t;
+    let nx = (px - cx) / radius;
+    let ny = (py - cy) / radius;
+    let nz = (pz - cz) / radius;
+    let light = max_f32(0.0, nx * -0.48 + ny * 0.82 + nz * -0.31);
+    let view_rim = pow2(max_f32(0.0, 1.0 + nx * dx + ny * dy + nz * dz)) * 0.18;
+    pack_rgbf(
+        r * (0.18 + light * 0.92) + view_rim,
+        g * (0.18 + light * 0.92) + view_rim,
+        b * (0.18 + light * 0.92) + view_rim,
+    )
+}
+
+fn scene_hit(
+    ox: f32,
+    oy: f32,
+    oz: f32,
+    dx: f32,
+    dy: f32,
+    dz: f32,
+    frame_index: u32,
+    include_plane: u32,
+) -> (f32, f32, f32, f32, f32, f32, f32, u32) {
+    let mut best_t = 10_000.0;
+    let mut best_nx = 0.0;
+    let mut best_ny = 1.0;
+    let mut best_nz = 0.0;
+    let mut best_r = 0.7;
+    let mut best_g = 0.7;
+    let mut best_b = 0.7;
+    let mut material = 0;
+
+    let anim = ((frame_index & 255) as f32) * (1.0 / 255.0);
+    let moving_x = -0.4 + (anim - 0.5) * 2.4;
+
+    let (t0, nx0, ny0, nz0) = sphere_hit(ox, oy, oz, dx, dy, dz, -1.65, -0.05, 3.2, 0.58);
+    if t0 > 0.03 && t0 < best_t {
+        best_t = t0;
+        best_nx = nx0;
+        best_ny = ny0;
+        best_nz = nz0;
+        best_r = 0.25;
+        best_g = 0.86;
+        best_b = 1.0;
+        material = 2;
+    }
+
+    let (t1, nx1, ny1, nz1) = sphere_hit(ox, oy, oz, dx, dy, dz, moving_x, 0.0, 4.9, 0.72);
+    if t1 > 0.03 && t1 < best_t {
+        best_t = t1;
+        best_nx = nx1;
+        best_ny = ny1;
+        best_nz = nz1;
+        best_r = 1.0;
+        best_g = 0.25;
+        best_b = 0.2;
+        material = 1;
+    }
+
+    let (t2, nx2, ny2, nz2) = sphere_hit(ox, oy, oz, dx, dy, dz, 1.25, -0.18, 2.25, 0.42);
+    if t2 > 0.03 && t2 < best_t {
+        best_t = t2;
+        best_nx = nx2;
+        best_ny = ny2;
+        best_nz = nz2;
+        best_r = 1.0;
+        best_g = 0.86;
+        best_b = 0.25;
+        material = 1;
+    }
+
+    let (bt0, bnx0, bny0, bnz0) =
+        box_hit(ox, oy, oz, dx, dy, dz, 1.65, -0.65, 3.45, 2.55, 0.35, 4.2);
+    if bt0 > 0.03 && bt0 < best_t {
+        best_t = bt0;
+        best_nx = bnx0;
+        best_ny = bny0;
+        best_nz = bnz0;
+        best_r = 0.26;
+        best_g = 0.9;
+        best_b = 0.42;
+        material = 1;
+    }
+
+    let (bt1, bnx1, bny1, bnz1) = box_hit(
+        ox, oy, oz, dx, dy, dz, -2.75, -0.65, 5.05, -1.95, 1.25, 5.85,
+    );
+    if bt1 > 0.03 && bt1 < best_t {
+        best_t = bt1;
+        best_nx = bnx1;
+        best_ny = bny1;
+        best_nz = bnz1;
+        best_r = 0.82;
+        best_g = 0.28;
+        best_b = 1.0;
+        material = 1;
+    }
+
+    let (bt2, bnx2, bny2, bnz2) =
+        box_hit(ox, oy, oz, dx, dy, dz, -0.45, -0.65, 6.8, 0.45, 1.65, 7.7);
+    if bt2 > 0.03 && bt2 < best_t {
+        best_t = bt2;
+        best_nx = bnx2;
+        best_ny = bny2;
+        best_nz = bnz2;
+        best_r = 0.18;
+        best_g = 0.5;
+        best_b = 1.0;
+        material = 2;
+    }
+
+    if include_plane != 0 && dy < -0.0001 {
+        let pt = (-0.68 - oy) / dy;
+        if pt > 0.03 && pt < best_t {
+            let px = ox + dx * pt;
+            let pz = oz + dz * pt;
+            best_t = pt;
+            best_nx = 0.0;
+            best_ny = 1.0;
+            best_nz = 0.0;
+            let check = (((px * 1.2) as i32) ^ ((pz * 1.2) as i32)) & 1;
+            if check == 0 {
+                best_r = 0.62;
+                best_g = 0.62;
+                best_b = 0.58;
+            } else {
+                best_r = 0.16;
+                best_g = 0.18;
+                best_b = 0.2;
+            }
+            material = 0;
+        }
+    }
+
+    (
+        best_t, best_nx, best_ny, best_nz, best_r, best_g, best_b, material,
+    )
+}
+
+fn shade_hit(
+    px: f32,
+    py: f32,
+    pz: f32,
+    nx: f32,
+    ny: f32,
+    nz: f32,
+    r: f32,
+    g: f32,
+    b: f32,
+    frame_index: u32,
+    flags: u32,
+) -> u32 {
+    let lx = -0.48;
+    let ly = 0.78;
+    let lz = -0.4;
+    let ndotl = max_f32(0.0, nx * lx + ny * ly + nz * lz);
+    let mut light = 0.18 + ndotl * 0.9;
+
+    if (flags & 1) != 0 {
+        let (st, _, _, _, _, _, _, _) = scene_hit(
+            px + nx * 0.045,
+            py + ny * 0.045,
+            pz + nz * 0.045,
+            lx,
+            ly,
+            lz,
+            frame_index,
+            0,
+        );
+        if st < 16.0 {
+            light *= 0.35;
+        }
+    }
+
+    let rim = pow2(max_f32(0.0, 1.0 - ny)) * 0.08;
+    pack_rgbf(r * light + rim, g * light + rim, b * light + rim)
+}
+
+fn sky_color(dy: f32) -> u32 {
+    let t = clamp_f32(dy * 0.5 + 0.55, 0.0, 1.0);
+    pack_rgbf(0.05 + t * 0.22, 0.08 + t * 0.34, 0.12 + t * 0.58)
+}
+
+fn sphere_hit(
+    ox: f32,
+    oy: f32,
+    oz: f32,
+    dx: f32,
+    dy: f32,
+    dz: f32,
+    cx: f32,
+    cy: f32,
+    cz: f32,
+    radius: f32,
+) -> (f32, f32, f32, f32) {
+    let ocx = ox - cx;
+    let ocy = oy - cy;
+    let ocz = oz - cz;
+    let b = ocx * dx + ocy * dy + ocz * dz;
+    let c = ocx * ocx + ocy * ocy + ocz * ocz - radius * radius;
+    let h = b * b - c;
+    if h <= 0.0 {
+        return (10_000.0, 0.0, 1.0, 0.0);
+    }
+
+    let t = -b - h * inv_sqrt(h);
+    let inv_r = 1.0 / radius;
+    let px = ox + dx * t;
+    let py = oy + dy * t;
+    let pz = oz + dz * t;
+    ((t), (px - cx) * inv_r, (py - cy) * inv_r, (pz - cz) * inv_r)
+}
+
+fn box_hit(
+    ox: f32,
+    oy: f32,
+    oz: f32,
+    dx: f32,
+    dy: f32,
+    dz: f32,
+    min_x: f32,
+    min_y: f32,
+    min_z: f32,
+    max_x: f32,
+    max_y: f32,
+    max_z: f32,
+) -> (f32, f32, f32, f32) {
+    let inv_x = 1.0 / dx;
+    let inv_y = 1.0 / dy;
+    let inv_z = 1.0 / dz;
+
+    let tx0 = (min_x - ox) * inv_x;
+    let tx1 = (max_x - ox) * inv_x;
+    let ty0 = (min_y - oy) * inv_y;
+    let ty1 = (max_y - oy) * inv_y;
+    let tz0 = (min_z - oz) * inv_z;
+    let tz1 = (max_z - oz) * inv_z;
+
+    let tx_min = min_f32(tx0, tx1);
+    let tx_max = max_f32(tx0, tx1);
+    let ty_min = min_f32(ty0, ty1);
+    let ty_max = max_f32(ty0, ty1);
+    let tz_min = min_f32(tz0, tz1);
+    let tz_max = max_f32(tz0, tz1);
+
+    let t_near = max_f32(max_f32(tx_min, ty_min), tz_min);
+    let t_far = min_f32(min_f32(tx_max, ty_max), tz_max);
+    if t_far < max_f32(t_near, 0.03) {
+        return (10_000.0, 0.0, 1.0, 0.0);
+    }
+
+    let px = ox + dx * t_near;
+    let py = oy + dy * t_near;
+    let pz = oz + dz * t_near;
+    let bias = 0.004;
+    if abs_f32(px - min_x) < bias {
+        (t_near, -1.0, 0.0, 0.0)
+    } else if abs_f32(px - max_x) < bias {
+        (t_near, 1.0, 0.0, 0.0)
+    } else if abs_f32(py - min_y) < bias {
+        (t_near, 0.0, -1.0, 0.0)
+    } else if abs_f32(py - max_y) < bias {
+        (t_near, 0.0, 1.0, 0.0)
+    } else if abs_f32(pz - min_z) < bias {
+        (t_near, 0.0, 0.0, -1.0)
+    } else {
+        (t_near, 0.0, 0.0, 1.0)
+    }
+}
+
+fn abs_i32(value: i32) -> i32 {
+    if value < 0 { -value } else { value }
+}
+
+fn abs_f32(value: f32) -> f32 {
+    if value < 0.0 { -value } else { value }
+}
+
+fn min_f32(a: f32, b: f32) -> f32 {
+    if a < b { a } else { b }
+}
+
+fn max_f32(a: f32, b: f32) -> f32 {
+    if a > b { a } else { b }
+}
+
+fn clamp_f32(value: f32, lo: f32, hi: f32) -> f32 {
+    if value < lo {
+        lo
+    } else if value > hi {
+        hi
+    } else {
+        value
+    }
+}
+
+fn inv_sqrt(value: f32) -> f32 {
+    let x2 = value * 0.5;
+    let mut bits = value.to_bits();
+    bits = 0x5f37_59dfu32.wrapping_sub(bits >> 1);
+    let mut y = f32::from_bits(bits);
+    y = y * (1.5 - x2 * y * y);
+    y * (1.5 - x2 * y * y)
+}
+
+fn pow2(value: f32) -> f32 {
+    value * value
+}
+
+fn clamp_u32(value: u32, lo: u32, hi: u32) -> u32 {
+    if value < lo {
+        lo
+    } else if value > hi {
+        hi
+    } else {
+        value
+    }
+}
+
+fn clamp_i32(value: i32, lo: i32, hi: i32) -> i32 {
+    if value < lo {
+        lo
+    } else if value > hi {
+        hi
+    } else {
+        value
+    }
+}
+
+fn min_u32(a: u32, b: u32) -> u32 {
+    if a < b { a } else { b }
+}
+
+fn avg4(a: u32, b: u32, c: u32, d: u32) -> i32 {
+    (((a & 255) + (b & 255) + (c & 255) + (d & 255)) >> 2) as i32
+}
+
+unsafe fn bilinear_input(
+    input: *const u32,
+    x0: u32,
+    y0: u32,
+    x1: u32,
+    y1: u32,
+    fx: f32,
+    fy: f32,
+) -> u32 {
+    let c00 = unsafe { sample_input(input, x0, y0) };
+    let c10 = unsafe { sample_input(input, x1, y0) };
+    let c01 = unsafe { sample_input(input, x0, y1) };
+    let c11 = unsafe { sample_input(input, x1, y1) };
+    let r = bilinear_channel(c00 >> 16, c10 >> 16, c01 >> 16, c11 >> 16, fx, fy);
+    let g = bilinear_channel(c00 >> 8, c10 >> 8, c01 >> 8, c11 >> 8, fx, fy);
+    let b = bilinear_channel(c00, c10, c01, c11, fx, fy);
+    (r << 16) | (g << 8) | b
+}
+
+unsafe fn bilinear_color_512(
+    input: *const u32,
+    x0: u32,
+    y0: u32,
+    x1: u32,
+    y1: u32,
+    fx: f32,
+    fy: f32,
+) -> u32 {
+    let c00 = unsafe { sample_color_512(input, x0, y0) };
+    let c10 = unsafe { sample_color_512(input, x1, y0) };
+    let c01 = unsafe { sample_color_512(input, x0, y1) };
+    let c11 = unsafe { sample_color_512(input, x1, y1) };
+    let r = bilinear_channel(c00 >> 16, c10 >> 16, c01 >> 16, c11 >> 16, fx, fy);
+    let g = bilinear_channel(c00 >> 8, c10 >> 8, c01 >> 8, c11 >> 8, fx, fy);
+    let b = bilinear_channel(c00, c10, c01, c11, fx, fy);
+    (r << 16) | (g << 8) | b
+}
+
+unsafe fn bilinear_history_1024(input: *const u32, x: f32, y: f32) -> u32 {
+    let x = clamp_f32(x, 0.0, 1023.0);
+    let y = clamp_f32(y, 0.0, 575.0);
+    let x0 = x as u32;
+    let y0 = y as u32;
+    let x1 = min_u32(x0 + 1, 1023);
+    let y1 = min_u32(y0 + 1, 575);
+    let fx = x - x0 as f32;
+    let fy = y - y0 as f32;
+    let c00 = unsafe { sample_history_1024(input, x0, y0) };
+    let c10 = unsafe { sample_history_1024(input, x1, y0) };
+    let c01 = unsafe { sample_history_1024(input, x0, y1) };
+    let c11 = unsafe { sample_history_1024(input, x1, y1) };
+    let r = bilinear_channel(c00 >> 16, c10 >> 16, c01 >> 16, c11 >> 16, fx, fy);
+    let g = bilinear_channel(c00 >> 8, c10 >> 8, c01 >> 8, c11 >> 8, fx, fy);
+    let b = bilinear_channel(c00, c10, c01, c11, fx, fy);
+    (r << 16) | (g << 8) | b
+}
+
+fn bilinear_channel(c00: u32, c10: u32, c01: u32, c11: u32, fx: f32, fy: f32) -> u32 {
+    let v00 = (c00 & 255) as f32;
+    let v10 = (c10 & 255) as f32;
+    let v01 = (c01 & 255) as f32;
+    let v11 = (c11 & 255) as f32;
+    let top = v00 + (v10 - v00) * fx;
+    let bottom = v01 + (v11 - v01) * fx;
+    clamp_i32((top + (bottom - top) * fy) as i32, 0, 255) as u32
+}
+
+unsafe fn sample_input(input: *const u32, x: u32, y: u32) -> u32 {
+    unsafe { *input.add((min_u32(y, 575) << 10).wrapping_add(min_u32(x, 1023)) as usize) }
+}
+
+unsafe fn sample_color_512(input: *const u32, x: u32, y: u32) -> u32 {
+    unsafe { *input.add((min_u32(y, 287) << 9).wrapping_add(min_u32(x, 511)) as usize) }
+}
+
+unsafe fn sample_depth_512(input: *const f32, x: u32, y: u32) -> f32 {
+    unsafe { *input.add((min_u32(y, 287) << 9).wrapping_add(min_u32(x, 511)) as usize) }
+}
+
+unsafe fn sample_aux_512(input: *const f32, x: u32, y: u32, channel: u32) -> f32 {
+    unsafe {
+        *input.add(
+            (((min_u32(y, 287) << 9).wrapping_add(min_u32(x, 511))) * 3 + min_u32(channel, 2))
+                as usize,
+        )
+    }
+}
+
+unsafe fn sample_history_1024(input: *const u32, x: u32, y: u32) -> u32 {
+    unsafe { *input.add((min_u32(y, 575) << 10).wrapping_add(min_u32(x, 1023)) as usize) }
+}
+
+fn luminance(rgb: u32) -> i32 {
+    let r = ((rgb >> 16) & 255) as i32;
+    let g = ((rgb >> 8) & 255) as i32;
+    let b = (rgb & 255) as i32;
+    (r * 54 + g * 183 + b * 19) >> 8
+}
+
+fn sharpen_rgb(base: u32, reference: u32, sharpness: i32) -> u32 {
+    let amount = 2 + sharpness;
+    let br = ((base >> 16) & 255) as i32;
+    let bg = ((base >> 8) & 255) as i32;
+    let bb = (base & 255) as i32;
+    let rr = ((reference >> 16) & 255) as i32;
+    let rg = ((reference >> 8) & 255) as i32;
+    let rb = (reference & 255) as i32;
+    let r = clamp_i32(br + ((br - rr) * amount) / 16, 0, 255) as u32;
+    let g = clamp_i32(bg + ((bg - rg) * amount) / 16, 0, 255) as u32;
+    let b = clamp_i32(bb + ((bb - rb) * amount) / 16, 0, 255) as u32;
+    (r << 16) | (g << 8) | b
+}
+
+fn mix_color(a: u32, b: u32, t: f32) -> u32 {
+    let ar = ((a >> 16) & 255) as f32;
+    let ag = ((a >> 8) & 255) as f32;
+    let ab = (a & 255) as f32;
+    let br = ((b >> 16) & 255) as f32;
+    let bg = ((b >> 8) & 255) as f32;
+    let bb = (b & 255) as f32;
+    let s = 1.0 - t;
+    (((ar * s + br * t) as u32) << 16)
+        | (((ag * s + bg * t) as u32) << 8)
+        | ((ab * s + bb * t) as u32)
+}
+
+fn pack_rgbf(r: f32, g: f32, b: f32) -> u32 {
+    let ri = (clamp_f32(r, 0.0, 1.0) * 255.0) as u32;
+    let gi = (clamp_f32(g, 0.0, 1.0) * 255.0) as u32;
+    let bi = (clamp_f32(b, 0.0, 1.0) * 255.0) as u32;
+    (ri << 16) | (gi << 8) | bi
+}
+
+fn wheel(hue: u32, value: u32) -> u32 {
+    let r = (tri(hue) * value) >> 8;
+    let g = (tri(hue.wrapping_add(85)) * value) >> 8;
+    let b = (tri(hue.wrapping_add(170)) * value) >> 8;
+
+    (r << 16) | (g << 8) | b
+}
+
+fn tri(phase: u32) -> u32 {
+    let x = (phase & 255) as i32 - 128;
+    let v = 255 - clamp_u32((abs_i32(x) as u32) << 1, 0, 255);
+    v
+}
+
+fn hash32(mut x: u32) -> u32 {
+    x ^= x >> 16;
+    x = x.wrapping_mul(0x7feb_352d);
+    x ^= x >> 15;
+    x = x.wrapping_mul(0x846c_a68b);
+    x ^ (x >> 16)
+}

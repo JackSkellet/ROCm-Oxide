@@ -1,0 +1,17 @@
+[package]
+name = "rocm-oxide-device-spike"
+version = "0.1.0"
+edition = "2024"
+publish = false
+
+[lib]
+crate-type = ["rlib"]
+
+[dependencies]
+rocm-oxide-device = { path = "../crates/rocm-oxide-device" }
+rocm-oxide-kernel = { path = "../crates/rocm-oxide-kernel" }
+
+[profile.release]
+panic = "abort"
+codegen-units = 1
+lto = false
