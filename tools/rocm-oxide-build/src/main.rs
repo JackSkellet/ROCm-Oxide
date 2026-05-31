@@ -928,6 +928,8 @@ struct DeviceStructField {
 enum ArgKind {
     MutPtr(String),
     ConstPtr(String),
+    MutSlice(String),
+    ConstSlice(String),
     Scalar,
 }
 
@@ -1260,11 +1262,35 @@ fn parse_kernel_arg(arg: &str) -> Result<KernelArg, String> {
         ArgKind::MutPtr(inner.trim().to_string())
     } else if let Some(inner) = ty.strip_prefix("*const ") {
         ArgKind::ConstPtr(inner.trim().to_string())
+    } else if let Some(inner) = parse_device_slice_ty(&ty, "DeviceSliceMut") {
+        ArgKind::MutSlice(inner)
+    } else if let Some(inner) = parse_device_slice_ty(&ty, "DeviceSlice") {
+        ArgKind::ConstSlice(inner)
     } else {
         ArgKind::Scalar
     };
 
     Ok(KernelArg { name, ty, kind })
+}
+
+fn parse_device_slice_ty(ty: &str, slice_name: &str) -> Option<String> {
+    let normalized = ty
+        .chars()
+        .filter(|ch| !ch.is_whitespace())
+        .collect::<String>();
+    let prefixes = [
+        format!("{slice_name}<"),
+        format!("gpu::{slice_name}<"),
+        format!("rocm_oxide_device::{slice_name}<"),
+        format!("::rocm_oxide_device::{slice_name}<"),
+    ];
+    prefixes.iter().find_map(|prefix| {
+        normalized
+            .strip_prefix(prefix)
+            .and_then(|rest| rest.strip_suffix('>'))
+            .filter(|inner| !inner.is_empty())
+            .map(ToOwned::to_owned)
+    })
 }
 
 fn parse_contract_comment(line: &str) -> Result<Option<BufferContract>, String> {
@@ -1296,10 +1322,10 @@ fn parse_contract_comment(line: &str) -> Result<Option<BufferContract>, String> 
 }
 
 fn validate_contracts(kernel: &KernelDecl) -> Result<(), String> {
-    let pointer_args = kernel
+    let buffer_args = kernel
         .args
         .iter()
-        .filter(|arg| !matches!(arg.kind, ArgKind::Scalar))
+        .filter(|arg| arg.kind.is_buffer())
         .map(|arg| arg.name.as_str())
         .collect::<BTreeSet<_>>();
     let scalar_args = kernel
@@ -1317,9 +1343,9 @@ fn validate_contracts(kernel: &KernelDecl) -> Result<(), String> {
                 contract.buffer, kernel.name
             ));
         }
-        if !pointer_args.contains(contract.buffer.as_str()) {
+        if !buffer_args.contains(contract.buffer.as_str()) {
             return Err(format!(
-                "length contract for `{}` in kernel `{}` does not match a pointer argument",
+                "length contract for `{}` in kernel `{}` does not match a buffer argument",
                 contract.buffer, kernel.name
             ));
         }
@@ -1970,6 +1996,7 @@ fn write_json_u32_field(out: &mut String, key: &str, value: Option<u32>, first: 
 fn fallback_abi_size(arg: &KernelArg) -> u32 {
     match &arg.kind {
         ArgKind::MutPtr(_) | ArgKind::ConstPtr(_) => 8,
+        ArgKind::MutSlice(_) | ArgKind::ConstSlice(_) => 16,
         ArgKind::Scalar => match arg.ty.as_str() {
             "usize" | "isize" | "u64" | "i64" | "f64" => 8,
             "u32" | "i32" | "f32" => 4,
@@ -2038,7 +2065,7 @@ fn generate_device_struct_binding(device_struct: &DeviceStruct) -> String {
 fn generate_kernel_binding(kernel: &KernelDecl) -> Result<String, String> {
     let mut params = vec!["config: rocm_oxide::LaunchConfig".to_string()];
     let mut launch_args = Vec::new();
-    let mut pointer_arg_names = Vec::new();
+    let mut buffer_arg_names = Vec::new();
     let has_len_arg = kernel
         .args
         .iter()
@@ -2056,7 +2083,7 @@ fn generate_kernel_binding(kernel: &KernelDecl) -> Result<String, String> {
                     arg.name, inner
                 ));
                 launch_args.push(format!("{}.as_mut_ptr()", arg.name));
-                pointer_arg_names.push(arg.name.clone());
+                buffer_arg_names.push((arg.name.clone(), true));
             }
             ArgKind::ConstPtr(inner) => {
                 params.push(format!(
@@ -2064,7 +2091,25 @@ fn generate_kernel_binding(kernel: &KernelDecl) -> Result<String, String> {
                     arg.name, inner
                 ));
                 launch_args.push(format!("{}.as_ptr()", arg.name));
-                pointer_arg_names.push(arg.name.clone());
+                buffer_arg_names.push((arg.name.clone(), false));
+            }
+            ArgKind::MutSlice(inner) => {
+                params.push(format!(
+                    "{}: &rocm_oxide::DeviceBuffer<{}>",
+                    arg.name, inner
+                ));
+                launch_args.push(format!("{}.as_mut_ptr()", arg.name));
+                launch_args.push(format!("{}.len()", arg.name));
+                buffer_arg_names.push((arg.name.clone(), true));
+            }
+            ArgKind::ConstSlice(inner) => {
+                params.push(format!(
+                    "{}: &rocm_oxide::DeviceBuffer<{}>",
+                    arg.name, inner
+                ));
+                launch_args.push(format!("{}.as_ptr()", arg.name));
+                launch_args.push(format!("{}.len()", arg.name));
+                buffer_arg_names.push((arg.name.clone(), false));
             }
             ArgKind::Scalar => {
                 params.push(format!("{}: {}", arg.name, arg.ty));
@@ -2081,9 +2126,16 @@ fn generate_kernel_binding(kernel: &KernelDecl) -> Result<String, String> {
     ));
     out.push_str("        rocm_oxide::validate_launch_config(config)?;\n");
     if kernel.contracts.is_empty() && has_len_arg {
-        for arg_name in &pointer_arg_names {
+        for (arg_name, _) in &buffer_arg_names {
             out.push_str(&format!(
                 "        rocm_oxide::validate_buffer_len(\"{arg_name}\", {arg_name}.len(), n)?;\n"
+            ));
+        }
+    } else if kernel.contracts.is_empty() && buffer_arg_names.len() > 1 {
+        let (reference, _) = &buffer_arg_names[0];
+        for (arg_name, _) in buffer_arg_names.iter().skip(1) {
+            out.push_str(&format!(
+                "        rocm_oxide::validate_buffer_len(\"{arg_name}\", {arg_name}.len(), {reference}.len())?;\n"
             ));
         }
     }
@@ -2097,6 +2149,17 @@ fn generate_kernel_binding(kernel: &KernelDecl) -> Result<String, String> {
     }
     if has_block_x_arg {
         out.push_str("        rocm_oxide::validate_block_x(config, block_x)?;\n");
+    }
+    for left_index in 0..buffer_arg_names.len() {
+        for right_index in (left_index + 1)..buffer_arg_names.len() {
+            let (left_name, left_mut) = &buffer_arg_names[left_index];
+            let (right_name, right_mut) = &buffer_arg_names[right_index];
+            if *left_mut || *right_mut {
+                out.push_str(&format!(
+                    "        rocm_oxide::validate_device_buffers_disjoint(\"{left_name}\", {left_name}, \"{right_name}\", {right_name})?;\n"
+                ));
+            }
+        }
     }
     out.push_str(&format!(
         "        let kernel = self.module.kernel(c\"{}\")?;\n",
@@ -2121,9 +2184,19 @@ impl ArgKind {
         match self {
             Self::MutPtr(_) => "mut_ptr",
             Self::ConstPtr(_) => "const_ptr",
+            Self::MutSlice(_) => "mut_slice",
+            Self::ConstSlice(_) => "const_slice",
             Self::Scalar => "scalar",
         }
     }
+
+    fn is_buffer(&self) -> bool {
+        matches!(
+            self,
+            Self::MutPtr(_) | Self::ConstPtr(_) | Self::MutSlice(_) | Self::ConstSlice(_)
+        )
+    }
+
 }
 
 impl LenExpr {
@@ -2333,6 +2406,47 @@ pub unsafe extern "C" fn vector_add(
         assert!(binding.contains("validate_buffer_len(\"a\", a.len(), n)?"));
         assert!(binding.contains("out.as_mut_ptr()"));
         assert!(binding.contains("a.as_ptr()"));
+    }
+
+    #[test]
+    fn generates_device_slice_host_binding() {
+        let kernels = discover_kernels_in_source(
+            r#"
+#[kernel]
+pub unsafe extern "C" fn vector_add(
+    out: gpu::DeviceSliceMut<f32>,
+    a: gpu::DeviceSlice<f32>,
+    b: rocm_oxide_device::DeviceSlice<f32>,
+) {}
+"#,
+        )
+        .expect("source should parse");
+
+        assert_eq!(
+            kernels[0].args[0].kind,
+            ArgKind::MutSlice("f32".to_string())
+        );
+        assert_eq!(
+            kernels[0].args[1].kind,
+            ArgKind::ConstSlice("f32".to_string())
+        );
+        assert_eq!(
+            kernels[0].args[2].kind,
+            ArgKind::ConstSlice("f32".to_string())
+        );
+
+        let binding = generate_kernel_binding(&kernels[0]).expect("binding should generate");
+        assert!(binding.contains("out: &rocm_oxide::DeviceBuffer<f32>"));
+        assert!(binding.contains("a: &rocm_oxide::DeviceBuffer<f32>"));
+        assert!(binding.contains("b: &rocm_oxide::DeviceBuffer<f32>"));
+        assert!(binding.contains("validate_buffer_len(\"a\", a.len(), out.len())?"));
+        assert!(binding.contains("validate_buffer_len(\"b\", b.len(), out.len())?"));
+        assert!(binding.contains("validate_device_buffers_disjoint(\"out\", out, \"a\", a)?"));
+        assert!(binding.contains("validate_device_buffers_disjoint(\"out\", out, \"b\", b)?"));
+        assert!(binding.contains("out.as_mut_ptr()"));
+        assert!(binding.contains("out.len()"));
+        assert!(binding.contains("a.as_ptr()"));
+        assert!(binding.contains("a.len()"));
     }
 
     #[test]

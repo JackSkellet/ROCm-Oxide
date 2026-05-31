@@ -6,7 +6,7 @@
 
 use core::arch::amdgpu;
 use core::intrinsics::gpu::{amdgpu_dispatch_ptr, gpu_launch_sized_workgroup_mem};
-use core::marker::PhantomData;
+use core::{marker::PhantomData, ptr};
 use core::sync::atomic::{AtomicU32, Ordering};
 
 #[inline(always)]
@@ -159,6 +159,128 @@ pub unsafe fn atomic_store_u32(ptr: *mut u32, value: u32, ordering: Ordering) {
 #[inline(always)]
 pub unsafe fn atomic_load_u32(ptr: *const u32, ordering: Ordering) -> u32 {
     unsafe { (*(ptr.cast::<AtomicU32>())).load(ordering) }
+}
+
+#[repr(C)]
+#[derive(Clone, Copy)]
+pub struct DeviceSlice<T> {
+    ptr: *const T,
+    len: usize,
+}
+
+impl<T> DeviceSlice<T> {
+    #[inline(always)]
+    pub const unsafe fn from_raw_parts(ptr: *const T, len: usize) -> Self {
+        Self { ptr, len }
+    }
+
+    #[inline(always)]
+    pub const fn as_ptr(self) -> *const T {
+        self.ptr
+    }
+
+    #[inline(always)]
+    pub const fn len(self) -> usize {
+        self.len
+    }
+
+    #[inline(always)]
+    pub const fn is_empty(self) -> bool {
+        self.len == 0
+    }
+
+    #[inline(always)]
+    pub unsafe fn get_unchecked(self, index: usize) -> *const T {
+        unsafe { self.ptr.add(index) }
+    }
+
+    #[inline(always)]
+    pub fn get(self, index: usize) -> Option<*const T> {
+        if index < self.len {
+            Some(unsafe { self.get_unchecked(index) })
+        } else {
+            None
+        }
+    }
+
+    #[inline(always)]
+    pub unsafe fn read_unchecked(self, index: usize) -> T
+    where
+        T: Copy,
+    {
+        unsafe { ptr::read(self.get_unchecked(index)) }
+    }
+}
+
+#[repr(C)]
+#[derive(Clone, Copy)]
+pub struct DeviceSliceMut<T> {
+    ptr: *mut T,
+    len: usize,
+}
+
+impl<T> DeviceSliceMut<T> {
+    #[inline(always)]
+    pub const unsafe fn from_raw_parts(ptr: *mut T, len: usize) -> Self {
+        Self { ptr, len }
+    }
+
+    #[inline(always)]
+    pub const fn as_ptr(self) -> *const T {
+        self.ptr
+    }
+
+    #[inline(always)]
+    pub const fn as_mut_ptr(self) -> *mut T {
+        self.ptr
+    }
+
+    #[inline(always)]
+    pub const fn len(self) -> usize {
+        self.len
+    }
+
+    #[inline(always)]
+    pub const fn is_empty(self) -> bool {
+        self.len == 0
+    }
+
+    #[inline(always)]
+    pub const fn as_const(self) -> DeviceSlice<T> {
+        DeviceSlice {
+            ptr: self.ptr,
+            len: self.len,
+        }
+    }
+
+    #[inline(always)]
+    pub unsafe fn get_unchecked(self, index: usize) -> *mut T {
+        unsafe { self.ptr.add(index) }
+    }
+
+    #[inline(always)]
+    pub fn get(self, index: usize) -> Option<*mut T> {
+        if index < self.len {
+            Some(unsafe { self.get_unchecked(index) })
+        } else {
+            None
+        }
+    }
+
+    #[inline(always)]
+    pub unsafe fn read_unchecked(self, index: usize) -> T
+    where
+        T: Copy,
+    {
+        unsafe { ptr::read(self.get_unchecked(index)) }
+    }
+
+    #[inline(always)]
+    pub unsafe fn write_unchecked(self, index: usize, value: T) {
+        unsafe {
+            ptr::write(self.get_unchecked(index), value);
+        }
+    }
 }
 
 pub struct DynamicSharedMem<T> {

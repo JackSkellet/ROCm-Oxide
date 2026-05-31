@@ -24,7 +24,6 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             &d_out,
             &short,
             &d_b,
-            n,
         )
     };
     match validation {
@@ -41,7 +40,6 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             &d_out,
             &d_a,
             &d_b,
-            n,
         )
     };
     match block_validation {
@@ -50,6 +48,22 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         }
         Err(err) => return Err(format!("unexpected launch validation error: {err}").into()),
         Ok(()) => return Err("invalid launch unexpectedly succeeded".into()),
+    }
+
+    let alias_validation = unsafe {
+        kernels.vector_add(
+            LaunchConfig::for_num_elems_with_block_size(n, block_x),
+            &d_out,
+            &d_out,
+            &d_b,
+        )
+    };
+    match alias_validation {
+        Err(rocm_oxide::Error::InvalidLaunch(message)) => {
+            println!("Validation rejected aliased mutable buffer: {message}");
+        }
+        Err(err) => return Err(format!("unexpected alias validation error: {err}").into()),
+        Ok(()) => return Err("aliased mutable buffer launch unexpectedly succeeded".into()),
     }
 
     let small_frame = DeviceBuffer::<u32>::new(512)?;
@@ -79,7 +93,6 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             &d_out,
             &d_a,
             &d_b,
-            n,
         )?;
     }
     rocm_oxide::hip::synchronize()?;
@@ -102,7 +115,6 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             &d_out,
             &d_a,
             &params,
-            n,
         )?;
     }
     rocm_oxide::hip::synchronize()?;

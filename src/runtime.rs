@@ -210,6 +210,91 @@ pub fn validate_block_x(config: LaunchConfig, block_x: u32) -> Result<()> {
     }
 }
 
+#[repr(C)]
+#[derive(Debug, Clone, Copy)]
+pub struct DeviceSlice<T> {
+    pub ptr: *const T,
+    pub len: usize,
+}
+
+impl<T> DeviceSlice<T> {
+    pub fn from_buffer(buffer: &hip::DeviceBuffer<T>) -> Self {
+        Self {
+            ptr: buffer.as_ptr(),
+            len: buffer.len(),
+        }
+    }
+}
+
+#[repr(C)]
+#[derive(Debug, Clone, Copy)]
+pub struct DeviceSliceMut<T> {
+    pub ptr: *mut T,
+    pub len: usize,
+}
+
+impl<T> DeviceSliceMut<T> {
+    pub fn from_buffer(buffer: &hip::DeviceBuffer<T>) -> Self {
+        Self {
+            ptr: buffer.as_mut_ptr(),
+            len: buffer.len(),
+        }
+    }
+
+    pub const fn as_const(self) -> DeviceSlice<T> {
+        DeviceSlice {
+            ptr: self.ptr,
+            len: self.len,
+        }
+    }
+}
+
+pub fn validate_device_buffers_disjoint<T, U>(
+    lhs_name: &str,
+    lhs: &hip::DeviceBuffer<T>,
+    rhs_name: &str,
+    rhs: &hip::DeviceBuffer<U>,
+) -> Result<()> {
+    let Some((lhs_start, lhs_end)) = device_buffer_byte_range(lhs_name, lhs)? else {
+        return Ok(());
+    };
+    let Some((rhs_start, rhs_end)) = device_buffer_byte_range(rhs_name, rhs)? else {
+        return Ok(());
+    };
+
+    if lhs_start < rhs_end && rhs_start < lhs_end {
+        Err(Error::InvalidLaunch(format!(
+            "mutable buffer `{lhs_name}` aliases `{rhs_name}`; generated bindings require disjoint device buffers"
+        )))
+    } else {
+        Ok(())
+    }
+}
+
+fn device_buffer_byte_range<T>(
+    name: &str,
+    buffer: &hip::DeviceBuffer<T>,
+) -> Result<Option<(usize, usize)>> {
+    let bytes = buffer
+        .len()
+        .checked_mul(std::mem::size_of::<T>())
+        .ok_or_else(|| {
+            Error::InvalidLaunch(format!(
+                "buffer `{name}` byte length overflows usize for disjointness validation"
+            ))
+        })?;
+    if bytes == 0 {
+        return Ok(None);
+    }
+    let start = buffer.as_ptr() as usize;
+    let end = start.checked_add(bytes).ok_or_else(|| {
+        Error::InvalidLaunch(format!(
+            "buffer `{name}` address range overflows usize for disjointness validation"
+        ))
+    })?;
+    Ok(Some((start, end)))
+}
+
 pub struct Module {
     module: hip::Module,
 }
@@ -302,6 +387,7 @@ fn rocminfo_path() -> PathBuf {
 #[cfg(test)]
 mod tests {
     use super::{Dim3, LaunchConfig};
+    use crate::hip::DeviceBuffer;
 
     #[test]
     fn one_dimensional_launch_config_rounds_up() {
@@ -341,5 +427,21 @@ mod tests {
     fn buffer_len_validation_reports_name() {
         let err = super::validate_buffer_len("input", 3, 4).expect_err("short buffer should fail");
         assert!(err.to_string().contains("input"));
+    }
+
+    #[test]
+    fn disjoint_validation_rejects_same_buffer() {
+        let buffer = DeviceBuffer::<u32>::new(4).expect("small allocation should work");
+        let err = super::validate_device_buffers_disjoint("out", &buffer, "input", &buffer)
+            .expect_err("same buffer should alias");
+        assert!(err.to_string().contains("aliases"));
+    }
+
+    #[test]
+    fn disjoint_validation_accepts_distinct_buffers() {
+        let out = DeviceBuffer::<u32>::new(4).expect("small allocation should work");
+        let input = DeviceBuffer::<u32>::new(4).expect("small allocation should work");
+        super::validate_device_buffers_disjoint("out", &out, "input", &input)
+            .expect("distinct allocations should not alias");
     }
 }

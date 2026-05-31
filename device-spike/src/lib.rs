@@ -13,46 +13,43 @@ pub struct AffineParams {
 }
 
 #[kernel]
-pub unsafe extern "C" fn add_one(out: *mut f32, input: *const f32, n: usize) {
+pub unsafe extern "C" fn add_one(
+    out: gpu::DeviceSliceMut<f32>,
+    input: gpu::DeviceSlice<f32>,
+) {
     let i = gpu::global_id_x();
-    if i < n {
-        unsafe {
-            *out.add(i) = *input.add(i) + 1.0;
-        }
+    if i < out.len() {
+        let value = unsafe { input.read_unchecked(i) };
+        unsafe { out.write_unchecked(i, value + 1.0) };
     }
 }
 
 #[kernel]
 pub unsafe extern "C" fn vector_add(
-    out: *mut f32,
-    a: *const f32,
-    b: *const f32,
-    n: usize,
+    out: gpu::DeviceSliceMut<f32>,
+    a: gpu::DeviceSlice<f32>,
+    b: gpu::DeviceSlice<f32>,
 ) {
     let i = gpu::global_id_x();
-    if i < n {
-        unsafe {
-            *out.add(i) = *a.add(i) + *b.add(i);
-        }
+    if i < out.len() {
+        let lhs = unsafe { a.read_unchecked(i) };
+        let rhs = unsafe { b.read_unchecked(i) };
+        unsafe { out.write_unchecked(i, lhs + rhs) };
     }
 }
 
-// rocm-oxide: len(out)=n
-// rocm-oxide: len(input)=n
 // rocm-oxide: len(params)=1
 #[kernel]
 pub unsafe extern "C" fn affine_transform(
-    out: *mut f32,
-    input: *const f32,
-    params: *const AffineParams,
-    n: usize,
+    out: gpu::DeviceSliceMut<f32>,
+    input: gpu::DeviceSlice<f32>,
+    params: gpu::DeviceSlice<AffineParams>,
 ) {
     let i = gpu::global_id_x();
-    if i < n {
-        let env = unsafe { *params };
-        unsafe {
-            *out.add(i) = *input.add(i) * env.scale + env.bias;
-        }
+    if i < out.len() {
+        let env = unsafe { params.read_unchecked(0) };
+        let value = unsafe { input.read_unchecked(i) };
+        unsafe { out.write_unchecked(i, value * env.scale + env.bias) };
     }
 }
 

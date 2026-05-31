@@ -229,7 +229,6 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 &d_affine_output,
                 &d_affine_input,
                 &d_affine_params,
-                4,
             )?;
         }
         rocm_oxide::hip::synchronize()?;

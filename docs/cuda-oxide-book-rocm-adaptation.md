@@ -53,11 +53,12 @@ The generated bindings continue to validate nonzero grid/block dimensions,
 ## Kernel ABI
 
 cuda-oxide scalarizes slices and exposes safe `DisjointSlice` bounds checks.
-ROCm-Oxide is still lower-level: kernels use raw pointers at the ABI boundary,
-and generated host bindings enforce length contracts before launch. The next
-ROCm equivalent should be an AMD device-side slice wrapper that carries a length
-and exposes checked accessors, then have the binding generator pass pointer and
-length pairs automatically.
+ROCm-Oxide now has the first AMD device-side slice ABI. Kernels can accept
+`rocm_oxide_device::DeviceSlice<T>` and `DeviceSliceMut<T>`; generated host
+bindings accept `DeviceBuffer<T>` values, pass pointer/length pairs to HIP, and
+validate lengths plus obvious mutable-buffer aliasing before launch. The simple
+`add_one`, `vector_add`, and `affine_transform` kernels use this path first. The
+larger image, upscaling, stress, and raytrace kernels still need conversion.
 
 ## Memory And Synchronization
 

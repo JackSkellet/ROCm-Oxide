@@ -76,10 +76,12 @@ same length.
 
 ## Current Limitations
 
-Contracts only describe minimum buffer lengths. They do not yet express aliasing
-rules, element alignment beyond the `DeviceBuffer<T>` type, scalar ABI width
-metadata, multidimensional shapes, or dynamic packed scene layouts. Those should
-be added as separate contract kinds rather than hidden in comments or examples.
+Contracts only describe minimum buffer lengths. Generated bindings now reject
+obvious aliasing where at least one `DeviceBuffer<T>` argument is mutable, but
+contracts do not yet express intentional aliasing rules, element alignment beyond
+the `DeviceBuffer<T>` type, scalar ABI width metadata, multidimensional shapes,
+or dynamic packed scene layouts. Those should be added as separate contract kinds
+rather than hidden in comments or examples.
 
 The generated metadata now also records code-object facts parsed from the AMDGPU
 note section: argument offsets, ABI sizes, pointer address spaces, value kinds,

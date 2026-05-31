@@ -181,13 +181,13 @@ The generated bindings expose typed host calls such as:
 
 ```rust
 unsafe {
-    kernels.vector_add(config, &d_out, &d_a, &d_b, n)?;
+    kernels.vector_add(config, &d_out, &d_a, &d_b)?;
 }
 ```
 
 Bindings validate launch shape before entering HIP. They check grid/block
-sanity, legacy `n`-sized buffer kernels, and explicit source-level buffer
-contracts such as:
+sanity, typed device-slice lengths, obvious mutable-buffer aliasing, legacy
+`n`-sized buffer kernels, and explicit source-level buffer contracts such as:
 
 ```rust
 // rocm-oxide: len(frame)=pixel_count
@@ -267,16 +267,15 @@ use rocm_oxide_kernel::kernel;
 
 #[kernel]
 pub unsafe extern "C" fn vector_add(
-    out: *mut f32,
-    a: *const f32,
-    b: *const f32,
-    n: usize,
+    out: gpu::DeviceSliceMut<f32>,
+    a: gpu::DeviceSlice<f32>,
+    b: gpu::DeviceSlice<f32>,
 ) {
     let i = gpu::global_id_x();
-    if i < n {
-        unsafe {
-            *out.add(i) = *a.add(i) + *b.add(i);
-        }
+    if i < out.len() {
+        let lhs = unsafe { a.read_unchecked(i) };
+        let rhs = unsafe { b.read_unchecked(i) };
+        unsafe { out.write_unchecked(i, lhs + rhs) };
     }
 }
 ```
@@ -288,8 +287,8 @@ kernel allowlist, so helper functions can remain ordinary device functions.
 now wraps the raw AMDGPU intrinsics used by kernels. It provides thread/block
 IDs, dispatch-packet-derived block/grid dimensions, global IDs, wavefront
 metadata, barriers, dynamic launch-sized LDS pointers, ballot/reduction helpers,
-and basic `u32` atomics so device code does not need to call
-`core::arch::amdgpu` directly.
+typed device slices, and basic `u32` atomics so device code does not need to
+call `core::arch::amdgpu` directly.
 
 ## Next Implementation Slice
 

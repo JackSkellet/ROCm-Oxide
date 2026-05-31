@@ -6,8 +6,9 @@ mod runtime;
 pub use hip::{DeviceBuffer, Event, Global, PinnedHostBuffer, Stream};
 pub use operation::{DeviceFuture, DeviceOperation, ExecutionContext, StreamPool, Value};
 pub use runtime::{
-    Device, Dim3, Error, Kernel, LaunchConfig, Module, Result, validate_block_x,
-    validate_buffer_len, validate_launch_config,
+    Device, DeviceSlice, DeviceSliceMut, Dim3, Error, Kernel, LaunchConfig, Module, Result,
+    validate_block_x, validate_buffer_len, validate_device_buffers_disjoint,
+    validate_launch_config,
 };
 
 #[macro_export]

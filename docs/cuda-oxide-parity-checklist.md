@@ -18,6 +18,9 @@ not the product.
 - [x] Host-side launch-shape validation.
 - [x] Source-level per-buffer length contracts.
 - [x] Generated validation for mixed-resolution buffer lengths.
+- [x] Device-side `DeviceSlice<T>` and `DeviceSliceMut<T>` ABI for simple kernels.
+- [x] Generated host bindings scalarize device slices to pointer/length launch args.
+- [x] Generated mutable-buffer alias rejection.
 - [x] `rocm-oxide-build --doctor` prerequisite check.
 - [x] `rocm-oxide-build --inspect-metadata` artifact summary.
 - [x] HIP stream wrapper.
@@ -49,6 +52,8 @@ not the product.
 
 ## High-Priority Remaining Work
 
+- [ ] Implementation task sequence is tracked in
+      [implementation-tasks.md](/home/jack/Documents/GitKraken_Projects/ROCm-Oxide/docs/implementation-tasks.md).
 - [x] Cargo subcommand equivalent to `cargo oxide`:
   - [x] `cargo rocm-oxide build`
   - [x] `cargo rocm-oxide run`
@@ -88,6 +93,7 @@ not the product.
   - [x] warp/wavefront helpers
   - [x] barriers
   - [x] dynamic shared memory/LDS wrappers
+  - [x] typed device slices for pointer/length kernel ABI
   - [x] basic `u32` atomics
   - [ ] explicit memory-scope atomics
   - [ ] math intrinsic lowering

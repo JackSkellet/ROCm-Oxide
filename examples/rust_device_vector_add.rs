@@ -19,9 +19,11 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             kernel,
             LaunchConfig::for_num_elems_with_block_size(n, block_x),
             d_out.as_mut_ptr(),
+            d_out.len(),
             d_a.as_ptr(),
+            d_a.len(),
             d_b.as_ptr(),
-            n
+            d_b.len()
         )?;
     }
     rocm_oxide::hip::synchronize()?;

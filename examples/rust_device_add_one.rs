@@ -15,8 +15,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             kernel,
             LaunchConfig::for_num_elems(n),
             d_output.as_mut_ptr(),
+            d_output.len(),
             d_input.as_ptr(),
-            n,
+            d_input.len(),
         )?;
     }
     rocm_oxide::hip::synchronize()?;

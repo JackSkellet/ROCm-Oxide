@@ -58,7 +58,7 @@ fn probe_vector_add(
     let config = LaunchConfig::for_num_elems_with_block_size(VECTOR_N, BLOCK_X);
 
     let ms = time_gpu_ms(64, || unsafe {
-        kernels.vector_add(config, &d_out, &d_a, &d_b, VECTOR_N)
+        kernels.vector_add(config, &d_out, &d_a, &d_b)
     })?;
     record_sample(
         samples,
@@ -86,7 +86,7 @@ fn probe_affine_transform(
     let config = LaunchConfig::for_num_elems_with_block_size(VECTOR_N, BLOCK_X);
 
     let ms = time_gpu_ms(64, || unsafe {
-        kernels.affine_transform(config, &d_out, &d_input, &params, VECTOR_N)
+        kernels.affine_transform(config, &d_out, &d_input, &params)
     })?;
     record_sample(
         samples,

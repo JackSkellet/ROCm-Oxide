@@ -90,7 +90,6 @@ fn main() -> Result<()> {
             &d_out,
             &short,
             &d_b,
-            n,
         )
     };
     assert!(matches!(rejected, Err(rocm_oxide::Error::InvalidLaunch(_))));
@@ -102,7 +101,6 @@ fn main() -> Result<()> {
             &d_out,
             &d_a,
             &d_b,
-            n,
         )?;
     }
     rocm_oxide::hip::synchronize()?;
@@ -120,7 +118,6 @@ fn main() -> Result<()> {
             &d_out,
             &d_a,
             &params,
-            n,
         )?;
     }
     rocm_oxide::hip::synchronize()?;
