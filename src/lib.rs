@@ -9,10 +9,10 @@ pub use operation::{
 };
 pub use runtime::{
     AtomicMemoryKind, Device, DeviceLimits, DeviceSlice, DeviceSliceMut, Dim3, Error, Kernel,
-    KernelMetadata, KernelResource, LaunchConfig, Module, OccupancyActiveBlocks,
-    OccupancyMaxPotentialBlockSize, Result, SystemScopeAtomicVisibility, validate_block_x,
-    validate_buffer_len, validate_device_buffers_disjoint, validate_launch_config,
-    validate_launch_config_for_limits,
+    KernelMetadata, KernelResource, LaunchConfig, LaunchRecommendation, Module,
+    OccupancyActiveBlocks, OccupancyMaxPotentialBlockSize, Result, SystemScopeAtomicVisibility,
+    validate_block_x, validate_buffer_len, validate_device_buffers_disjoint,
+    validate_launch_config, validate_launch_config_for_limits,
 };
 
 #[macro_export]

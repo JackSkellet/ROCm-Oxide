@@ -68,12 +68,12 @@ Local probes on 2026-05-31:
   - [x] add a static LDS kernel once address-space-safe Rust syntax is settled
   - [x] verify LDS IR and ISA for dynamic plus static cases
   - [x] feed LDS pressure into occupancy planning
-- [ ] Occupancy and resource model:
+- [x] Occupancy and resource model:
   - [x] expose per-kernel VGPR, SGPR, LDS, private segment, kernarg, and wavefront metadata at runtime
   - [x] switch `performance_probe` to the generated runtime resource table
   - [x] wrap HIP occupancy APIs for launch planning
   - [x] add benchmark output that flags occupancy limiters and spills
-  - [ ] turn resource/occupancy facts into generated launch-shape recommendations
+  - [x] turn resource/occupancy facts into generated launch-shape recommendations
 
 ### P1: Runtime Orchestration
 

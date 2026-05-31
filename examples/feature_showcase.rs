@@ -123,11 +123,18 @@ fn main() -> Result<()> {
     assert!(potential.block_size > 0);
     let active = vector_kernel.occupancy_max_active_blocks_per_multiprocessor(block_x, 0)?;
     assert!(active.blocks_per_multiprocessor > 0);
+    let recommended = kernels.recommend_1d_launch("vector_add", n, 0, 0)?;
+    assert!(recommended.config.grid.x > 0);
+    assert_eq!(recommended.config.block.x, recommended.block_size);
+    assert_eq!(recommended.dynamic_shared_mem_bytes, 0);
+    assert!(recommended.active_blocks_per_multiprocessor > 0);
+    assert!(recommended.waves_per_block.unwrap_or(0) > 0);
     let a = (0..n).map(|i| i as f32).collect::<Vec<_>>();
     let b = (0..n).map(|i| (i as f32) * 0.5).collect::<Vec<_>>();
 
     println!("ROCm-Oxide feature showcase on {}", device.arch());
     println!("ok: HIP occupancy wrappers reported launch guidance");
+    println!("ok: generated launch recommendation produced a 1D vector_add shape");
 
     let d_a = Arc::new(DeviceBuffer::from_slice(&a)?);
     let d_b = Arc::new(DeviceBuffer::from_slice(&b)?);

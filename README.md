@@ -223,6 +223,9 @@ execution ergonomics on ROCm:
 - `Kernel::occupancy_max_potential_block_size`,
   `Kernel::occupancy_max_active_blocks_per_multiprocessor`, and
   `Kernel::occupancy_for_config` wrappers over HIP occupancy planning APIs
+- `Kernel::recommend_1d_launch` and generated
+  `DeviceKernels::recommend_1d_launch` helpers that turn occupancy plus
+  generated resource metadata into a concrete 1D launch shape
 - `#[device_global]`, `#[constant]`, and `#[shared]` markers for Rust-authored
   device globals, with generated typed host accessors where host-visible and
   ROCm address-space lowering
@@ -234,7 +237,10 @@ wavefront size, and dynamic-stack usage.
 Generated bindings expose the same facts through `DEVICE_KERNEL_RESOURCES`,
 `DeviceKernels::resources()`, `DeviceKernels::resource(name)`, and a
 `DeviceKernels::module()` accessor for lower-level runtime queries such as HIP
-occupancy planning.
+occupancy planning. Generated bindings also expose `recommend_1d_launch` for
+occupancy-guided 1D launch suggestions; callers still pass the result through
+the normal launch validators for kernel-specific buffer, block, and LDS
+contracts.
 
 `cargo run --example performance_probe -- --json target/performance_probe.json`
 reports HIP-event GPU time for generated Rust kernels and can write benchmark
@@ -336,9 +342,9 @@ This roadmap is grounded in the current local probe target:
   addrspace(3) LDS storage, verifies dynamic and static LDS IR plus DS
   load/store ISA, and feeds static/dynamic LDS pressure into launch validation
   and HIP occupancy checks.
-- Occupancy and resource model: build on the generated runtime resource table,
-  preserve the new HIP occupancy wrappers and benchmark limiter flags, then use
-  that data to guide heavier launch-planning work.
+- Occupancy and resource model: generated resources now feed HIP occupancy
+  wrappers, benchmark limiter flags, and generated 1D launch-shape
+  recommendations.
 
 ### P1: Runtime Orchestration
 

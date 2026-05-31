@@ -186,6 +186,7 @@ pub struct KernelMetadata {
     pub max_flat_workgroup_size: Option<u32>,
     pub static_shared_mem_bytes: u32,
     pub uses_dynamic_shared_mem: bool,
+    pub wavefront_size: Option<u32>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -214,6 +215,7 @@ impl KernelResource {
                 None => 0,
             },
             uses_dynamic_shared_mem: self.uses_dynamic_shared_mem,
+            wavefront_size: self.wavefront_size,
         }
     }
 }
@@ -266,6 +268,17 @@ pub struct OccupancyMaxPotentialBlockSize {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct OccupancyActiveBlocks {
     pub blocks_per_multiprocessor: u32,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct LaunchRecommendation {
+    pub config: LaunchConfig,
+    pub min_grid_size: u32,
+    pub block_size: u32,
+    pub dynamic_shared_mem_bytes: u32,
+    pub active_blocks_per_multiprocessor: u32,
+    pub waves_per_block: Option<u32>,
+    pub waves_per_multiprocessor: Option<u32>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -573,6 +586,42 @@ impl Kernel {
             config.block.x * config.block.y * config.block.z,
             config.shared_mem_bytes,
         )
+    }
+
+    pub fn recommend_1d_launch(
+        &self,
+        num_elems: usize,
+        dynamic_shared_mem_per_block: u32,
+        block_size_limit: u32,
+    ) -> Result<LaunchRecommendation> {
+        let potential = self
+            .occupancy_max_potential_block_size(dynamic_shared_mem_per_block, block_size_limit)?;
+        if potential.block_size == 0 {
+            return Err(Error::InvalidLaunch(
+                "HIP occupancy returned a zero block-size recommendation".to_string(),
+            ));
+        }
+        let config = LaunchConfig::for_num_elems_with_block_size(num_elems, potential.block_size)
+            .with_shared_mem_bytes(dynamic_shared_mem_per_block);
+        validate_launch_config_for_limits(config, self.limits, self.metadata)?;
+        let active = self.occupancy_for_config(config)?;
+        let waves_per_block = self
+            .metadata
+            .wavefront_size
+            .filter(|wavefront| *wavefront > 0)
+            .map(|wavefront| potential.block_size.div_ceil(wavefront));
+        let waves_per_multiprocessor =
+            waves_per_block.map(|waves| waves * active.blocks_per_multiprocessor);
+
+        Ok(LaunchRecommendation {
+            config,
+            min_grid_size: potential.min_grid_size,
+            block_size: potential.block_size,
+            dynamic_shared_mem_bytes: dynamic_shared_mem_per_block,
+            active_blocks_per_multiprocessor: active.blocks_per_multiprocessor,
+            waves_per_block,
+            waves_per_multiprocessor,
+        })
     }
 
     fn validate_occupancy_shared_mem(&self, dynamic_shared_mem_per_block: u32) -> Result<()> {

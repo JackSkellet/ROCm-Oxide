@@ -2840,6 +2840,12 @@ fn write_bindings(
     );
     out.push_str("        DEVICE_KERNEL_RESOURCES.iter().find(|resource| resource.name == name)\n");
     out.push_str("    }\n\n");
+    out.push_str("    pub fn recommend_1d_launch(&self, name: &str, num_elems: usize, dynamic_shared_mem_bytes: u32, block_size_limit: u32) -> rocm_oxide::Result<rocm_oxide::LaunchRecommendation> {\n");
+    out.push_str("        let resource = self.resource(name).ok_or_else(|| rocm_oxide::Error::InvalidLaunch(format!(\"unknown generated kernel `{name}`\")))?;\n");
+    out.push_str("        let c_name = std::ffi::CString::new(name).map_err(|_| rocm_oxide::Error::InvalidLaunch(format!(\"kernel name `{name}` contains a NUL byte\")))?;\n");
+    out.push_str("        let kernel = self.module.kernel_with_metadata(c_name.as_c_str(), resource.launch_metadata())?;\n");
+    out.push_str("        kernel.recommend_1d_launch(num_elems, dynamic_shared_mem_bytes, block_size_limit)\n");
+    out.push_str("    }\n\n");
 
     for global in device_globals
         .values()
@@ -3106,10 +3112,11 @@ fn generated_kernel_metadata(metadata: Option<&KernelObjectMetadata>) -> String 
         return "rocm_oxide::KernelMetadata::default()".to_string();
     };
     format!(
-        "rocm_oxide::KernelMetadata {{ max_flat_workgroup_size: {}, static_shared_mem_bytes: {}, uses_dynamic_shared_mem: {} }}",
+        "rocm_oxide::KernelMetadata {{ max_flat_workgroup_size: {}, static_shared_mem_bytes: {}, uses_dynamic_shared_mem: {}, wavefront_size: {} }}",
         generated_option_u32(metadata.max_flat_workgroup_size),
         metadata.group_segment_fixed_size.unwrap_or(0),
-        metadata.uses_dynamic_shared_mem()
+        metadata.uses_dynamic_shared_mem(),
+        generated_option_u32(metadata.wavefront_size),
     )
 }
 
