@@ -212,6 +212,8 @@ execution ergonomics on ROCm:
 - explicit fine-grained device allocation through `DeviceBuffer::new_fine_grained`
 - mapped coherent pinned host buffers for host-visible GPU access
 - HIP stream-ordered `DeviceBuffer::new_async` and explicit `free_async`
+- `MemPool` controls for HIP default/current memory pools, release thresholds,
+  reuse toggles, stats, trimming, and `DeviceBuffer::new_from_pool_async`
 - fallible allocation-size and copy-length validation instead of panics
 - lazy `DeviceOperation` values with `.sync`, `.sync_on`, `.async_on`,
   `.async_in`, `.capture_graph`, `.capture_graph_on`, `.map`, `.and_then`, and
@@ -317,6 +319,8 @@ relaxed `u32` atomic compatibility helpers so device code does not need to call
 `core::arch::amdgpu` directly.
 Atomic memory visibility rules are documented in
 [docs/atomic-scopes.md](/home/jack/Documents/GitKraken_Projects/ROCm-Oxide/docs/atomic-scopes.md).
+Stream-ordered allocation rules are documented in
+[docs/stream-ordered-allocation.md](/home/jack/Documents/GitKraken_Projects/ROCm-Oxide/docs/stream-ordered-allocation.md).
 
 ## Roadmap
 
@@ -354,9 +358,9 @@ This roadmap is grounded in the current local probe target:
 - HIP graph capture for `DeviceOperation` pipelines: generated operations stay
   stream-only, graph instantiate/launch wrappers are in place, and graph replay
   is verified through generated kernel bindings.
-- Stream-ordered allocation maturity: add memory-pool controls around
-  `hipMallocAsync`/`hipFreeAsync`, preserve queued-operation lifetimes, and
-  document async buffer ordering rules.
+- Stream-ordered allocation maturity: memory-pool controls wrap
+  `hipMallocAsync`/`hipFreeAsync`, generated operations retain queued buffer
+  lifetimes, and async buffer ordering rules are documented.
 - Multi-device and host-memory coherence: model coarse/fine-grained memory pools,
   pinned/managed/peer memory, and device properties needed by launch validation.
 

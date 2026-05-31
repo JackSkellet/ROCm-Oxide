@@ -11,6 +11,7 @@ pub type HipEvent = *mut c_void;
 pub type HipGraph = *mut c_void;
 pub type HipGraphExec = *mut c_void;
 pub type HipGraphNode = *mut c_void;
+pub type HipMemPool = *mut c_void;
 
 pub const HIP_SUCCESS: HipError = 0;
 pub const HIP_MEMCPY_HOST_TO_DEVICE: c_int = 1;
@@ -30,17 +31,37 @@ pub const HIP_DEVICE_ATTRIBUTE_SHARED_MEM_PER_MULTIPROCESSOR: c_int = 76;
 pub const HIP_STREAM_CAPTURE_MODE_GLOBAL: c_int = 0;
 pub const HIP_STREAM_CAPTURE_MODE_THREAD_LOCAL: c_int = 1;
 pub const HIP_STREAM_CAPTURE_MODE_RELAXED: c_int = 2;
+pub const HIP_MEM_POOL_REUSE_FOLLOW_EVENT_DEPENDENCIES: c_int = 0x1;
+pub const HIP_MEM_POOL_REUSE_ALLOW_OPPORTUNISTIC: c_int = 0x2;
+pub const HIP_MEM_POOL_REUSE_ALLOW_INTERNAL_DEPENDENCIES: c_int = 0x3;
+pub const HIP_MEM_POOL_ATTR_RELEASE_THRESHOLD: c_int = 0x4;
+pub const HIP_MEM_POOL_ATTR_RESERVED_MEM_CURRENT: c_int = 0x5;
+pub const HIP_MEM_POOL_ATTR_RESERVED_MEM_HIGH: c_int = 0x6;
+pub const HIP_MEM_POOL_ATTR_USED_MEM_CURRENT: c_int = 0x7;
+pub const HIP_MEM_POOL_ATTR_USED_MEM_HIGH: c_int = 0x8;
 
 unsafe extern "C" {
     fn hipGetErrorString(error: HipError) -> *const c_char;
     fn hipGetDeviceCount(count: *mut c_int) -> HipError;
     fn hipSetDevice(device_id: c_int) -> HipError;
     fn hipDeviceGetAttribute(value: *mut c_int, attr: c_int, device_id: c_int) -> HipError;
+    fn hipDeviceGetDefaultMemPool(mem_pool: *mut HipMemPool, device: c_int) -> HipError;
+    fn hipDeviceGetMemPool(mem_pool: *mut HipMemPool, device: c_int) -> HipError;
+    fn hipDeviceSetMemPool(device: c_int, mem_pool: HipMemPool) -> HipError;
     fn hipMalloc(ptr: *mut *mut c_void, size: usize) -> HipError;
     fn hipExtMallocWithFlags(ptr: *mut *mut c_void, size: usize, flags: c_uint) -> HipError;
     fn hipMallocAsync(ptr: *mut *mut c_void, size: usize, stream: HipStream) -> HipError;
+    fn hipMallocFromPoolAsync(
+        ptr: *mut *mut c_void,
+        size: usize,
+        mem_pool: HipMemPool,
+        stream: HipStream,
+    ) -> HipError;
     fn hipFree(ptr: *mut c_void) -> HipError;
     fn hipFreeAsync(ptr: *mut c_void, stream: HipStream) -> HipError;
+    fn hipMemPoolTrimTo(mem_pool: HipMemPool, min_bytes_to_hold: usize) -> HipError;
+    fn hipMemPoolSetAttribute(mem_pool: HipMemPool, attr: c_int, value: *mut c_void) -> HipError;
+    fn hipMemPoolGetAttribute(mem_pool: HipMemPool, attr: c_int, value: *mut c_void) -> HipError;
     fn hipHostMalloc(ptr: *mut *mut c_void, size: usize, flags: c_uint) -> HipError;
     fn hipHostGetDevicePointer(
         device_ptr: *mut *mut c_void,
@@ -206,6 +227,145 @@ fn validate_slice_len(label: &str, actual: usize, expected: usize) -> Result<()>
         Err(Error::invalid_value(format!(
             "{label} length mismatch: got {actual}, expected {expected}"
         )))
+    }
+}
+
+#[derive(Clone, Copy)]
+pub struct MemPool {
+    raw: HipMemPool,
+}
+
+unsafe impl Send for MemPool {}
+unsafe impl Sync for MemPool {}
+
+impl MemPool {
+    pub fn default_for_device(device_id: i32) -> Result<Self> {
+        let mut raw = ptr::null_mut();
+        unsafe {
+            check(hipDeviceGetDefaultMemPool(&mut raw, device_id))?;
+        }
+        Ok(Self { raw })
+    }
+
+    pub fn current_for_device(device_id: i32) -> Result<Self> {
+        let mut raw = ptr::null_mut();
+        unsafe {
+            check(hipDeviceGetMemPool(&mut raw, device_id))?;
+        }
+        Ok(Self { raw })
+    }
+
+    pub fn set_current_for_device(self, device_id: i32) -> Result<()> {
+        unsafe { check(hipDeviceSetMemPool(device_id, self.raw)) }
+    }
+
+    pub fn trim_to(self, min_bytes_to_hold: usize) -> Result<()> {
+        unsafe { check(hipMemPoolTrimTo(self.raw, min_bytes_to_hold)) }
+    }
+
+    pub fn release_threshold(self) -> Result<u64> {
+        self.get_u64_attr(HIP_MEM_POOL_ATTR_RELEASE_THRESHOLD)
+    }
+
+    pub fn set_release_threshold(self, bytes: u64) -> Result<()> {
+        self.set_u64_attr(HIP_MEM_POOL_ATTR_RELEASE_THRESHOLD, bytes)
+    }
+
+    pub fn reserved_mem_current(self) -> Result<u64> {
+        self.get_u64_attr(HIP_MEM_POOL_ATTR_RESERVED_MEM_CURRENT)
+    }
+
+    pub fn reserved_mem_high(self) -> Result<u64> {
+        self.get_u64_attr(HIP_MEM_POOL_ATTR_RESERVED_MEM_HIGH)
+    }
+
+    pub fn used_mem_current(self) -> Result<u64> {
+        self.get_u64_attr(HIP_MEM_POOL_ATTR_USED_MEM_CURRENT)
+    }
+
+    pub fn used_mem_high(self) -> Result<u64> {
+        self.get_u64_attr(HIP_MEM_POOL_ATTR_USED_MEM_HIGH)
+    }
+
+    pub fn set_reuse_follow_event_dependencies(self, enabled: bool) -> Result<()> {
+        self.set_i32_attr(
+            HIP_MEM_POOL_REUSE_FOLLOW_EVENT_DEPENDENCIES,
+            if enabled { 1 } else { 0 },
+        )
+    }
+
+    pub fn reuse_follow_event_dependencies(self) -> Result<bool> {
+        Ok(self.get_i32_attr(HIP_MEM_POOL_REUSE_FOLLOW_EVENT_DEPENDENCIES)? != 0)
+    }
+
+    pub fn set_reuse_allow_opportunistic(self, enabled: bool) -> Result<()> {
+        self.set_i32_attr(
+            HIP_MEM_POOL_REUSE_ALLOW_OPPORTUNISTIC,
+            if enabled { 1 } else { 0 },
+        )
+    }
+
+    pub fn reuse_allow_opportunistic(self) -> Result<bool> {
+        Ok(self.get_i32_attr(HIP_MEM_POOL_REUSE_ALLOW_OPPORTUNISTIC)? != 0)
+    }
+
+    pub fn set_reuse_allow_internal_dependencies(self, enabled: bool) -> Result<()> {
+        self.set_i32_attr(
+            HIP_MEM_POOL_REUSE_ALLOW_INTERNAL_DEPENDENCIES,
+            if enabled { 1 } else { 0 },
+        )
+    }
+
+    pub fn reuse_allow_internal_dependencies(self) -> Result<bool> {
+        Ok(self.get_i32_attr(HIP_MEM_POOL_REUSE_ALLOW_INTERNAL_DEPENDENCIES)? != 0)
+    }
+
+    pub const fn as_raw(self) -> HipMemPool {
+        self.raw
+    }
+
+    fn get_u64_attr(self, attr: c_int) -> Result<u64> {
+        let mut value = 0u64;
+        unsafe {
+            check(hipMemPoolGetAttribute(
+                self.raw,
+                attr,
+                (&mut value as *mut u64).cast::<c_void>(),
+            ))?;
+        }
+        Ok(value)
+    }
+
+    fn set_u64_attr(self, attr: c_int, mut value: u64) -> Result<()> {
+        unsafe {
+            check(hipMemPoolSetAttribute(
+                self.raw,
+                attr,
+                (&mut value as *mut u64).cast::<c_void>(),
+            ))
+        }
+    }
+
+    fn get_i32_attr(self, attr: c_int) -> Result<i32> {
+        let mut value = 0i32;
+        unsafe {
+            check(hipMemPoolGetAttribute(
+                self.raw,
+                attr,
+                (&mut value as *mut i32).cast::<c_void>(),
+            ))?;
+        }
+        Ok(value)
+    }
+
+    fn set_i32_attr(self, attr: c_int, mut value: i32) -> Result<()> {
+        unsafe {
+            check(hipMemPoolSetAttribute(
+                self.raw,
+                attr,
+                (&mut value as *mut i32).cast::<c_void>(),
+            ))
+        }
     }
 }
 
@@ -451,6 +611,35 @@ impl<T> DeviceBuffer<T> {
         let mut ptr = ptr::null_mut();
         unsafe {
             if let Err(err) = check(hipMallocAsync(&mut ptr, bytes, stream.as_raw())) {
+                if !ptr.is_null() {
+                    let _ = hipFreeAsync(ptr, stream.as_raw());
+                }
+                return Err(err);
+            }
+        }
+        Ok(Self {
+            ptr: ptr.cast::<T>(),
+            len,
+        })
+    }
+
+    pub fn new_from_pool_async(stream: &Stream, pool: MemPool, len: usize) -> Result<Self> {
+        let bytes = checked_allocation_bytes::<T>(len, "pooled device")?;
+        if bytes == 0 {
+            return Ok(Self {
+                ptr: NonNull::<T>::dangling().as_ptr(),
+                len,
+            });
+        }
+
+        let mut ptr = ptr::null_mut();
+        unsafe {
+            if let Err(err) = check(hipMallocFromPoolAsync(
+                &mut ptr,
+                bytes,
+                pool.as_raw(),
+                stream.as_raw(),
+            )) {
                 if !ptr.is_null() {
                     let _ = hipFreeAsync(ptr, stream.as_raw());
                 }

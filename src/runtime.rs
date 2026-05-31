@@ -111,6 +111,18 @@ impl Device {
     pub fn execution_context(&self) -> Result<crate::ExecutionContext> {
         crate::ExecutionContext::new(self)
     }
+
+    pub fn default_mem_pool(&self) -> Result<hip::MemPool> {
+        Ok(hip::MemPool::default_for_device(self.ordinal)?)
+    }
+
+    pub fn current_mem_pool(&self) -> Result<hip::MemPool> {
+        Ok(hip::MemPool::current_for_device(self.ordinal)?)
+    }
+
+    pub fn set_mem_pool(&self, pool: hip::MemPool) -> Result<()> {
+        Ok(pool.set_current_for_device(self.ordinal)?)
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

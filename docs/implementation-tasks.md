@@ -81,10 +81,10 @@ Local probes on 2026-05-31:
   - [x] keep operations stream-only and graph-capturable
   - [x] add graph instantiate/launch wrappers
   - [x] verify graph replay for generated kernel bindings
-- [ ] Stream-ordered allocation maturity:
-  - [ ] add memory-pool controls around `hipMallocAsync`/`hipFreeAsync`
-  - [ ] preserve allocation lifetimes across queued generated operations
-  - [ ] document stream-ordering requirements for async buffers
+- [x] Stream-ordered allocation maturity:
+  - [x] add memory-pool controls around `hipMallocAsync`/`hipFreeAsync`
+  - [x] preserve allocation lifetimes across queued generated operations
+  - [x] document stream-ordering requirements for async buffers
 - [ ] Multi-device and host-memory coherence:
   - [ ] model coarse/fine-grained memory pools and host visibility
   - [ ] add pinned, managed, and peer-memory contract tests

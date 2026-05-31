@@ -197,6 +197,30 @@ fn main() -> Result<()> {
     graph.launch_and_sync_on(&graph_context)?;
     println!("ok: captured and replayed a generated DeviceOperation HIP graph");
 
+    let default_mem_pool = device.default_mem_pool()?;
+    device.set_mem_pool(default_mem_pool)?;
+    let _current_mem_pool = device.current_mem_pool()?;
+    let release_threshold = default_mem_pool.release_threshold()?;
+    default_mem_pool.set_release_threshold(release_threshold)?;
+    let follow_events = default_mem_pool.reuse_follow_event_dependencies()?;
+    default_mem_pool.set_reuse_follow_event_dependencies(follow_events)?;
+    let _reserved_before = default_mem_pool.reserved_mem_current()?;
+    let _used_before = default_mem_pool.used_mem_current()?;
+    let pool_context = device.execution_context()?;
+    let pooled =
+        DeviceBuffer::<f32>::new_from_pool_async(pool_context.stream(), default_mem_pool, 32)?;
+    let pooled_input = (0..32).map(|i| i as f32).collect::<Vec<_>>();
+    let mut pooled_output = vec![0.0f32; 32];
+    pooled.copy_from_host_async(pool_context.stream(), &pooled_input)?;
+    pooled.copy_to_host_async(pool_context.stream(), &mut pooled_output)?;
+    unsafe {
+        pooled.free_async(pool_context.stream())?;
+    }
+    pool_context.synchronize()?;
+    assert_eq!(pooled_output, pooled_input);
+    default_mem_pool.trim_to(0)?;
+    println!("ok: HIP stream-ordered memory pool controls handled async allocation");
+
     let atomic_out = DeviceBuffer::<u32>::new(4)?;
     let atomic_counters = DeviceBuffer::from_slice(&[0u32; 3])?;
     unsafe {

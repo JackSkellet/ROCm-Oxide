@@ -3,7 +3,7 @@ pub mod hiprtc;
 pub mod operation;
 mod runtime;
 
-pub use hip::{DeviceBuffer, Event, Global, PinnedHostBuffer, Stream};
+pub use hip::{DeviceBuffer, Event, Global, MemPool, PinnedHostBuffer, Stream};
 pub use operation::{
     CapturedGraph, DeviceFuture, DeviceOperation, ExecutionContext, KernelLaunchCompletion,
     StreamPool, Value,
