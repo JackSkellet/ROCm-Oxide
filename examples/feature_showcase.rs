@@ -1,5 +1,5 @@
 use rocm_oxide::{
-    Device, DeviceBuffer, DeviceOperation, ExecutionContext, LaunchConfig, Result, StreamPool,
+    Device, DeviceBuffer, DeviceOperation, Dim3, ExecutionContext, LaunchConfig, Result, StreamPool,
 };
 use std::sync::{Arc, mpsc};
 use std::time::Duration;
@@ -136,6 +136,20 @@ fn main() -> Result<()> {
     let lazy_out = d_out.copy_to_vec()?;
     assert_eq!(lazy_out[8192], a[8192] + b[8192]);
     println!("ok: generated DeviceOperation binding launched on an execution stream");
+
+    let atomic_out = DeviceBuffer::<u32>::new(4)?;
+    let atomic_counters = DeviceBuffer::from_slice(&[0u32; 3])?;
+    unsafe {
+        kernels.scoped_atomics(
+            LaunchConfig::new(Dim3::x(1), Dim3::x(256)),
+            &atomic_out,
+            &atomic_counters,
+        )?;
+    }
+    rocm_oxide::hip::synchronize()?;
+    assert_eq!(atomic_out.copy_to_vec()?, vec![0, 1, 2, 0]);
+    assert_eq!(atomic_counters.copy_to_vec()?, vec![256, 256, 256]);
+    println!("ok: scoped atomic kernel updated device-memory counters");
 
     let reduce_n = 768usize;
     let reduce_block_x = 128u32;

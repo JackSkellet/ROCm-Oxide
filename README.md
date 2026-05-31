@@ -322,9 +322,10 @@ This roadmap is grounded in the current local probe target:
 
 ### P0: Backend Correctness
 
-- Scope-specific atomic verification: preserve the new workgroup/device
-  `syncscope` lowering, document the system-scope default, and verify resulting
-  IR/ISA against coarse-grained, fine-grained, and host-visible memory.
+- Scope-specific atomic verification: preserve the workgroup/device
+  `syncscope` lowering, keep the system-scope backend default documented, verify
+  the transformed IR plus disassembled ISA, and expand runtime coverage across
+  explicit ROCm memory-pool types.
 - LDS/shared-memory follow-up: extend the new dynamic-LDS reduction and
   per-kernel validation path to static LDS cases, ISA checks, and occupancy
   planning.

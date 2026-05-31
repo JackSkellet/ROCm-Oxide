@@ -55,7 +55,9 @@ Local probes on 2026-05-31:
   - [x] preserve source-level workgroup/device/system scope markers through IR
   - [x] lower workgroup/device scope to AMDGPU LLVM `syncscope` and keep system
         scope on the backend default
-  - [ ] verify IR and ISA for coarse-grained, fine-grained, and host-visible memory
+  - [x] verify transformed IR and disassembled ISA for the scoped atomic kernel
+  - [x] smoke-test scoped atomics on device-memory counters at runtime
+  - [ ] extend runtime coverage across explicit coarse-grained, fine-grained, and host-visible pools
   - [ ] add negative docs/tests for system-scope atomics that downgrade on coarse memory
 - [x] LDS/shared-memory dynamic path:
   - [x] add a real tiled/reduction kernel that uses dynamic LDS

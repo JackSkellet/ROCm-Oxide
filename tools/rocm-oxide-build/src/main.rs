@@ -112,6 +112,9 @@ fn run() -> Result<(), String> {
                 .arg(&obj),
             "lower LLVM IR with ROCm llc",
         )?;
+        if crate_kernels.contains_key("scoped_atomics") {
+            verify_scoped_atomic_artifacts(&kernel_ir, &obj, &tools.llvm_objdump)?;
+        }
         objects.push(obj);
     }
 
@@ -240,6 +243,7 @@ fn doctor() -> Result<(), String> {
     report_llc_amdgcn(&tools.llc)?;
     report_rocm_tool("ROCm clang", &tools.clang)?;
     report_rocm_tool("ROCm llvm-readelf", &tools.llvm_readelf)?;
+    report_rocm_tool("ROCm llvm-objdump", &tools.llvm_objdump)?;
 
     let arch = match detect_arch() {
         Some(arch) => {
@@ -536,6 +540,7 @@ struct ToolPaths {
     llc: PathBuf,
     clang: PathBuf,
     llvm_readelf: PathBuf,
+    llvm_objdump: PathBuf,
 }
 
 impl ToolPaths {
@@ -544,6 +549,7 @@ impl ToolPaths {
             llc: find_rocm_tool("ROCM_OXIDE_LLC", "llc")?,
             clang: find_rocm_tool("ROCM_OXIDE_CLANG", "clang")?,
             llvm_readelf: find_rocm_tool("ROCM_OXIDE_LLVM_READELF", "llvm-readelf")?,
+            llvm_objdump: find_rocm_tool("ROCM_OXIDE_LLVM_OBJDUMP", "llvm-objdump")?,
         })
     }
 }
@@ -2134,6 +2140,142 @@ fn annotate_dynamic_shared_mem_from_ir(
     Ok(())
 }
 
+fn verify_scoped_atomic_artifacts(
+    kernel_ir: &Path,
+    object: &Path,
+    llvm_objdump: &Path,
+) -> Result<(), String> {
+    let ir = fs::read_to_string(kernel_ir)
+        .map_err(|err| format!("failed to read {}: {err}", kernel_ir.display()))?;
+    verify_scoped_atomic_ir(&ir)?;
+
+    let output = Command::new(llvm_objdump)
+        .arg("-d")
+        .arg(object)
+        .output()
+        .map_err(|err| format!("failed to run {} -d: {err}", llvm_objdump.display()))?;
+    if !output.status.success() {
+        return Err(format!(
+            "{} -d {} failed:\n{}",
+            llvm_objdump.display(),
+            object.display(),
+            String::from_utf8_lossy(&output.stderr)
+        ));
+    }
+    verify_scoped_atomic_isa(&String::from_utf8_lossy(&output.stdout))
+}
+
+fn verify_scoped_atomic_ir(ir: &str) -> Result<(), String> {
+    let body = llvm_function_body(ir, "scoped_atomics")
+        .ok_or_else(|| "scoped_atomics kernel missing from transformed LLVM IR".to_string())?;
+    if body.contains("__rocm_oxide_atomic_scope_") {
+        return Err(
+            "scoped_atomics IR still contains internal atomic scope marker calls".to_string(),
+        );
+    }
+
+    let atomic_lines = body
+        .lines()
+        .filter(|line| is_atomic_instruction(line))
+        .collect::<Vec<_>>();
+    let has_workgroup = atomic_lines
+        .iter()
+        .any(|line| line.contains("syncscope(\"workgroup\")"));
+    let has_agent = atomic_lines
+        .iter()
+        .any(|line| line.contains("syncscope(\"agent\")"));
+    let has_system_default = atomic_lines
+        .iter()
+        .any(|line| !line.contains("syncscope("));
+
+    if !has_workgroup || !has_agent || !has_system_default {
+        return Err(format!(
+            "scoped_atomics IR did not preserve expected scope mapping\n  workgroup syncscope: {has_workgroup}\n  agent syncscope: {has_agent}\n  system backend default: {has_system_default}\n  atomic lines:\n{}",
+            atomic_lines
+                .iter()
+                .map(|line| format!("    {}", line.trim()))
+                .collect::<Vec<_>>()
+                .join("\n")
+        ));
+    }
+
+    Ok(())
+}
+
+fn verify_scoped_atomic_isa(disassembly: &str) -> Result<(), String> {
+    let body = disassembly_symbol_body(disassembly, "scoped_atomics")
+        .ok_or_else(|| "scoped_atomics symbol missing from object disassembly".to_string())?;
+    let has_global_atomic = body.contains("global_atomic_add_u32")
+        || body.contains("flat_atomic_add_u32")
+        || body.contains("buffer_atomic_add_u32");
+    let has_workgroup_scope = body.contains("scope:SCOPE_SE");
+    let has_device_scope = body.contains("scope:SCOPE_DEV");
+    let has_system_scope = body.contains("scope:SCOPE_SYS");
+
+    if !has_global_atomic || !has_workgroup_scope || !has_device_scope || !has_system_scope {
+        let atomic_lines = body
+            .lines()
+            .filter(|line| line.contains("_atomic_"))
+            .map(str::trim)
+            .collect::<Vec<_>>();
+        return Err(format!(
+            "scoped_atomics ISA did not contain expected AMDGPU atomic scopes\n  global/flat/buffer atomic add: {has_global_atomic}\n  workgroup/SCOPE_SE: {has_workgroup_scope}\n  device/SCOPE_DEV: {has_device_scope}\n  system/SCOPE_SYS: {has_system_scope}\n  atomic lines:\n{}",
+            atomic_lines.join("\n")
+        ));
+    }
+
+    Ok(())
+}
+
+fn llvm_function_body(text: &str, name: &str) -> Option<String> {
+    let needle = format!("@{name}(");
+    let mut body = Vec::new();
+    let mut depth = 0i32;
+    let mut capturing = false;
+
+    for line in text.lines() {
+        if !capturing && line.trim_start().starts_with("define ") && line.contains(&needle) {
+            capturing = true;
+        }
+        if capturing {
+            depth += line.chars().filter(|ch| *ch == '{').count() as i32;
+            depth -= line.chars().filter(|ch| *ch == '}').count() as i32;
+            body.push(line.to_string());
+            if depth == 0 && line.trim() == "}" {
+                return Some(body.join("\n"));
+            }
+        }
+    }
+
+    None
+}
+
+fn disassembly_symbol_body(text: &str, name: &str) -> Option<String> {
+    let symbol = format!("<{name}>:");
+    let mut body = Vec::new();
+    let mut capturing = false;
+
+    for line in text.lines() {
+        if !capturing {
+            if line.contains(&symbol) {
+                capturing = true;
+                body.push(line.to_string());
+            }
+            continue;
+        }
+
+        if !body.is_empty() && line.trim().is_empty() {
+            break;
+        }
+        if line.contains(">:") && line.contains('<') && !line.contains(&symbol) {
+            break;
+        }
+        body.push(line.to_string());
+    }
+
+    capturing.then(|| body.join("\n"))
+}
+
 fn dynamic_shared_symbols(text: &str) -> BTreeSet<String> {
     text.lines()
         .filter(|line| {
@@ -2998,6 +3140,7 @@ mod tests {
         discover_kernels_in_source, generate_device_global_binding,
         generate_device_struct_binding, generate_kernel_binding, generate_kernel_resource_binding,
         parse_inline_path_dependency, parse_kernel_resource_rows, parse_package_name, transform_ir,
+        verify_scoped_atomic_ir, verify_scoped_atomic_isa,
     };
     use std::collections::{BTreeMap, BTreeSet};
     use std::fs;
@@ -3476,6 +3619,70 @@ pub unsafe extern "C" fn scoped(counters: *mut u32) {}
             "%sys = load atomic i32, ptr addrspace(1) %counters acquire, align 4"
         ));
         assert!(!output.contains("__rocm_oxide_atomic_scope_"));
+    }
+
+    #[test]
+    fn verifies_scoped_atomic_ir_mapping() {
+        let ir = r#"
+define protected amdgpu_kernel void @scoped_atomics(ptr addrspace(1) %counters) {
+start:
+  %wg = atomicrmw add ptr addrspace(1) %counters, i32 1 syncscope("workgroup") monotonic, align 4
+  %dev_ptr = getelementptr inbounds i8, ptr addrspace(1) %counters, i64 4
+  %dev = atomicrmw add ptr addrspace(1) %dev_ptr, i32 1 syncscope("agent") monotonic, align 4
+  %sys_ptr = getelementptr inbounds i8, ptr addrspace(1) %counters, i64 8
+  %sys = atomicrmw add ptr addrspace(1) %sys_ptr, i32 1 monotonic, align 4
+  ret void
+}
+"#;
+
+        verify_scoped_atomic_ir(ir).expect("scoped atomic IR should verify");
+    }
+
+    #[test]
+    fn rejects_scoped_atomic_ir_without_system_default() {
+        let ir = r#"
+define protected amdgpu_kernel void @scoped_atomics(ptr addrspace(1) %counters) {
+start:
+  %wg = atomicrmw add ptr addrspace(1) %counters, i32 1 syncscope("workgroup") monotonic, align 4
+  %dev = atomicrmw add ptr addrspace(1) %counters, i32 1 syncscope("agent") monotonic, align 4
+  %sys = atomicrmw add ptr addrspace(1) %counters, i32 1 syncscope("agent") monotonic, align 4
+  ret void
+}
+"#;
+
+        let err = verify_scoped_atomic_ir(ir).expect_err("system scope should stay backend default");
+        assert!(err.contains("system backend default: false"));
+    }
+
+    #[test]
+    fn verifies_scoped_atomic_isa_mapping() {
+        let disassembly = r#"
+0000000000009f00 <scoped_atomics>:
+  global_atomic_add_u32 v2, v3, s[0:1] scope:SCOPE_SE
+  global_atomic_add_u32 v2, v3, s[0:1] offset:4 scope:SCOPE_DEV
+  global_atomic_add_u32 v2, v3, s[0:1] offset:8 scope:SCOPE_SYS
+
+000000000000a100 <other>:
+  s_endpgm
+"#;
+
+        verify_scoped_atomic_isa(disassembly).expect("scoped atomic ISA should verify");
+    }
+
+    #[test]
+    fn rejects_scoped_atomic_isa_without_system_scope() {
+        let disassembly = r#"
+0000000000009f00 <scoped_atomics>:
+  global_atomic_add_u32 v2, v3, s[0:1] scope:SCOPE_SE
+  global_atomic_add_u32 v2, v3, s[0:1] offset:4 scope:SCOPE_DEV
+
+000000000000a100 <other>:
+  s_endpgm
+"#;
+
+        let err = verify_scoped_atomic_isa(disassembly)
+            .expect_err("ISA should contain the system-scope atomic");
+        assert!(err.contains("system/SCOPE_SYS: false"));
     }
 
     #[test]
