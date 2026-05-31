@@ -179,6 +179,24 @@ fn main() -> Result<()> {
     assert_eq!(lazy_out[8192], a[8192] + b[8192]);
     println!("ok: generated DeviceOperation binding launched on an execution stream");
 
+    let graph_context = device.execution_context()?;
+    let d_graph_out = Arc::new(DeviceBuffer::<f32>::new(n)?);
+    let graph = unsafe {
+        kernels.vector_add_operation(
+            LaunchConfig::for_num_elems_with_block_size(n, block_x),
+            Arc::clone(&d_graph_out),
+            Arc::clone(&d_a),
+            Arc::clone(&d_b),
+        )?
+    }
+    .capture_graph_on(&graph_context)?;
+    assert_eq!(graph.capture_output().retained_count(), 4);
+    graph.launch_and_sync_on(&graph_context)?;
+    let graph_out = d_graph_out.copy_to_vec()?;
+    assert_eq!(graph_out[16384], a[16384] + b[16384]);
+    graph.launch_and_sync_on(&graph_context)?;
+    println!("ok: captured and replayed a generated DeviceOperation HIP graph");
+
     let atomic_out = DeviceBuffer::<u32>::new(4)?;
     let atomic_counters = DeviceBuffer::from_slice(&[0u32; 3])?;
     unsafe {

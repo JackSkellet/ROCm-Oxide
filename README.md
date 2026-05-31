@@ -214,7 +214,10 @@ execution ergonomics on ROCm:
 - HIP stream-ordered `DeviceBuffer::new_async` and explicit `free_async`
 - fallible allocation-size and copy-length validation instead of panics
 - lazy `DeviceOperation` values with `.sync`, `.sync_on`, `.async_on`,
-  `.async_in`, `.map`, `.and_then`, and `.zip`
+  `.async_in`, `.capture_graph`, `.capture_graph_on`, `.map`, `.and_then`, and
+  `.zip`
+- HIP stream-capture graph wrappers with `CapturedGraph::launch_on` and
+  `launch_and_sync_on` replay
 - `StreamPool` round-robin scheduling for operation pipelines
 - `DeviceFuture::wait` plus `Future` support; dropping the future does not
   cancel already submitted/started work
@@ -348,9 +351,9 @@ This roadmap is grounded in the current local probe target:
 
 ### P1: Runtime Orchestration
 
-- HIP graph capture for `DeviceOperation` pipelines: keep generated operations
-  stream-only, add graph instantiate/launch wrappers, and verify replay for
-  generated kernel bindings.
+- HIP graph capture for `DeviceOperation` pipelines: generated operations stay
+  stream-only, graph instantiate/launch wrappers are in place, and graph replay
+  is verified through generated kernel bindings.
 - Stream-ordered allocation maturity: add memory-pool controls around
   `hipMallocAsync`/`hipFreeAsync`, preserve queued-operation lifetimes, and
   document async buffer ordering rules.

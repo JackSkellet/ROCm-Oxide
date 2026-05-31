@@ -119,6 +119,31 @@ pub trait DeviceOperation: Send + Sized + 'static {
         self.sync_on(&context)
     }
 
+    fn capture_graph_on(self, context: &ExecutionContext) -> Result<CapturedGraph<Self::Output>> {
+        context.bind_thread()?;
+        context
+            .stream()
+            .begin_capture(hip::StreamCaptureMode::ThreadLocal)?;
+        let output = match self.execute(context) {
+            Ok(output) => output,
+            Err(err) => {
+                let _ = context.stream().end_capture();
+                return Err(err);
+            }
+        };
+        let graph = context.stream().end_capture()?;
+        let exec = graph.instantiate()?;
+        Ok(CapturedGraph {
+            exec,
+            capture_output: output,
+        })
+    }
+
+    fn capture_graph(self, device: &Device) -> Result<CapturedGraph<Self::Output>> {
+        let context = ExecutionContext::new(device)?;
+        self.capture_graph_on(&context)
+    }
+
     fn async_on(self, context: ExecutionContext) -> DeviceFuture<Self::Output> {
         let (sender, receiver) = mpsc::channel();
         let waker_slot = Arc::new(Mutex::new(None::<Waker>));
@@ -178,6 +203,27 @@ pub trait DeviceOperation: Send + Sized + 'static {
         Other: DeviceOperation,
     {
         Zip { left: self, other }
+    }
+}
+
+pub struct CapturedGraph<T> {
+    exec: hip::GraphExec,
+    capture_output: T,
+}
+
+impl<T> CapturedGraph<T> {
+    pub fn capture_output(&self) -> &T {
+        &self.capture_output
+    }
+
+    pub fn launch_on(&self, context: &ExecutionContext) -> Result<()> {
+        context.bind_thread()?;
+        Ok(self.exec.launch(context.stream())?)
+    }
+
+    pub fn launch_and_sync_on(&self, context: &ExecutionContext) -> Result<()> {
+        self.launch_on(context)?;
+        context.synchronize()
     }
 }
 

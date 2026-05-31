@@ -77,10 +77,10 @@ Local probes on 2026-05-31:
 
 ### P1: Runtime Orchestration
 
-- [ ] HIP graph capture for `DeviceOperation` pipelines:
-  - [ ] keep operations stream-only and graph-capturable
-  - [ ] add graph instantiate/launch wrappers
-  - [ ] verify graph replay for generated kernel bindings
+- [x] HIP graph capture for `DeviceOperation` pipelines:
+  - [x] keep operations stream-only and graph-capturable
+  - [x] add graph instantiate/launch wrappers
+  - [x] verify graph replay for generated kernel bindings
 - [ ] Stream-ordered allocation maturity:
   - [ ] add memory-pool controls around `hipMallocAsync`/`hipFreeAsync`
   - [ ] preserve allocation lifetimes across queued generated operations

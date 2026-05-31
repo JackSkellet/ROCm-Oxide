@@ -8,6 +8,9 @@ pub type HipModule = *mut c_void;
 pub type HipFunction = *mut c_void;
 pub type HipStream = *mut c_void;
 pub type HipEvent = *mut c_void;
+pub type HipGraph = *mut c_void;
+pub type HipGraphExec = *mut c_void;
+pub type HipGraphNode = *mut c_void;
 
 pub const HIP_SUCCESS: HipError = 0;
 pub const HIP_MEMCPY_HOST_TO_DEVICE: c_int = 1;
@@ -24,6 +27,9 @@ pub const HIP_DEVICE_ATTRIBUTE_MAX_THREADS_PER_BLOCK: c_int = 56;
 pub const HIP_DEVICE_ATTRIBUTE_MAX_SHARED_MEMORY_PER_BLOCK: c_int = 74;
 pub const HIP_DEVICE_ATTRIBUTE_SHARED_MEM_PER_BLOCK_OPTIN: c_int = 75;
 pub const HIP_DEVICE_ATTRIBUTE_SHARED_MEM_PER_MULTIPROCESSOR: c_int = 76;
+pub const HIP_STREAM_CAPTURE_MODE_GLOBAL: c_int = 0;
+pub const HIP_STREAM_CAPTURE_MODE_THREAD_LOCAL: c_int = 1;
+pub const HIP_STREAM_CAPTURE_MODE_RELAXED: c_int = 2;
 
 unsafe extern "C" {
     fn hipGetErrorString(error: HipError) -> *const c_char;
@@ -54,6 +60,8 @@ unsafe extern "C" {
     fn hipStreamCreate(stream: *mut HipStream) -> HipError;
     fn hipStreamDestroy(stream: HipStream) -> HipError;
     fn hipStreamSynchronize(stream: HipStream) -> HipError;
+    fn hipStreamBeginCapture(stream: HipStream, mode: c_int) -> HipError;
+    fn hipStreamEndCapture(stream: HipStream, graph: *mut HipGraph) -> HipError;
     fn hipEventCreate(event: *mut HipEvent) -> HipError;
     fn hipEventDestroy(event: HipEvent) -> HipError;
     fn hipEventRecord(event: HipEvent, stream: HipStream) -> HipError;
@@ -98,6 +106,16 @@ unsafe extern "C" {
         block_size: c_int,
         dynamic_shared_mem_per_block: usize,
     ) -> HipError;
+    fn hipGraphInstantiate(
+        graph_exec: *mut HipGraphExec,
+        graph: HipGraph,
+        error_node: *mut HipGraphNode,
+        log_buffer: *mut c_char,
+        buffer_size: usize,
+    ) -> HipError;
+    fn hipGraphLaunch(graph_exec: HipGraphExec, stream: HipStream) -> HipError;
+    fn hipGraphDestroy(graph: HipGraph) -> HipError;
+    fn hipGraphExecDestroy(graph_exec: HipGraphExec) -> HipError;
 }
 
 #[derive(Debug, Clone)]
@@ -217,6 +235,18 @@ impl Stream {
         unsafe { check(hipStreamSynchronize(self.raw)) }
     }
 
+    pub fn begin_capture(&self, mode: StreamCaptureMode) -> Result<()> {
+        unsafe { check(hipStreamBeginCapture(self.raw, mode.as_raw())) }
+    }
+
+    pub fn end_capture(&self) -> Result<Graph> {
+        let mut raw = ptr::null_mut();
+        unsafe {
+            check(hipStreamEndCapture(self.raw, &mut raw))?;
+        }
+        Ok(Graph { raw })
+    }
+
     pub fn as_raw(&self) -> HipStream {
         self.raw
     }
@@ -227,6 +257,79 @@ impl Drop for Stream {
         if !self.raw.is_null() {
             unsafe {
                 let _ = hipStreamDestroy(self.raw);
+            }
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum StreamCaptureMode {
+    Global,
+    ThreadLocal,
+    Relaxed,
+}
+
+impl StreamCaptureMode {
+    const fn as_raw(self) -> c_int {
+        match self {
+            Self::Global => HIP_STREAM_CAPTURE_MODE_GLOBAL,
+            Self::ThreadLocal => HIP_STREAM_CAPTURE_MODE_THREAD_LOCAL,
+            Self::Relaxed => HIP_STREAM_CAPTURE_MODE_RELAXED,
+        }
+    }
+}
+
+pub struct Graph {
+    raw: HipGraph,
+}
+
+unsafe impl Send for Graph {}
+unsafe impl Sync for Graph {}
+
+impl Graph {
+    pub fn instantiate(&self) -> Result<GraphExec> {
+        let mut raw = ptr::null_mut();
+        unsafe {
+            check(hipGraphInstantiate(
+                &mut raw,
+                self.raw,
+                ptr::null_mut(),
+                ptr::null_mut(),
+                0,
+            ))?;
+        }
+        Ok(GraphExec { raw })
+    }
+}
+
+impl Drop for Graph {
+    fn drop(&mut self) {
+        if !self.raw.is_null() {
+            unsafe {
+                let _ = hipGraphDestroy(self.raw);
+            }
+        }
+    }
+}
+
+pub struct GraphExec {
+    raw: HipGraphExec,
+}
+
+unsafe impl Send for GraphExec {}
+unsafe impl Sync for GraphExec {}
+
+impl GraphExec {
+    pub fn launch(&self, stream: &Stream) -> Result<()> {
+        unsafe { check(hipGraphLaunch(self.raw, stream.as_raw())) }
+    }
+}
+
+impl Drop for GraphExec {
+    fn drop(&mut self) {
+        if !self.raw.is_null() {
+            unsafe {
+                let _ = hipGraphExecDestroy(self.raw);
             }
         }
     }

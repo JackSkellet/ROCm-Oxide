@@ -5,7 +5,8 @@ mod runtime;
 
 pub use hip::{DeviceBuffer, Event, Global, PinnedHostBuffer, Stream};
 pub use operation::{
-    DeviceFuture, DeviceOperation, ExecutionContext, KernelLaunchCompletion, StreamPool, Value,
+    CapturedGraph, DeviceFuture, DeviceOperation, ExecutionContext, KernelLaunchCompletion,
+    StreamPool, Value,
 };
 pub use runtime::{
     AtomicMemoryKind, Device, DeviceLimits, DeviceSlice, DeviceSliceMut, Dim3, Error, Kernel,
