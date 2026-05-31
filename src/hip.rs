@@ -12,6 +12,9 @@ pub type HipEvent = *mut c_void;
 pub const HIP_SUCCESS: HipError = 0;
 pub const HIP_MEMCPY_HOST_TO_DEVICE: c_int = 1;
 pub const HIP_MEMCPY_DEVICE_TO_HOST: c_int = 2;
+pub const HIP_DEVICE_MALLOC_FINEGRAINED: c_uint = 0x1;
+pub const HIP_HOST_MALLOC_MAPPED: c_uint = 0x2;
+pub const HIP_HOST_MALLOC_COHERENT: c_uint = 0x4000_0000;
 // hipDeviceAttribute_t discriminants used through hipDeviceGetAttribute.
 // Values match ROCm HIP 7.2 headers and the CUDA-compatible enum ordering.
 pub const HIP_DEVICE_ATTRIBUTE_MAX_BLOCK_DIM_X: c_int = 26;
@@ -28,10 +31,16 @@ unsafe extern "C" {
     fn hipSetDevice(device_id: c_int) -> HipError;
     fn hipDeviceGetAttribute(value: *mut c_int, attr: c_int, device_id: c_int) -> HipError;
     fn hipMalloc(ptr: *mut *mut c_void, size: usize) -> HipError;
+    fn hipExtMallocWithFlags(ptr: *mut *mut c_void, size: usize, flags: c_uint) -> HipError;
     fn hipMallocAsync(ptr: *mut *mut c_void, size: usize, stream: HipStream) -> HipError;
     fn hipFree(ptr: *mut c_void) -> HipError;
     fn hipFreeAsync(ptr: *mut c_void, stream: HipStream) -> HipError;
     fn hipHostMalloc(ptr: *mut *mut c_void, size: usize, flags: c_uint) -> HipError;
+    fn hipHostGetDevicePointer(
+        device_ptr: *mut *mut c_void,
+        host_ptr: *mut c_void,
+        flags: c_uint,
+    ) -> HipError;
     fn hipHostFree(ptr: *mut c_void) -> HipError;
     fn hipMemcpy(dst: *mut c_void, src: *const c_void, size: usize, kind: c_int) -> HipError;
     fn hipMemcpyAsync(
@@ -299,6 +308,34 @@ impl<T> DeviceBuffer<T> {
         })
     }
 
+    pub fn new_fine_grained(len: usize) -> Result<Self> {
+        let bytes = checked_allocation_bytes::<T>(len, "fine-grained device")?;
+        if bytes == 0 {
+            return Ok(Self {
+                ptr: NonNull::<T>::dangling().as_ptr(),
+                len,
+            });
+        }
+
+        let mut ptr = ptr::null_mut();
+        unsafe {
+            if let Err(err) = check(hipExtMallocWithFlags(
+                &mut ptr,
+                bytes,
+                HIP_DEVICE_MALLOC_FINEGRAINED,
+            )) {
+                if !ptr.is_null() {
+                    let _ = hipFree(ptr);
+                }
+                return Err(err);
+            }
+        }
+        Ok(Self {
+            ptr: ptr.cast::<T>(),
+            len,
+        })
+    }
+
     pub fn new_async(stream: &Stream, len: usize) -> Result<Self> {
         let bytes = checked_allocation_bytes::<T>(len, "device")?;
         if bytes == 0 {
@@ -463,6 +500,14 @@ unsafe impl<T: Sync> Sync for PinnedHostBuffer<T> {}
 
 impl<T> PinnedHostBuffer<T> {
     pub fn new_zeroed(len: usize) -> Result<Self> {
+        Self::new_zeroed_with_flags(len, 0)
+    }
+
+    pub fn new_zeroed_mapped_coherent(len: usize) -> Result<Self> {
+        Self::new_zeroed_with_flags(len, HIP_HOST_MALLOC_MAPPED | HIP_HOST_MALLOC_COHERENT)
+    }
+
+    fn new_zeroed_with_flags(len: usize, flags: c_uint) -> Result<Self> {
         if len == 0 {
             return Ok(Self {
                 ptr: std::ptr::NonNull::<T>::dangling().as_ptr(),
@@ -473,7 +518,7 @@ impl<T> PinnedHostBuffer<T> {
         let mut ptr = ptr::null_mut();
         let bytes = checked_allocation_bytes::<T>(len, "pinned host")?;
         unsafe {
-            check(hipHostMalloc(&mut ptr, bytes, 0))?;
+            check(hipHostMalloc(&mut ptr, bytes, flags))?;
             ptr::write_bytes(ptr.cast::<u8>(), 0, bytes);
         }
         Ok(Self {
@@ -482,12 +527,35 @@ impl<T> PinnedHostBuffer<T> {
         })
     }
 
+    pub fn device_ptr(&self) -> Result<*mut T> {
+        if self.len == 0 {
+            return Ok(std::ptr::NonNull::<T>::dangling().as_ptr());
+        }
+        let mut ptr = ptr::null_mut();
+        unsafe {
+            check(hipHostGetDevicePointer(
+                &mut ptr,
+                self.ptr.cast::<c_void>(),
+                0,
+            ))?;
+        }
+        Ok(ptr.cast::<T>())
+    }
+
     pub fn as_slice(&self) -> &[T] {
         unsafe { std::slice::from_raw_parts(self.ptr, self.len) }
     }
 
     pub fn as_mut_slice(&mut self) -> &mut [T] {
         unsafe { std::slice::from_raw_parts_mut(self.ptr, self.len) }
+    }
+
+    pub fn as_ptr(&self) -> *const T {
+        self.ptr
+    }
+
+    pub fn as_mut_ptr(&self) -> *mut T {
+        self.ptr
     }
 
     pub fn len(&self) -> usize {

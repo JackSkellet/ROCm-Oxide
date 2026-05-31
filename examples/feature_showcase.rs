@@ -1,5 +1,6 @@
 use rocm_oxide::{
-    Device, DeviceBuffer, DeviceOperation, Dim3, ExecutionContext, LaunchConfig, Result, StreamPool,
+    Device, DeviceBuffer, DeviceOperation, Dim3, ExecutionContext, LaunchConfig, PinnedHostBuffer,
+    Result, StreamPool,
 };
 use std::sync::{Arc, mpsc};
 use std::time::Duration;
@@ -66,6 +67,40 @@ fn vector_add_operation(
         let mut out = vec![0.0f32; n];
         d_out.copy_to_host_async(context.stream(), &mut out)?;
         Ok(out)
+    }
+}
+
+fn scoped_atomic_config() -> LaunchConfig {
+    LaunchConfig::new(Dim3::x(1), Dim3::x(256))
+}
+
+fn verify_scoped_atomic_outputs(out: &[u32], counters: &[u32]) {
+    assert_eq!(out, &[0, 1, 2, 0]);
+    assert_eq!(counters, &[256, 256, 256]);
+}
+
+fn launch_scoped_atomics_raw(
+    kernels: &generated::DeviceKernels,
+    out_ptr: *mut u32,
+    out_len: usize,
+    counters_ptr: *mut u32,
+    counters_len: usize,
+) -> Result<()> {
+    let resource = kernels
+        .resource("scoped_atomics")
+        .expect("generated resource metadata should include scoped_atomics");
+    let kernel = kernels
+        .module()
+        .kernel_with_metadata(c"scoped_atomics", resource.launch_metadata())?;
+    unsafe {
+        rocm_oxide::launch!(
+            kernel,
+            scoped_atomic_config(),
+            out_ptr,
+            out_len,
+            counters_ptr,
+            counters_len,
+        )
     }
 }
 
@@ -140,16 +175,41 @@ fn main() -> Result<()> {
     let atomic_out = DeviceBuffer::<u32>::new(4)?;
     let atomic_counters = DeviceBuffer::from_slice(&[0u32; 3])?;
     unsafe {
+        kernels.scoped_atomics(scoped_atomic_config(), &atomic_out, &atomic_counters)?;
+    }
+    rocm_oxide::hip::synchronize()?;
+    verify_scoped_atomic_outputs(&atomic_out.copy_to_vec()?, &atomic_counters.copy_to_vec()?);
+    println!("ok: scoped atomic kernel updated device-memory counters");
+
+    let fine_atomic_out = DeviceBuffer::<u32>::new_fine_grained(4)?;
+    let fine_atomic_counters = DeviceBuffer::<u32>::new_fine_grained(3)?;
+    fine_atomic_counters.copy_from_host(&[0u32; 3])?;
+    unsafe {
         kernels.scoped_atomics(
-            LaunchConfig::new(Dim3::x(1), Dim3::x(256)),
-            &atomic_out,
-            &atomic_counters,
+            scoped_atomic_config(),
+            &fine_atomic_out,
+            &fine_atomic_counters,
         )?;
     }
     rocm_oxide::hip::synchronize()?;
-    assert_eq!(atomic_out.copy_to_vec()?, vec![0, 1, 2, 0]);
-    assert_eq!(atomic_counters.copy_to_vec()?, vec![256, 256, 256]);
-    println!("ok: scoped atomic kernel updated device-memory counters");
+    verify_scoped_atomic_outputs(
+        &fine_atomic_out.copy_to_vec()?,
+        &fine_atomic_counters.copy_to_vec()?,
+    );
+    println!("ok: scoped atomic kernel updated fine-grained device counters");
+
+    let host_atomic_out = PinnedHostBuffer::<u32>::new_zeroed_mapped_coherent(4)?;
+    let host_atomic_counters = PinnedHostBuffer::<u32>::new_zeroed_mapped_coherent(3)?;
+    launch_scoped_atomics_raw(
+        &kernels,
+        host_atomic_out.device_ptr()?,
+        host_atomic_out.len(),
+        host_atomic_counters.device_ptr()?,
+        host_atomic_counters.len(),
+    )?;
+    rocm_oxide::hip::synchronize()?;
+    verify_scoped_atomic_outputs(host_atomic_out.as_slice(), host_atomic_counters.as_slice());
+    println!("ok: scoped atomic kernel updated mapped coherent host-visible counters");
 
     let reduce_n = 768usize;
     let reduce_block_x = 128u32;

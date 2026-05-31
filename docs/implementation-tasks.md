@@ -57,7 +57,7 @@ Local probes on 2026-05-31:
         scope on the backend default
   - [x] verify transformed IR and disassembled ISA for the scoped atomic kernel
   - [x] smoke-test scoped atomics on device-memory counters at runtime
-  - [ ] extend runtime coverage across explicit coarse-grained, fine-grained, and host-visible pools
+  - [x] extend runtime coverage across default/coarse device, fine-grained device, and mapped host-visible pools
   - [ ] add negative docs/tests for system-scope atomics that downgrade on coarse memory
 - [x] LDS/shared-memory dynamic path:
   - [x] add a real tiled/reduction kernel that uses dynamic LDS

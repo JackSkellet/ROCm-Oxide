@@ -209,6 +209,8 @@ execution ergonomics on ROCm:
 - stream-aware async host/device copies
 - stream-aware raw kernel launch
 - synchronous pinned-buffer copies
+- explicit fine-grained device allocation through `DeviceBuffer::new_fine_grained`
+- mapped coherent pinned host buffers for host-visible GPU access
 - HIP stream-ordered `DeviceBuffer::new_async` and explicit `free_async`
 - fallible allocation-size and copy-length validation instead of panics
 - lazy `DeviceOperation` values with `.sync`, `.sync_on`, `.async_on`,
@@ -324,8 +326,8 @@ This roadmap is grounded in the current local probe target:
 
 - Scope-specific atomic verification: preserve the workgroup/device
   `syncscope` lowering, keep the system-scope backend default documented, verify
-  the transformed IR plus disassembled ISA, and expand runtime coverage across
-  explicit ROCm memory-pool types.
+  the transformed IR plus disassembled ISA, and keep runtime coverage across
+  default/coarse device, fine-grained device, and mapped host-visible memory.
 - LDS/shared-memory follow-up: extend the new dynamic-LDS reduction and
   per-kernel validation path to static LDS cases, ISA checks, and occupancy
   planning.
