@@ -100,7 +100,7 @@ let d_out = DeviceBuffer::<f32>::new(a.len())?;
 unsafe {
     rocm_oxide::launch!(
         kernel,
-        LaunchConfig::for_num_elems(a.len()),
+        LaunchConfig::for_num_elems(a.len(), 256),
         d_out.as_mut_ptr(),
         d_a.as_ptr(),
         d_b.as_ptr(),
@@ -173,21 +173,18 @@ more global-pointer-producing IR than just `getelementptr`, catches internal
 rewrite panics as actionable diagnostics, discovers kernel-bearing local path
 dependencies for bundling, and mirrors `#[repr(C)]` device structs into host
 bindings for captured-environment style ABI payloads.
-The repo pins nightly Rust in `rust-toolchain.toml` so `cargo` commands use a
-toolchain with `rust-src`; `rocm-oxide-build --doctor` also probes that `core`
-can actually be built for `amdgcn-amd-amdhsa`.
 
 The generated bindings expose typed host calls such as:
 
 ```rust
 unsafe {
-    kernels.vector_add(config, &d_out, &d_a, &d_b, n)?;
+    kernels.vector_add(config, &d_out, &d_a, &d_b, n, block_x)?;
 }
 ```
 
 Bindings validate launch shape before entering HIP. They check grid/block
-sanity, legacy `n`-sized buffer kernels, and explicit source-level buffer
-contracts such as:
+sanity, `block_x` agreement, legacy `n`-sized buffer kernels, and explicit
+source-level buffer contracts such as:
 
 ```rust
 // rocm-oxide: len(frame)=pixel_count
@@ -240,8 +237,6 @@ cargo run --manifest-path tools/rocm-oxide-build/Cargo.toml -- \
 
 The parity checklist against official `NVlabs/cuda-oxide` is tracked in
 [docs/cuda-oxide-parity-checklist.md](/home/jack/Documents/GitKraken_Projects/ROCm-Oxide/docs/cuda-oxide-parity-checklist.md).
-Book-derived AMD adaptations are tracked in
-[docs/cuda-oxide-book-rocm-adaptation.md](/home/jack/Documents/GitKraken_Projects/ROCm-Oxide/docs/cuda-oxide-book-rocm-adaptation.md).
 
 There is also a cargo subcommand wrapper in
 [tools/cargo-rocm-oxide](/home/jack/Documents/GitKraken_Projects/ROCm-Oxide/tools/cargo-rocm-oxide/src/main.rs):
@@ -271,8 +266,9 @@ pub unsafe extern "C" fn vector_add(
     a: *const f32,
     b: *const f32,
     n: usize,
+    block_x: u32,
 ) {
-    let i = gpu::global_id_x();
+    let i = gpu::global_id_x(block_x);
     if i < n {
         unsafe {
             *out.add(i) = *a.add(i) + *b.add(i);
@@ -286,9 +282,8 @@ kernel allowlist, so helper functions can remain ordinary device functions.
 
 [crates/rocm-oxide-device](/home/jack/Documents/GitKraken_Projects/ROCm-Oxide/crates/rocm-oxide-device/src/lib.rs)
 now wraps the raw AMDGPU intrinsics used by kernels. It provides thread/block
-IDs, dispatch-packet-derived block/grid dimensions, global IDs, wavefront
-metadata, barriers, dynamic launch-sized LDS pointers, ballot/reduction helpers,
-and basic `u32` atomics so device code does not need to call
+IDs, global IDs, wavefront metadata, barriers, ballot/reduction helpers, and
+basic `u32` atomics so device code does not need to call
 `core::arch::amdgpu` directly.
 
 ## Next Implementation Slice
