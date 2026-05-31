@@ -31,8 +31,67 @@ features on top of stronger contracts.
 
 ## Later
 
+## Roadmap Inputs
+
+Local probes on 2026-05-31:
+
+- GPU agent: `gfx1201`, AMD Radeon RX 9070 XT.
+- HIP/runtime: `7.2.53211-364a905`; AMD LLVM/clang: `22.0.0git`.
+- Device limits from `rocminfo`: wavefront size 32, max workgroup size 1024,
+  max waves per CU 32, 64 KB group/LDS segment.
+- Current generated artifact: 13 kernels, max VGPR 33, max SGPR 26, max
+  kernarg 368 bytes, static LDS 0, no dynamic stack users.
+- Current scoped atomic IR uses `atomicrmw ... monotonic` in global address
+  space, but does not yet emit explicit LLVM `syncscope`.
+
+## Next Roadmap
+
+### P0: Backend Correctness
+
+- [ ] Scope-specific atomic lowering:
+  - [ ] preserve source-level workgroup/device/system scope markers through IR
+  - [ ] lower atomic ordering and scope to AMDGPU LLVM `syncscope`/memory model
+  - [ ] verify IR and ISA for coarse-grained, fine-grained, and host-visible memory
+  - [ ] add negative docs/tests for system-scope atomics that downgrade on coarse memory
+- [ ] LDS/shared-memory completeness:
+  - [ ] add a real tiled/reduction kernel that uses dynamic LDS
+  - [ ] validate requested `shared_mem_bytes` against device and kernel limits
+  - [ ] report static and dynamic LDS in generated metadata and host bindings
+  - [ ] expose ergonomic typed workgroup scratch helpers in device code
+- [ ] Occupancy and resource model:
+  - [ ] expose per-kernel VGPR, SGPR, LDS, private segment, kernarg, and wavefront metadata at runtime
+  - [ ] wrap HIP occupancy APIs for launch planning
+  - [ ] add benchmark output that flags occupancy limiters and spills
+
+### P1: Runtime Orchestration
+
+- [ ] HIP graph capture for `DeviceOperation` pipelines:
+  - [ ] keep operations stream-only and graph-capturable
+  - [ ] add graph instantiate/launch wrappers
+  - [ ] verify graph replay for generated kernel bindings
+- [ ] Stream-ordered allocation maturity:
+  - [ ] add memory-pool controls around `hipMallocAsync`/`hipFreeAsync`
+  - [ ] preserve allocation lifetimes across queued generated operations
+  - [ ] document stream-ordering requirements for async buffers
+- [ ] Multi-device and host-memory coherence:
+  - [ ] model coarse/fine-grained memory pools and host visibility
+  - [ ] add pinned, managed, and peer-memory contract tests
+  - [ ] expose device properties needed by generated launch validation
+
+### P1: Compiler Completeness
+
 - [ ] Direct exported generic-kernel monomorphization without wrapper functions.
-- [ ] Scope-specific LLVM `syncscope` selection for atomics once the backend has
-      a robust marker-to-IR lowering path.
+- [ ] ROCm code-object artifact linking layer:
+  - [ ] support linking multiple generated objects
+  - [ ] preserve and merge kernel metadata
+  - [ ] investigate HIP library enumeration/loading APIs for artifact inspection
+- [ ] Toolchain discovery hardening:
+  - [ ] prefer `ROCM_PATH`/`HIP_PATH`, then `/opt/rocm`, then `PATH`
+  - [ ] validate `llc`, `clang`, `llvm-readelf`, `rocminfo`, and `rocm_agent_enumerator`
+  - [ ] emit one doctor report with versions, target arch, and build-std status
+
+### P2: ROCm-Specific Feature Parity
+
 - [ ] ROCm-specific replacements for CUDA cluster launch, TMA, and WGMMA concepts.
-- [ ] ROCm code-object artifact linking layer once the basic artifact model is stable.
+- [ ] rocBLAS/rocFFT/library interop layer after the code-object model is stable.
+- [ ] ROCm Compute Profiler integration for achieved occupancy and memory behavior.

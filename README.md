@@ -294,11 +294,68 @@ min/max, scoped `u32` atomics for workgroup/device/system intent, and the basic
 relaxed `u32` atomic compatibility helpers so device code does not need to call
 `core::arch::amdgpu` directly.
 
-## Next Implementation Slice
+## Roadmap
 
-The next useful step is generated lazy operations: teach generated kernel
-bindings to return `DeviceOperation` values for stream-pool scheduling while
-keeping the immediate launch API as the convenience path.
+This roadmap is grounded in the current local probe target:
+
+- GPU: `gfx1201`, AMD Radeon RX 9070 XT.
+- HIP/runtime: `7.2.53211-364a905`.
+- AMD LLVM/clang: `22.0.0git`.
+- Device limits seen through `rocminfo`: wavefront size 32, max workgroup size
+  1024, max waves per CU 32, and 64 KB group/LDS segment.
+- Current generated artifact: 13 kernels, max VGPR 33, max SGPR 26, max kernarg
+  368 bytes, static LDS 0, no dynamic stack users.
+- Current scoped atomic IR reaches global-memory `atomicrmw ... monotonic`, but
+  does not yet emit explicit LLVM `syncscope`.
+
+### P0: Backend Correctness
+
+- Scope-specific atomic lowering: preserve workgroup/device/system intent through
+  the IR pass, lower it to AMDGPU LLVM memory scopes/orderings, and verify the
+  resulting IR/ISA against coarse-grained, fine-grained, and host-visible memory.
+- LDS/shared-memory completeness: add a real tiled/reduction kernel using dynamic
+  LDS, validate requested shared memory against device and kernel limits, and
+  report static plus dynamic LDS in generated metadata and bindings.
+- Occupancy and resource model: expose per-kernel resource metadata at runtime,
+  wrap HIP occupancy APIs, and flag VGPR/SGPR/LDS/private-memory limiters in
+  benchmark output.
+
+### P1: Runtime Orchestration
+
+- HIP graph capture for `DeviceOperation` pipelines: keep generated operations
+  stream-only, add graph instantiate/launch wrappers, and verify replay for
+  generated kernel bindings.
+- Stream-ordered allocation maturity: add memory-pool controls around
+  `hipMallocAsync`/`hipFreeAsync`, preserve queued-operation lifetimes, and
+  document async buffer ordering rules.
+- Multi-device and host-memory coherence: model coarse/fine-grained memory pools,
+  pinned/managed/peer memory, and device properties needed by launch validation.
+
+### P1: Compiler Completeness
+
+- Direct exported generic-kernel monomorphization without wrapper functions.
+- ROCm code-object artifact linking: link multiple generated objects, preserve
+  metadata, and investigate HIP library enumeration/loading APIs.
+- Toolchain discovery hardening: validate `ROCM_PATH`/`HIP_PATH`, `/opt/rocm`,
+  `llc`, `clang`, `llvm-readelf`, `rocminfo`, `rocm_agent_enumerator`, target
+  architecture, and Rust `build-std` readiness in one doctor report.
+
+### P2: ROCm-Specific Feature Parity
+
+- ROCm-specific replacements for CUDA cluster launch, TMA, and WGMMA concepts.
+- rocBLAS/rocFFT/library interop after the code-object model is stable.
+- ROCm Compute Profiler integration for achieved occupancy and memory behavior.
+
+Roadmap source docs:
+[HIP runtime API](https://rocm.docs.amd.com/projects/HIP/en/latest/reference/hip_runtime_api_reference.html),
+[HIP launch API](https://rocm.docs.amd.com/projects/HIP/en/latest/reference/hip_runtime_api/modules/launch_api.html),
+[HIP graphs](https://rocm.docs.amd.com/projects/HIP/en/docs-6.4.0/how-to/hip_runtime_api/hipgraph.html),
+[stream ordered memory allocator](https://rocm.docs.amd.com/projects/HIP/en/docs-7.0.0/how-to/hip_runtime_api/memory_management/stream_ordered_allocator.html),
+[HIP atomics](https://rocm.docs.amd.com/projects/HIP/en/develop/how-to/hip_cpp_language_extensions.html#atomic-functions),
+[ROCm hardware atomics](https://rocm.docs.amd.com/en/latest/reference/gpu-atomics-operation.html),
+[AMDGPU LLVM backend](https://rocm.docs.amd.com/projects/llvm-project/en/latest/LLVM/llvm/html/AMDGPUUsage.html),
+and
+[ROCm Compute Profiler occupancy examples](https://rocm.docs.amd.com/projects/rocprofiler-compute/en/docs-7.2.0/tutorial/profiling-by-example.html).
 
 ## Verification
 

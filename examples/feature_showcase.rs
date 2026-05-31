@@ -117,7 +117,7 @@ fn main() -> Result<()> {
         )?
     }
     .sync_on(&device.execution_context()?)?;
-    assert_eq!(completion.retained_count(), 3);
+    assert_eq!(completion.retained_count(), 4);
     let lazy_out = d_out.copy_to_vec()?;
     assert_eq!(lazy_out[8192], a[8192] + b[8192]);
     println!("ok: generated DeviceOperation binding launched on an execution stream");

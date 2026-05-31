@@ -2567,6 +2567,7 @@ fn generate_kernel_binding(kernel: &KernelDecl) -> Result<String, String> {
     );
     out.push_str("            }\n");
     out.push_str("            let mut __completion = rocm_oxide::KernelLaunchCompletion::new();\n");
+    out.push_str("            __completion.keep_alive(module);\n");
     for arg_name in &keep_alive_arg_names {
         out.push_str(&format!(
             "            __completion.keep_alive({arg_name});\n"
@@ -2901,6 +2902,7 @@ pub unsafe extern "C" fn vector_add(
         assert!(binding.contains("a: std::sync::Arc<rocm_oxide::DeviceBuffer<f32>>"));
         assert!(binding.contains("Output = rocm_oxide::KernelLaunchCompletion"));
         assert!(binding.contains("launch_raw_on_stream(context.stream(), config, &mut __params)?"));
+        assert!(binding.contains("__completion.keep_alive(module);"));
         assert!(binding.contains("__completion.keep_alive(out);"));
         assert!(binding.contains("__completion.keep_alive(a);"));
     }

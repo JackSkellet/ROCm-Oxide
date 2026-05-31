@@ -6,6 +6,7 @@ use std::sync::{Arc, Mutex, mpsc};
 use std::task::{Context, Poll, Waker};
 use std::thread;
 
+#[must_use = "keeps launch resources alive until the execution context is synchronized"]
 pub struct KernelLaunchCompletion {
     keep_alive: Vec<Box<dyn Send>>,
 }
