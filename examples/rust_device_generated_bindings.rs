@@ -32,6 +32,30 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     rocm_oxide::hip::synchronize()?;
     assert_eq!(add_out.copy_to_vec()?, vec![3.0, 7.5, -1.0, 2.25]);
 
+    let math_input = DeviceBuffer::from_slice(&[4.0f32, 0.0, 1.0, -1.0])?;
+    let math_out = DeviceBuffer::<f32>::new(16)?;
+    unsafe {
+        kernels.math_intrinsics(LaunchConfig::for_num_elems(1), &math_out, &math_input)?;
+    }
+    rocm_oxide::hip::synchronize()?;
+    let math = math_out.copy_to_vec()?;
+    assert_close("sqrt_f32", math[0], 2.0, 0.0001)?;
+    assert_close("rsqrt_f32", math[1], 0.5, 0.0001)?;
+    assert_close("sin_f32", math[2], 0.0, 0.0001)?;
+    assert_close("cos_f32", math[3], 1.0, 0.0001)?;
+    assert_close("atan_f32", math[4], std::f32::consts::FRAC_PI_4, 0.002)?;
+    assert_close("min_f32", math[5], -2.0, 0.0001)?;
+    assert_close("max_f32", math[6], 3.0, 0.0001)?;
+    assert_close("sqrt_f64", math[7], 2.0, 0.0001)?;
+    assert_close("rsqrt_f64", math[8], 0.5, 0.0001)?;
+    assert_close("sin_f64", math[9], 0.0, 0.0001)?;
+    assert_close("cos_f64", math[10], 1.0, 0.0001)?;
+    assert_close("atan_f64", math[11], std::f32::consts::FRAC_PI_4, 0.002)?;
+    assert_eq!(math[12], 1.0, "sqrt_f32(-1) should produce NaN");
+    assert_eq!(math[13], 1.0, "min_f32 should propagate NaN");
+    assert_eq!(math[14], 1.0, "max_f32 should propagate NaN");
+    assert_close("min_f64", math[15], -2.0, 0.0001)?;
+
     let short = DeviceBuffer::from_slice(&a[..n / 2])?;
     let validation = unsafe {
         kernels.vector_add(
@@ -138,4 +162,17 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     println!("Generated binding vector_add passed on {}", device.arch());
     Ok(())
+}
+
+fn assert_close(
+    label: &str,
+    got: f32,
+    expected: f32,
+    tolerance: f32,
+) -> Result<(), Box<dyn std::error::Error>> {
+    if (got - expected).abs() > tolerance {
+        Err(format!("{label}: got {got}, expected {expected} +/- {tolerance}").into())
+    } else {
+        Ok(())
+    }
 }

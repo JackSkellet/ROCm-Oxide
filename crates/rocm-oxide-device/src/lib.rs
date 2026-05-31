@@ -1,4 +1,5 @@
 #![no_std]
+#![allow(internal_features)]
 #![feature(core_intrinsics)]
 #![feature(gpu_intrinsics)]
 #![feature(gpu_launch_sized_workgroup_mem)]
@@ -6,8 +7,146 @@
 
 use core::arch::amdgpu;
 use core::intrinsics::gpu::{amdgpu_dispatch_ptr, gpu_launch_sized_workgroup_mem};
-use core::{marker::PhantomData, ptr};
 use core::sync::atomic::{AtomicU32, Ordering};
+use core::{marker::PhantomData, ptr};
+
+pub mod math {
+    const FRAC_PI_2_F32: f32 = core::f32::consts::FRAC_PI_2;
+    const FRAC_PI_4_F32: f32 = core::f32::consts::FRAC_PI_4;
+    const PI_F64: f64 = core::f64::consts::PI;
+    const TAU_F64: f64 = core::f64::consts::TAU;
+    const FRAC_PI_2_F64: f64 = core::f64::consts::FRAC_PI_2;
+    const FRAC_PI_4_F64: f64 = core::f64::consts::FRAC_PI_4;
+
+    #[inline(always)]
+    pub fn sqrt_f32(value: f32) -> f32 {
+        core::intrinsics::sqrtf32(value)
+    }
+
+    #[inline(always)]
+    pub fn sqrt_f64(value: f64) -> f64 {
+        core::intrinsics::sqrtf64(value)
+    }
+
+    #[inline(always)]
+    pub fn rsqrt_f32(value: f32) -> f32 {
+        1.0 / sqrt_f32(value)
+    }
+
+    #[inline(always)]
+    pub fn rsqrt_f64(value: f64) -> f64 {
+        1.0 / sqrt_f64(value)
+    }
+
+    #[inline(always)]
+    pub fn sin_f32(value: f32) -> f32 {
+        core::intrinsics::sinf32(value)
+    }
+
+    #[inline(always)]
+    pub fn sin_f64(value: f64) -> f64 {
+        let x = reduce_angle_f64(value);
+        let x2 = x * x;
+        x * (1.0 + x2 * (-1.0 / 6.0 + x2 * (1.0 / 120.0 + x2 * (-1.0 / 5040.0))))
+    }
+
+    #[inline(always)]
+    pub fn cos_f32(value: f32) -> f32 {
+        core::intrinsics::cosf32(value)
+    }
+
+    #[inline(always)]
+    pub fn cos_f64(value: f64) -> f64 {
+        let x = reduce_angle_f64(value);
+        let x2 = x * x;
+        1.0 + x2 * (-0.5 + x2 * (1.0 / 24.0 + x2 * (-1.0 / 720.0)))
+    }
+
+    #[inline(always)]
+    pub fn atan_f32(value: f32) -> f32 {
+        if value != value {
+            return value;
+        }
+        let sign = if value < 0.0 { -1.0 } else { 1.0 };
+        let abs = if value < 0.0 { -value } else { value };
+        if abs == f32::INFINITY {
+            return sign * FRAC_PI_2_F32;
+        }
+        let reduced = if abs > 1.0 { 1.0 / abs } else { abs };
+        let core = atan_unit_f32(reduced);
+        sign * if abs > 1.0 {
+            FRAC_PI_2_F32 - core
+        } else {
+            core
+        }
+    }
+
+    #[inline(always)]
+    pub fn atan_f64(value: f64) -> f64 {
+        if value != value {
+            return value;
+        }
+        let sign = if value < 0.0 { -1.0 } else { 1.0 };
+        let abs = if value < 0.0 { -value } else { value };
+        if abs == f64::INFINITY {
+            return sign * FRAC_PI_2_F64;
+        }
+        let reduced = if abs > 1.0 { 1.0 / abs } else { abs };
+        let core = atan_unit_f64(reduced);
+        sign * if abs > 1.0 {
+            FRAC_PI_2_F64 - core
+        } else {
+            core
+        }
+    }
+
+    #[inline(always)]
+    pub fn min_f32(a: f32, b: f32) -> f32 {
+        core::intrinsics::minimumf32(a, b)
+    }
+
+    #[inline(always)]
+    pub fn max_f32(a: f32, b: f32) -> f32 {
+        core::intrinsics::maximumf32(a, b)
+    }
+
+    #[inline(always)]
+    pub fn min_f64(a: f64, b: f64) -> f64 {
+        core::intrinsics::minimumf64(a, b)
+    }
+
+    #[inline(always)]
+    pub fn max_f64(a: f64, b: f64) -> f64 {
+        core::intrinsics::maximumf64(a, b)
+    }
+
+    #[inline(always)]
+    fn atan_unit_f32(value: f32) -> f32 {
+        let abs = if value < 0.0 { -value } else { value };
+        FRAC_PI_4_F32 * value - value * (abs - 1.0) * (0.2447 + 0.0663 * abs)
+    }
+
+    #[inline(always)]
+    fn atan_unit_f64(value: f64) -> f64 {
+        let abs = if value < 0.0 { -value } else { value };
+        FRAC_PI_4_F64 * value - value * (abs - 1.0) * (0.2447 + 0.0663 * abs)
+    }
+
+    #[inline(always)]
+    fn reduce_angle_f64(value: f64) -> f64 {
+        if value != value || value == f64::INFINITY || value == f64::NEG_INFINITY {
+            return value;
+        }
+        let mut x = value;
+        while x > PI_F64 {
+            x -= TAU_F64;
+        }
+        while x < -PI_F64 {
+            x += TAU_F64;
+        }
+        x
+    }
+}
 
 #[inline(always)]
 pub fn thread_idx_x() -> u32 {

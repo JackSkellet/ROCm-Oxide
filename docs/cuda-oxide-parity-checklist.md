@@ -96,7 +96,7 @@ not the product.
   - [x] typed device slices for pointer/length kernel ABI
   - [x] basic `u32` atomics
   - [ ] explicit memory-scope atomics
-  - [ ] math intrinsic lowering
+  - [x] math intrinsic lowering
 - [ ] Compiler completeness:
   - [x] support more pointer-producing IR ops beyond `getelementptr`
   - [x] preserve source signature and contract spans in diagnostics

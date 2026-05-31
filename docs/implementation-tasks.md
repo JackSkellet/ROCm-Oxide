@@ -7,7 +7,7 @@ features on top of stronger contracts.
 
 ## Active Sequence
 
-- [ ] Typed device slices:
+- [x] Typed device slices:
   - [x] add `DeviceSlice<T>` and `DeviceSliceMut<T>` to device code
   - [x] mirror the ABI shape on the host side
   - [x] teach generated bindings to pass pointer/length pairs automatically
@@ -18,9 +18,9 @@ features on top of stronger contracts.
   - [x] add a marker such as `#[device_global]` or `#[constant]`
   - [x] lower marked globals with ROCm address-space awareness
   - [x] connect marked globals to typed host views
-- [ ] Math intrinsic lowering:
-  - [ ] map common `f32`/`f64` math calls to AMDGPU/ROCm-supported lowering
-  - [ ] add tests for `sqrt`, `rsqrt`, `sin`, `cos`, `atan`, min/max, and NaN behavior
+- [x] Math intrinsic lowering:
+  - [x] map common `f32`/`f64` math calls to AMDGPU/ROCm-supported lowering
+  - [x] add tests for `sqrt`, `rsqrt`, `sin`, `cos`, `atan`, min/max, and NaN behavior
 - [ ] Explicit memory-scope atomics:
   - [ ] expose workgroup/device/system scope where ROCm supports it
   - [ ] keep relaxed/basic atomics as the compatibility path

@@ -57,6 +57,45 @@ pub unsafe extern "C" fn affine_transform(
     }
 }
 
+// rocm-oxide: len(out)=16
+// rocm-oxide: len(input)=4
+#[kernel]
+pub unsafe extern "C" fn math_intrinsics(
+    out: gpu::DeviceSliceMut<f32>,
+    input: gpu::DeviceSlice<f32>,
+) {
+    if gpu::global_id_x() != 0 {
+        return;
+    }
+
+    let positive = unsafe { input.read_unchecked(0) };
+    let zero = unsafe { input.read_unchecked(1) };
+    let one = unsafe { input.read_unchecked(2) };
+    let negative = unsafe { input.read_unchecked(3) };
+    let nan = gpu::math::sqrt_f32(negative);
+    let min_nan = gpu::math::min_f32(nan, one);
+    let max_nan = gpu::math::max_f32(one, nan);
+
+    unsafe {
+        out.write_unchecked(0, gpu::math::sqrt_f32(positive));
+        out.write_unchecked(1, gpu::math::rsqrt_f32(positive));
+        out.write_unchecked(2, gpu::math::sin_f32(zero));
+        out.write_unchecked(3, gpu::math::cos_f32(zero));
+        out.write_unchecked(4, gpu::math::atan_f32(one));
+        out.write_unchecked(5, gpu::math::min_f32(-2.0, 3.0));
+        out.write_unchecked(6, gpu::math::max_f32(-2.0, 3.0));
+        out.write_unchecked(7, gpu::math::sqrt_f64(positive as f64) as f32);
+        out.write_unchecked(8, gpu::math::rsqrt_f64(positive as f64) as f32);
+        out.write_unchecked(9, gpu::math::sin_f64(zero as f64) as f32);
+        out.write_unchecked(10, gpu::math::cos_f64(zero as f64) as f32);
+        out.write_unchecked(11, gpu::math::atan_f64(one as f64) as f32);
+        out.write_unchecked(12, if nan != nan { 1.0 } else { 0.0 });
+        out.write_unchecked(13, if min_nan != min_nan { 1.0 } else { 0.0 });
+        out.write_unchecked(14, if max_nan != max_nan { 1.0 } else { 0.0 });
+        out.write_unchecked(15, gpu::math::min_f64(-2.0, 3.0) as f32);
+    }
+}
+
 #[kernel]
 pub unsafe extern "C" fn rainbow_geometry(
     frame: gpu::DeviceSliceMut<u32>,
@@ -1196,11 +1235,11 @@ fn abs_f32(value: f32) -> f32 {
 }
 
 fn min_f32(a: f32, b: f32) -> f32 {
-    if a < b { a } else { b }
+    gpu::math::min_f32(a, b)
 }
 
 fn max_f32(a: f32, b: f32) -> f32 {
-    if a > b { a } else { b }
+    gpu::math::max_f32(a, b)
 }
 
 fn clamp_f32(value: f32, lo: f32, hi: f32) -> f32 {
@@ -1214,12 +1253,7 @@ fn clamp_f32(value: f32, lo: f32, hi: f32) -> f32 {
 }
 
 fn inv_sqrt(value: f32) -> f32 {
-    let x2 = value * 0.5;
-    let mut bits = value.to_bits();
-    bits = 0x5f37_59dfu32.wrapping_sub(bits >> 1);
-    let mut y = f32::from_bits(bits);
-    y = y * (1.5 - x2 * y * y);
-    y * (1.5 - x2 * y * y)
+    gpu::math::rsqrt_f32(value)
 }
 
 fn pow2(value: f32) -> f32 {

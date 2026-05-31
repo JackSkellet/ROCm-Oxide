@@ -289,8 +289,9 @@ kernel allowlist, so helper functions can remain ordinary device functions.
 now wraps the raw AMDGPU intrinsics used by kernels. It provides thread/block
 IDs, dispatch-packet-derived block/grid dimensions, global IDs, wavefront
 metadata, barriers, dynamic launch-sized LDS pointers, ballot/reduction helpers,
-typed device slices, and basic `u32` atomics so device code does not need to
-call `core::arch::amdgpu` directly.
+typed device slices, math helpers for `sqrt`, `rsqrt`, `sin`, `cos`, `atan`,
+min/max, and basic `u32` atomics so device code does not need to call
+`core::arch::amdgpu` directly.
 
 ## Next Implementation Slice
 
