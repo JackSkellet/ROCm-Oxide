@@ -82,9 +82,9 @@ not the product.
   - [x] operation chaining
   - [x] stream pool scheduling
   - [x] keep in-flight results alive if futures are dropped
-- [ ] Constant/global memory:
-  - [ ] source marker for device globals
-  - [ ] address-space-aware lowering for ROCm globals
+- [x] Constant/global memory:
+  - [x] source marker for device globals
+  - [x] address-space-aware lowering for ROCm globals
   - [x] module global lookup through HIP
   - [x] typed host setters/getters
   - [x] load-time size validation for typed host views

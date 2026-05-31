@@ -17,6 +17,21 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let d_b = DeviceBuffer::from_slice(&b)?;
     let d_out = DeviceBuffer::<f32>::new(n)?;
 
+    let delta = kernels.global_add_one_delta()?;
+    assert_eq!(delta.copy_to_vec()?, vec![1.0]);
+    delta.set(2.0)?;
+    let add_input = DeviceBuffer::from_slice(&[1.0f32, 5.5, -3.0, 0.25])?;
+    let add_out = DeviceBuffer::<f32>::new(add_input.len())?;
+    unsafe {
+        kernels.add_one(
+            LaunchConfig::for_num_elems_with_block_size(add_input.len(), block_x),
+            &add_out,
+            &add_input,
+        )?;
+    }
+    rocm_oxide::hip::synchronize()?;
+    assert_eq!(add_out.copy_to_vec()?, vec![3.0, 7.5, -1.0, 2.25]);
+
     let short = DeviceBuffer::from_slice(&a[..n / 2])?;
     let validation = unsafe {
         kernels.vector_add(

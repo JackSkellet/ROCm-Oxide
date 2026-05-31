@@ -14,10 +14,10 @@ features on top of stronger contracts.
   - [x] reject obvious mutable-buffer aliasing before launch
   - [x] convert simple kernels before large demo kernels
   - [x] convert image, upscaling, stress, and raytrace kernels
-- [ ] Constant/global memory source markers:
-  - [ ] add a marker such as `#[device_global]` or `#[constant]`
-  - [ ] lower marked globals with ROCm address-space awareness
-  - [ ] connect marked globals to typed host views
+- [x] Constant/global memory source markers:
+  - [x] add a marker such as `#[device_global]` or `#[constant]`
+  - [x] lower marked globals with ROCm address-space awareness
+  - [x] connect marked globals to typed host views
 - [ ] Math intrinsic lowering:
   - [ ] map common `f32`/`f64` math calls to AMDGPU/ROCm-supported lowering
   - [ ] add tests for `sqrt`, `rsqrt`, `sin`, `cos`, `atan`, min/max, and NaN behavior

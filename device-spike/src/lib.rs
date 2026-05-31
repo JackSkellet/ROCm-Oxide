@@ -3,7 +3,10 @@
 #![allow(improper_ctypes_definitions)]
 
 use rocm_oxide_device as gpu;
-use rocm_oxide_kernel::kernel;
+use rocm_oxide_kernel::{device_global, kernel};
+
+#[device_global]
+pub static mut ADD_ONE_DELTA: f32 = 1.0;
 
 #[repr(C)]
 #[derive(Clone, Copy)]
@@ -19,8 +22,9 @@ pub unsafe extern "C" fn add_one(
 ) {
     let i = gpu::global_id_x();
     if i < out.len() {
+        let delta = unsafe { ADD_ONE_DELTA };
         let value = unsafe { input.read_unchecked(i) };
-        unsafe { out.write_unchecked(i, value + 1.0) };
+        unsafe { out.write_unchecked(i, value + delta) };
     }
 }
 

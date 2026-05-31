@@ -218,6 +218,8 @@ execution ergonomics on ROCm:
   cancel already submitted/started work
 - `Module::global::<T>` and typed `Global<T>` setters/getters over
   `hipModuleGetGlobal`
+- `#[device_global]` and `#[constant]` markers for Rust-authored device globals,
+  with generated typed host accessors and ROCm address-space lowering
 - generated-kernel performance probes without GUI/readback timing noise
 
 `cargo rocm-oxide inspect` prints per-kernel code-object resources such as VGPR,

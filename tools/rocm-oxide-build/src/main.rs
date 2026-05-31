@@ -42,10 +42,21 @@ fn run() -> Result<(), String> {
     let device_crates = discover_device_crate_bundle(&device_crate)?;
     let mut kernels = BTreeMap::new();
     let mut device_structs = BTreeMap::new();
+    let mut device_globals = BTreeMap::new();
     let mut objects = Vec::new();
 
     for device_crate in &device_crates {
         let crate_kernels = discover_kernels(device_crate)?;
+        for device_global in discover_device_globals(device_crate)?.values() {
+            if let Some(previous) =
+                device_globals.insert(device_global.name.clone(), device_global.clone())
+            {
+                return Err(format!(
+                    "duplicate marked device global `{}`\n  first: {}\n  again: {}",
+                    device_global.name, previous.span, device_global.span
+                ));
+            }
+        }
         for device_struct in discover_device_structs(device_crate)?.values() {
             if let Some(previous) =
                 device_structs.insert(device_struct.name.clone(), device_struct.clone())
@@ -84,7 +95,7 @@ fn run() -> Result<(), String> {
         let source = fs::read_to_string(&input_ir)
             .map_err(|err| format!("failed to read {}: {err}", input_ir.display()))?;
         let transformed = compiler_step("rewrite Rust-emitted LLVM IR", || {
-            transform_ir(&source, &kernel_names, &crate_kernels)
+            transform_ir(&source, &kernel_names, &crate_kernels, &device_globals)
         })?;
         fs::write(&kernel_ir, transformed)
             .map_err(|err| format!("failed to write {}: {err}", kernel_ir.display()))?;
@@ -126,8 +137,15 @@ fn run() -> Result<(), String> {
 
     validate_code_object(&hsaco, &kernel_names, &tools.llvm_readelf)?;
     let code_object_metadata = read_code_object_metadata(&hsaco, &tools.llvm_readelf)?;
-    write_metadata(&metadata, &arch, &hsaco, &kernels, &code_object_metadata)?;
-    write_bindings(&bindings, &hsaco, &kernels, &device_structs)?;
+    write_metadata(
+        &metadata,
+        &arch,
+        &hsaco,
+        &kernels,
+        &device_globals,
+        &code_object_metadata,
+    )?;
+    write_bindings(&bindings, &hsaco, &kernels, &device_structs, &device_globals)?;
     println!("{}", hsaco.display());
     Ok(())
 }
@@ -327,6 +345,9 @@ fn parse_kernel_resource_rows(text: &str) -> Vec<KernelResourceRow> {
     let mut in_code_object = false;
 
     for line in text.lines() {
+        if line.trim() == "\"globals\": [" {
+            break;
+        }
         if line.starts_with("      \"name\":") {
             if let Some(row) = current.take() {
                 rows.push(row);
@@ -925,6 +946,21 @@ struct DeviceStructField {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+struct DeviceGlobal {
+    name: String,
+    ty: String,
+    mutable: bool,
+    kind: DeviceGlobalKind,
+    span: SourceSpan,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum DeviceGlobalKind {
+    Global,
+    Constant,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
 enum ArgKind {
     MutPtr(String),
     ConstPtr(String),
@@ -1151,6 +1187,133 @@ fn discover_device_structs_in_source_at(
     }
 
     Ok(structs)
+}
+
+fn discover_device_globals(device_crate: &Path) -> Result<BTreeMap<String, DeviceGlobal>, String> {
+    let src_dir = device_crate.join("src");
+    let mut globals = BTreeMap::new();
+    discover_device_globals_in_dir(&src_dir, &mut globals)?;
+    Ok(globals)
+}
+
+fn discover_device_globals_in_dir(
+    dir: &Path,
+    globals: &mut BTreeMap<String, DeviceGlobal>,
+) -> Result<(), String> {
+    for entry in
+        fs::read_dir(dir).map_err(|err| format!("failed to read {}: {err}", dir.display()))?
+    {
+        let entry = entry.map_err(|err| format!("failed to read directory entry: {err}"))?;
+        let path = entry.path();
+        if path.is_dir() {
+            discover_device_globals_in_dir(&path, globals)?;
+        } else if path.extension() == Some(OsStr::new("rs")) {
+            let source = fs::read_to_string(&path)
+                .map_err(|err| format!("failed to read {}: {err}", path.display()))?;
+            for global in discover_device_globals_in_source_at(&source, &path)? {
+                globals.insert(global.name.clone(), global);
+            }
+        }
+    }
+    Ok(())
+}
+
+#[cfg(test)]
+fn discover_device_globals_in_source(source: &str) -> Result<Vec<DeviceGlobal>, String> {
+    discover_device_globals_in_source_at(source, Path::new("<source>"))
+}
+
+fn discover_device_globals_in_source_at(
+    source: &str,
+    path: &Path,
+) -> Result<Vec<DeviceGlobal>, String> {
+    let mut globals = Vec::new();
+    let mut pending_kind = None;
+    let mut static_source = String::new();
+    let mut static_start_line = 0usize;
+
+    for (line_index, line) in source.lines().enumerate() {
+        let trimmed = line.trim();
+        if let Some(kind) = device_global_attribute_kind(trimmed) {
+            pending_kind = Some(kind);
+            static_start_line = line_index + 1;
+            continue;
+        }
+
+        if let Some(kind) = pending_kind {
+            static_source.push(' ');
+            static_source.push_str(trimmed);
+            if trimmed.ends_with(';') {
+                globals.push(parse_device_global(
+                    &static_source,
+                    kind,
+                    SourceSpan {
+                        path: path.to_path_buf(),
+                        line: static_start_line,
+                        signature: static_source.clone(),
+                    },
+                )?);
+                static_source.clear();
+                pending_kind = None;
+            } else if !trimmed.starts_with("#[") && !trimmed.is_empty() {
+                continue;
+            }
+        }
+    }
+
+    Ok(globals)
+}
+
+fn device_global_attribute_kind(line: &str) -> Option<DeviceGlobalKind> {
+    match line {
+        "#[device_global]"
+        | "#[rocm_oxide_kernel::device_global]"
+        | "#[::rocm_oxide_kernel::device_global]" => Some(DeviceGlobalKind::Global),
+        "#[constant]" | "#[rocm_oxide_kernel::constant]" | "#[::rocm_oxide_kernel::constant]" => {
+            Some(DeviceGlobalKind::Constant)
+        }
+        _ => None,
+    }
+}
+
+fn parse_device_global(
+    source: &str,
+    kind: DeviceGlobalKind,
+    span: SourceSpan,
+) -> Result<DeviceGlobal, String> {
+    let static_pos = source
+        .find("static ")
+        .ok_or_else(|| format!("{}: marked device global must be a static item", span))?
+        + "static ".len();
+    let rest = source[static_pos..].trim_start();
+    let (mutable, rest) = if let Some(rest) = rest.strip_prefix("mut ") {
+        (true, rest.trim_start())
+    } else {
+        (false, rest)
+    };
+    let name_end = rest
+        .find(':')
+        .ok_or_else(|| format!("{}: marked device global is missing a type", span))?;
+    let name = rest[..name_end].trim();
+    if !is_identifier(name) {
+        return Err(format!("{}: invalid device global name `{name}`", span));
+    }
+    let ty_start = name_end + 1;
+    let ty_end = rest[ty_start..]
+        .find('=')
+        .ok_or_else(|| format!("{}: marked device global is missing an initializer", span))?
+        + ty_start;
+    let ty = rest[ty_start..ty_end].trim();
+    if ty.is_empty() {
+        return Err(format!("{}: marked device global is missing a type", span));
+    }
+    Ok(DeviceGlobal {
+        name: name.to_string(),
+        ty: ty.to_string(),
+        mutable,
+        kind,
+        span,
+    })
 }
 
 fn parse_device_struct(source: &str, span: SourceSpan) -> Result<DeviceStruct, String> {
@@ -1425,6 +1588,7 @@ fn transform_ir(
     source: &str,
     kernel_names: &BTreeSet<String>,
     kernels: &BTreeMap<String, KernelDecl>,
+    device_globals: &BTreeMap<String, DeviceGlobal>,
 ) -> Result<String, String> {
     let mut output = Vec::new();
     let mut lines = source.lines().peekable();
@@ -1440,9 +1604,16 @@ fn transform_ir(
                     break;
                 }
             }
-            output.extend(rewrite_kernel_body(body, kernel.global_pointer_args));
+            output.extend(rewrite_kernel_body(
+                body,
+                kernel.pointer_addrspaces,
+                device_globals,
+            ));
         } else {
-            output.push(rewrite_kernel_attributes(line));
+            output.push(rewrite_kernel_attributes(&rewrite_marked_globals(
+                line,
+                device_globals,
+            )));
         }
     }
 
@@ -1487,7 +1658,7 @@ fn transform_ir(
 struct KernelSignature {
     name: String,
     rewritten: String,
-    global_pointer_args: BTreeSet<String>,
+    pointer_addrspaces: BTreeMap<String, String>,
 }
 
 impl KernelSignature {
@@ -1513,14 +1684,14 @@ impl KernelSignature {
             .rfind(')')
             .ok_or_else(|| format!("malformed kernel signature: {line}"))?;
         let args = &line[name_end + 1..args_end];
-        let mut global_pointer_args = BTreeSet::new();
+        let mut pointer_addrspaces = BTreeMap::new();
         let rewritten_args = split_args(args)
             .into_iter()
             .map(|arg| {
                 let trimmed = arg.trim();
                 if trimmed.starts_with("ptr ") {
                     if let Some(name) = argument_name(trimmed) {
-                        global_pointer_args.insert(name);
+                        pointer_addrspaces.insert(name, "1".to_string());
                     }
                     trimmed.replacen("ptr ", "ptr addrspace(1) ", 1)
                 } else {
@@ -1537,7 +1708,7 @@ impl KernelSignature {
         Ok(Some(Self {
             name,
             rewritten,
-            global_pointer_args,
+            pointer_addrspaces,
         }))
     }
 
@@ -1561,32 +1732,45 @@ fn argument_name(arg: &str) -> Option<String> {
         .map(ToOwned::to_owned)
 }
 
-fn rewrite_kernel_body(lines: Vec<String>, mut global_pointers: BTreeSet<String>) -> Vec<String> {
+fn rewrite_kernel_body(
+    lines: Vec<String>,
+    mut pointer_addrspaces: BTreeMap<String, String>,
+    device_globals: &BTreeMap<String, DeviceGlobal>,
+) -> Vec<String> {
     let mut rewritten = Vec::with_capacity(lines.len());
 
     for line in lines {
-        let mut current = line;
-        for name in &global_pointers {
-            current = current.replace(
-                &format!("ptr %{name}"),
-                &format!("ptr addrspace(1) %{name}"),
-            );
+        let mut current = rewrite_marked_globals(&line, device_globals);
+        for (name, address_space) in &pointer_addrspaces {
+            current = rewrite_pointer_operand(&current, name, address_space);
         }
         if current.contains(" phi ptr ")
-            && global_pointers
-                .iter()
-                .any(|name| current.contains(&format!("%{name}")))
+            && let Some(address_space) = pointer_addrspaces.iter().find_map(|(name, space)| {
+                contains_ssa_value(&current, name).then(|| space.clone())
+            })
         {
-            current = current.replacen(" phi ptr ", " phi ptr addrspace(1) ", 1);
+            current = current.replacen(
+                " phi ptr ",
+                &format!(" phi ptr addrspace({address_space}) "),
+                1,
+            );
         }
-        if current.contains(" load ptr, ptr addrspace(1)") {
-            current = current.replacen(" load ptr,", " load ptr addrspace(1),", 1);
+        if let Some(address_space) = pointer_addrspaces.values().find(|space| {
+            current.contains(&format!(" load ptr, ptr addrspace({space})"))
+        }) {
+            current = current.replacen(
+                " load ptr,",
+                &format!(" load ptr addrspace({address_space}),"),
+                1,
+            );
         }
 
-        if produces_global_pointer(&current)
+        if produces_address_space_pointer(&current)
             && let Some(result) = assigned_value(&current)
+            && let Some(address_space) = pointer_address_space(&current)
+            && matches!(address_space.as_str(), "1" | "4")
         {
-            global_pointers.insert(result);
+            pointer_addrspaces.insert(result, address_space);
         }
 
         rewritten.push(rewrite_kernel_attributes(&current));
@@ -1595,14 +1779,97 @@ fn rewrite_kernel_body(lines: Vec<String>, mut global_pointers: BTreeSet<String>
     rewritten
 }
 
-fn produces_global_pointer(line: &str) -> bool {
-    line.contains("ptr addrspace(1)")
+fn rewrite_pointer_operand(line: &str, name: &str, address_space: &str) -> String {
+    let needle = format!("ptr %{name}");
+    let replacement = format!("ptr addrspace({address_space}) %{name}");
+    let mut output = String::with_capacity(line.len() + replacement.len());
+    let mut cursor = 0usize;
+
+    while let Some(relative) = line[cursor..].find(&needle) {
+        let start = cursor + relative;
+        let end = start + needle.len();
+        output.push_str(&line[cursor..start]);
+        if line[end..]
+            .chars()
+            .next()
+            .is_some_and(is_llvm_name_continue)
+        {
+            output.push_str(&line[start..end]);
+        } else {
+            output.push_str(&replacement);
+        }
+        cursor = end;
+    }
+
+    output.push_str(&line[cursor..]);
+    output
+}
+
+fn contains_ssa_value(line: &str, name: &str) -> bool {
+    let needle = format!("%{name}");
+    let mut cursor = 0usize;
+    while let Some(relative) = line[cursor..].find(&needle) {
+        let start = cursor + relative;
+        let before = line[..start].chars().next_back();
+        let after = line[start + needle.len()..].chars().next();
+        let starts_at_boundary = before.is_none_or(|ch| !is_llvm_name_continue(ch));
+        let ends_at_boundary = after.is_none_or(|ch| !is_llvm_name_continue(ch));
+        if starts_at_boundary && ends_at_boundary {
+            return true;
+        }
+        cursor = start + needle.len();
+    }
+    false
+}
+
+fn is_llvm_name_continue(ch: char) -> bool {
+    ch.is_ascii_alphanumeric() || matches!(ch, '_' | '.' | '$' | '-')
+}
+
+fn rewrite_marked_globals(line: &str, device_globals: &BTreeMap<String, DeviceGlobal>) -> String {
+    let mut rewritten = line.to_string();
+    for global in device_globals.values() {
+        rewritten = rewrite_marked_global_definition(&rewritten, global);
+        rewritten = rewritten.replace(
+            &format!("ptr @{}", global.name),
+            &format!("ptr addrspace({}) @{}", global.kind.address_space(), global.name),
+        );
+    }
+    rewritten
+}
+
+fn rewrite_marked_global_definition(line: &str, global: &DeviceGlobal) -> String {
+    let trimmed = line.trim_start();
+    if !trimmed.starts_with(&format!("@{} =", global.name)) || line.contains("addrspace(") {
+        return line.to_string();
+    }
+    for keyword in [" global ", " constant "] {
+        if let Some(pos) = line.find(keyword) {
+            let mut rewritten = line.to_string();
+            rewritten.insert_str(pos + 1, &format!("addrspace({}) ", global.kind.address_space()));
+            return rewritten;
+        }
+    }
+    line.to_string()
+}
+
+fn produces_address_space_pointer(line: &str) -> bool {
+    line.contains("ptr addrspace(")
         && (line.contains("getelementptr")
             || line.contains("addrspacecast")
             || line.contains("bitcast")
             || line.contains("select ")
             || line.contains(" phi ")
             || line.contains(" load ptr"))
+}
+
+fn pointer_address_space(line: &str) -> Option<String> {
+    let (_, rest) = line.split_once("ptr addrspace(")?;
+    let (address_space, _) = rest.split_once(')')?;
+    address_space
+        .chars()
+        .all(|ch| ch.is_ascii_digit())
+        .then(|| address_space.to_string())
 }
 
 fn assigned_value(line: &str) -> Option<String> {
@@ -1613,7 +1880,7 @@ fn assigned_value(line: &str) -> Option<String> {
 }
 
 fn rewrite_kernel_attributes(line: &str) -> String {
-    let line = line.replace(" nocreateundeforpoison", "");
+    let line = strip_target_memory_effects(&line.replace(" nocreateundeforpoison", ""));
     if !line.starts_with("attributes #")
         || !line.contains("\"target-cpu\"=")
         || line.contains("\"amdgpu-flat-work-group-size\"=")
@@ -1625,6 +1892,19 @@ fn rewrite_kernel_attributes(line: &str) -> String {
         "\"amdgpu-flat-work-group-size\"=\"1,1024\" \"target-cpu\"=",
         1,
     )
+}
+
+fn strip_target_memory_effects(line: &str) -> String {
+    let mut current = line.to_string();
+    while let Some(start) = current.find(", target_mem") {
+        let rest = &current[start + 2..];
+        let Some(end_relative) = rest.find([',', ')']) else {
+            break;
+        };
+        let end = start + 2 + end_relative;
+        current.replace_range(start..end, "");
+    }
+    current
 }
 
 fn validate_code_object(
@@ -1839,6 +2119,7 @@ fn write_metadata(
     arch: &str,
     hsaco: &Path,
     kernels: &BTreeMap<String, KernelDecl>,
+    device_globals: &BTreeMap<String, DeviceGlobal>,
     code_object_metadata: &CodeObjectMetadata,
 ) -> Result<(), String> {
     let mut out = String::new();
@@ -1931,6 +2212,32 @@ fn write_metadata(
         out.push_str("    }");
     }
 
+    out.push_str("\n  ],\n");
+    out.push_str("  \"globals\": [\n");
+    for (global_index, global) in device_globals.values().enumerate() {
+        if global_index > 0 {
+            out.push_str(",\n");
+        }
+        out.push_str("    {\n");
+        out.push_str(&format!(
+            "      \"name\": \"{}\",\n",
+            json_escape(&global.name)
+        ));
+        out.push_str(&format!("      \"type\": \"{}\",\n", json_escape(&global.ty)));
+        out.push_str(&format!(
+            "      \"kind\": \"{}\",\n",
+            global.kind.as_str()
+        ));
+        out.push_str(&format!(
+            "      \"mutable\": {},\n",
+            if global.mutable { "true" } else { "false" }
+        ));
+        out.push_str(&format!(
+            "      \"address_space\": \"{}\"\n",
+            global.kind.address_space()
+        ));
+        out.push_str("    }");
+    }
     out.push_str("\n  ]\n");
     out.push_str("}\n");
     fs::write(path, out).map_err(|err| format!("failed to write {}: {err}", path.display()))
@@ -2012,6 +2319,7 @@ fn write_bindings(
     hsaco: &Path,
     kernels: &BTreeMap<String, KernelDecl>,
     device_structs: &BTreeMap<String, DeviceStruct>,
+    device_globals: &BTreeMap<String, DeviceGlobal>,
 ) -> Result<(), String> {
     let mut out = String::new();
     out.push_str("// Generated by rocm-oxide-build. Do not edit by hand.\n");
@@ -2041,6 +2349,11 @@ fn write_bindings(
     out.push_str("        Ok(Self { module: device.load_code_object(DEVICE_HSACO_BYTES)? })\n");
     out.push_str("    }\n\n");
 
+    for global in device_globals.values() {
+        out.push_str(&generate_device_global_binding(global));
+        out.push('\n');
+    }
+
     for kernel in kernels.values() {
         out.push_str(&generate_kernel_binding(kernel)?);
         out.push('\n');
@@ -2060,6 +2373,48 @@ fn generate_device_struct_binding(device_struct: &DeviceStruct) -> String {
     }
     out.push_str("}\n");
     out
+}
+
+fn generate_device_global_binding(global: &DeviceGlobal) -> String {
+    let mut out = String::new();
+    out.push_str(&format!(
+        "    pub fn {}(&self) -> rocm_oxide::Result<rocm_oxide::Global<{}>> {{\n",
+        device_global_method_name(&global.name),
+        global.ty
+    ));
+    out.push_str(&format!(
+        "        self.module.global(c\"{}\")\n",
+        global.name
+    ));
+    out.push_str("    }\n");
+    out
+}
+
+fn device_global_method_name(name: &str) -> String {
+    format!("global_{}", to_snake_case(name))
+}
+
+fn to_snake_case(name: &str) -> String {
+    let mut out = String::new();
+    let mut previous_lower_or_digit = false;
+    for ch in name.chars() {
+        if ch == '_' {
+            if !out.ends_with('_') {
+                out.push('_');
+            }
+            previous_lower_or_digit = false;
+        } else if ch.is_ascii_uppercase() {
+            if previous_lower_or_digit && !out.ends_with('_') {
+                out.push('_');
+            }
+            out.push(ch.to_ascii_lowercase());
+            previous_lower_or_digit = false;
+        } else {
+            out.push(ch);
+            previous_lower_or_digit = ch.is_ascii_lowercase() || ch.is_ascii_digit();
+        }
+    }
+    out.trim_matches('_').to_string()
 }
 
 fn generate_kernel_binding(kernel: &KernelDecl) -> Result<String, String> {
@@ -2196,7 +2551,22 @@ impl ArgKind {
             Self::MutPtr(_) | Self::ConstPtr(_) | Self::MutSlice(_) | Self::ConstSlice(_)
         )
     }
+}
 
+impl DeviceGlobalKind {
+    fn as_str(self) -> &'static str {
+        match self {
+            Self::Global => "global",
+            Self::Constant => "constant",
+        }
+    }
+
+    fn address_space(self) -> &'static str {
+        match self {
+            Self::Global => "1",
+            Self::Constant => "4",
+        }
+    }
 }
 
 impl LenExpr {
@@ -2259,9 +2629,11 @@ where
 #[cfg(test)]
 mod tests {
     use super::{
-        ArgKind, compiler_step, discover_device_crate_bundle, discover_device_structs_in_source,
-        discover_kernels_in_source, generate_device_struct_binding, generate_kernel_binding,
-        parse_inline_path_dependency, parse_kernel_resource_rows, parse_package_name, transform_ir,
+        ArgKind, DeviceGlobalKind, compiler_step, discover_device_crate_bundle,
+        discover_device_globals_in_source, discover_device_structs_in_source,
+        discover_kernels_in_source, generate_device_global_binding, generate_device_struct_binding,
+        generate_kernel_binding, parse_inline_path_dependency, parse_kernel_resource_rows,
+        parse_package_name, transform_ir,
     };
     use std::collections::{BTreeMap, BTreeSet};
     use std::fs;
@@ -2315,6 +2687,15 @@ pub unsafe extern "C" fn helper() {}
         "uses_dynamic_stack": false
       }
     }
+  ],
+  "globals": [
+    {
+      "name": "ADD_ONE_DELTA",
+      "type": "f32",
+      "kind": "global",
+      "mutable": true,
+      "address_space": "1"
+    }
   ]
 }"#;
         let rows = parse_kernel_resource_rows(input);
@@ -2342,7 +2723,7 @@ start:
   ret void
 }
 
-attributes #0 = { nounwind "target-cpu"="gfx1201" }
+attributes #0 = { nounwind memory(read, argmem: readwrite, inaccessiblemem: none, target_mem0: none, target_mem1: none) "target-cpu"="gfx1201" }
 "#;
 
         let decls = kernel_map(
@@ -2352,13 +2733,15 @@ pub unsafe extern "C" fn vector_add(out: *mut f32, input: *const f32, n: usize) 
 "#,
         );
         let kernels = decls.keys().cloned().collect::<BTreeSet<_>>();
-        let output = transform_ir(input, &kernels, &decls).expect("transform should succeed");
+        let output =
+            transform_ir(input, &kernels, &decls, &BTreeMap::new()).expect("transform should succeed");
         assert!(output.contains("define protected amdgpu_kernel void @vector_add"));
         assert!(output.contains("ptr addrspace(1) noundef writeonly %out"));
         assert!(output.contains("ptr addrspace(1) noundef readonly %input"));
         assert!(output.contains("load float, ptr addrspace(1) %src"));
         assert!(output.contains("store float %value, ptr addrspace(1) %dst"));
         assert!(output.contains("\"amdgpu-flat-work-group-size\"=\"1,1024\""));
+        assert!(!output.contains("target_mem"));
     }
 
     #[test]
@@ -2370,8 +2753,13 @@ pub unsafe extern "C" fn vector_add(out: *mut f32) {}
 "#,
         );
         let kernels = decls.keys().cloned().collect::<BTreeSet<_>>();
-        let err = transform_ir("define void @helper() {\n  ret void\n}\n", &kernels, &decls)
-            .expect_err("module without kernels should fail");
+        let err = transform_ir(
+            "define void @helper() {\n  ret void\n}\n",
+            &kernels,
+            &decls,
+            &BTreeMap::new(),
+        )
+        .expect_err("module without kernels should fail");
         assert!(err.contains("none of the marked kernels"));
         assert!(err.contains("<source>:2"));
     }
@@ -2450,6 +2838,88 @@ pub unsafe extern "C" fn vector_add(
     }
 
     #[test]
+    fn discovers_marked_device_globals() {
+        let globals = discover_device_globals_in_source(
+            r#"
+use rocm_oxide_kernel::{constant, device_global};
+
+#[device_global]
+pub static mut ADD_ONE_DELTA: f32 = 1.0;
+
+#[constant]
+pub static LUT: [u32; 4] = [1, 2, 3, 4];
+"#,
+        )
+        .expect("source should parse");
+
+        assert_eq!(globals.len(), 2);
+        assert_eq!(globals[0].name, "ADD_ONE_DELTA");
+        assert_eq!(globals[0].ty, "f32");
+        assert_eq!(globals[0].kind, DeviceGlobalKind::Global);
+        assert!(globals[0].mutable);
+        assert_eq!(globals[1].name, "LUT");
+        assert_eq!(globals[1].ty, "[u32; 4]");
+        assert_eq!(globals[1].kind, DeviceGlobalKind::Constant);
+        assert!(!globals[1].mutable);
+
+        let binding = generate_device_global_binding(&globals[0]);
+        assert!(binding.contains("pub fn global_add_one_delta"));
+        assert!(binding.contains("rocm_oxide::Global<f32>"));
+        assert!(binding.contains("self.module.global(c\"ADD_ONE_DELTA\")"));
+    }
+
+    #[test]
+    fn rewrites_marked_device_globals_with_address_spaces() {
+        let input = r#"; ModuleID = 'sample'
+target triple = "amdgcn-amd-amdhsa"
+
+@ADD_ONE_DELTA = local_unnamed_addr global float 1.0
+@LUT = local_unnamed_addr constant [4 x i32] [i32 1, i32 2, i32 3, i32 4]
+
+define void @use_globals(ptr noundef %out) unnamed_addr #0 {
+start:
+  %delta = load float, ptr @ADD_ONE_DELTA, align 4
+  %slot = getelementptr inbounds [4 x i32], ptr @LUT, i64 0, i64 1
+  %value = load i32, ptr %slot, align 4
+  store float %delta, ptr %out, align 4
+  ret void
+}
+
+attributes #0 = { nounwind "target-cpu"="gfx1201" }
+"#;
+        let decls = kernel_map(
+            r#"
+#[kernel]
+pub unsafe extern "C" fn use_globals(out: *mut f32) {}
+"#,
+        );
+        let globals = discover_device_globals_in_source(
+            r#"
+#[device_global]
+pub static mut ADD_ONE_DELTA: f32 = 1.0;
+#[constant]
+pub static LUT: [u32; 4] = [1, 2, 3, 4];
+"#,
+        )
+        .expect("globals should parse")
+        .into_iter()
+        .map(|global| (global.name.clone(), global))
+        .collect::<BTreeMap<_, _>>();
+        let kernels = decls.keys().cloned().collect::<BTreeSet<_>>();
+        let output = transform_ir(input, &kernels, &decls, &globals)
+            .expect("transform should succeed");
+
+        assert!(output.contains(
+            "@ADD_ONE_DELTA = local_unnamed_addr addrspace(1) global float 1.0"
+        ));
+        assert!(output
+            .contains("@LUT = local_unnamed_addr addrspace(4) constant [4 x i32]"));
+        assert!(output.contains("load float, ptr addrspace(1) @ADD_ONE_DELTA"));
+        assert!(output.contains("getelementptr inbounds [4 x i32], ptr addrspace(4) @LUT"));
+        assert!(output.contains("load i32, ptr addrspace(4) %slot"));
+    }
+
+    #[test]
     fn parses_length_contracts_into_generated_validation() {
         let kernels = discover_kernels_in_source(
             r#"
@@ -2510,7 +2980,8 @@ pub unsafe extern "C" fn pointer_ops(out: *mut u32, fallback: *mut u32, cond: bo
 "#,
         );
         let kernels = decls.keys().cloned().collect::<BTreeSet<_>>();
-        let output = transform_ir(input, &kernels, &decls).expect("transform should succeed");
+        let output =
+            transform_ir(input, &kernels, &decls, &BTreeMap::new()).expect("transform should succeed");
         assert!(output.contains(
             "%selected = select i1 %cond, ptr addrspace(1) %gep, ptr addrspace(1) %fallback"
         ));
