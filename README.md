@@ -100,7 +100,7 @@ let d_out = DeviceBuffer::<f32>::new(a.len())?;
 unsafe {
     rocm_oxide::launch!(
         kernel,
-        LaunchConfig::for_num_elems(a.len(), 256),
+        LaunchConfig::for_num_elems(a.len()),
         d_out.as_mut_ptr(),
         d_a.as_ptr(),
         d_b.as_ptr(),
@@ -173,18 +173,21 @@ more global-pointer-producing IR than just `getelementptr`, catches internal
 rewrite panics as actionable diagnostics, discovers kernel-bearing local path
 dependencies for bundling, and mirrors `#[repr(C)]` device structs into host
 bindings for captured-environment style ABI payloads.
+The repo pins nightly Rust in `rust-toolchain.toml` so `cargo` commands use a
+toolchain with `rust-src`; `rocm-oxide-build --doctor` also probes that `core`
+can actually be built for `amdgcn-amd-amdhsa`.
 
 The generated bindings expose typed host calls such as:
 
 ```rust
 unsafe {
-    kernels.vector_add(config, &d_out, &d_a, &d_b, n, block_x)?;
+    kernels.vector_add(config, &d_out, &d_a, &d_b, n)?;
 }
 ```
 
 Bindings validate launch shape before entering HIP. They check grid/block
-sanity, `block_x` agreement, legacy `n`-sized buffer kernels, and explicit
-source-level buffer contracts such as:
+sanity, legacy `n`-sized buffer kernels, and explicit source-level buffer
+contracts such as:
 
 ```rust
 // rocm-oxide: len(frame)=pixel_count
@@ -237,6 +240,8 @@ cargo run --manifest-path tools/rocm-oxide-build/Cargo.toml -- \
 
 The parity checklist against official `NVlabs/cuda-oxide` is tracked in
 [docs/cuda-oxide-parity-checklist.md](/home/jack/Documents/GitKraken_Projects/ROCm-Oxide/docs/cuda-oxide-parity-checklist.md).
+Book-derived AMD adaptations are tracked in
+[docs/cuda-oxide-book-rocm-adaptation.md](/home/jack/Documents/GitKraken_Projects/ROCm-Oxide/docs/cuda-oxide-book-rocm-adaptation.md).
 
 There is also a cargo subcommand wrapper in
 [tools/cargo-rocm-oxide](/home/jack/Documents/GitKraken_Projects/ROCm-Oxide/tools/cargo-rocm-oxide/src/main.rs):
@@ -250,76 +255,6 @@ cargo run --manifest-path tools/cargo-rocm-oxide/Cargo.toml -- rocm-oxide pipeli
 ```
 
 When installed as `cargo-rocm-oxide`, those become `cargo rocm-oxide ...`.
-
-## Oxide Boost
-
-[tools/oxide-boost](/home/jack/Documents/GitKraken_Projects/ROCm-Oxide/tools/oxide-boost/src/main.rs)
-is the first system-facing performance tool. It is not DLSS and does not scale
-images. It works as a reversible launcher/patch manager for experiments such as
-shader-cache, state-cache, config, or drop-in runtime file changes.
-
-Open the native GUI:
-
-```bash
-cargo run --manifest-path tools/oxide-boost/Cargo.toml -- gui
-```
-
-GUI controls include typed path fields, `Ctrl+V` paste, `Ctrl+A` clear, native
-file/directory chooser buttons through Zenity, `Analyze Game`, and `Generate
-File`. The analyzer currently detects common Unity, Godot, and Unreal layouts.
-For Unity IL2CPP games such as Megabonk, it selects the safe text target
-`*_Data/boot.config` before considering binary asset/runtime replacement files.
-`Edge Analyze` flips that around and points at native runtime binaries such as
-`GameAssembly.so`; `Ghidra Report` runs a bounded headless Ghidra pass and writes
-a symbol/function report under the Oxide Boost cache.
-
-Analyze a game directory from the terminal:
-
-```bash
-cargo run --manifest-path tools/oxide-boost/Cargo.toml -- \
-  analyze /home/jack/.local/share/Steam/steamapps/common/Megabonk/
-```
-
-Enable edge-mode target selection and deeper binary inspection:
-
-```bash
-cargo run --manifest-path tools/oxide-boost/Cargo.toml -- \
-  analyze --edge /home/jack/.local/share/Steam/steamapps/common/Megabonk/
-
-cargo run --manifest-path tools/oxide-boost/Cargo.toml -- \
-  deep-analyze --ghidra /home/jack/.local/share/Steam/steamapps/common/Megabonk/
-```
-
-Launch a program with isolated persistent shader/cache paths:
-
-```bash
-cargo run --manifest-path tools/oxide-boost/Cargo.toml -- \
-  run --profile my-game -- /path/to/game-or-launcher
-```
-
-Apply a modified file into a game folder with an automatic backup and manifest:
-
-```bash
-cargo run --manifest-path tools/oxide-boost/Cargo.toml -- \
-  patch apply \
-  --profile my-game \
-  --game-dir /path/to/game \
-  --target relative/path/inside/game.file \
-  --modified /path/to/modified.file
-```
-
-Restore the original file:
-
-```bash
-cargo run --manifest-path tools/oxide-boost/Cargo.toml -- \
-  patch restore \
-  --profile my-game \
-  --game-dir /path/to/game \
-  --target relative/path/inside/game.file
-```
-
-`oxide-boost patch status` lists active patch manifests. The patch target must
-be relative to the game directory, and the tool refuses path traversal targets.
 
 ## Device Kernel Shape
 
@@ -336,9 +271,8 @@ pub unsafe extern "C" fn vector_add(
     a: *const f32,
     b: *const f32,
     n: usize,
-    block_x: u32,
 ) {
-    let i = gpu::global_id_x(block_x);
+    let i = gpu::global_id_x();
     if i < n {
         unsafe {
             *out.add(i) = *a.add(i) + *b.add(i);
@@ -352,8 +286,9 @@ kernel allowlist, so helper functions can remain ordinary device functions.
 
 [crates/rocm-oxide-device](/home/jack/Documents/GitKraken_Projects/ROCm-Oxide/crates/rocm-oxide-device/src/lib.rs)
 now wraps the raw AMDGPU intrinsics used by kernels. It provides thread/block
-IDs, global IDs, wavefront metadata, barriers, ballot/reduction helpers, and
-basic `u32` atomics so device code does not need to call
+IDs, dispatch-packet-derived block/grid dimensions, global IDs, wavefront
+metadata, barriers, dynamic launch-sized LDS pointers, ballot/reduction helpers,
+and basic `u32` atomics so device code does not need to call
 `core::arch::amdgpu` directly.
 
 ## Next Implementation Slice
