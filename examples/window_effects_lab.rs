@@ -174,7 +174,6 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 LaunchConfig::for_num_elems(output_pixels),
                 &device_frame,
                 &device_input,
-                output_pixels,
                 frame_index,
                 packed_mode,
             )?;

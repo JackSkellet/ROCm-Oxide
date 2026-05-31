@@ -168,7 +168,6 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                         kernels.rainbow_geometry(
                             LaunchConfig::for_num_elems_with_block_size(pixel_count, block_x),
                             &short,
-                            pixel_count,
                             WIDTH as u32,
                             HEIGHT as u32,
                             0,
@@ -290,7 +289,6 @@ fn render_mode(
             kernels.rainbow_geometry(
                 LaunchConfig::for_num_elems_with_block_size(pixel_count, block_x),
                 device_frame,
-                pixel_count,
                 WIDTH as u32,
                 HEIGHT as u32,
                 frame_index,
@@ -300,7 +298,6 @@ fn render_mode(
             kernels.stress_pattern(
                 LaunchConfig::for_num_elems_with_block_size(pixel_count, block_x),
                 device_frame,
-                pixel_count,
                 frame_index,
                 (frame_index / 90) & 7,
                 work_iters,
@@ -310,7 +307,6 @@ fn render_mode(
             kernels.stress_3d(
                 LaunchConfig::for_num_elems_with_block_size(pixel_count, block_x),
                 device_frame,
-                pixel_count,
                 frame_index,
                 (frame_index / 100) & 7,
                 work_iters.max(32),
@@ -324,7 +320,6 @@ fn render_mode(
                     LaunchConfig::for_num_elems_with_block_size(pixel_count, block_x),
                     device_frame,
                     device_camera,
-                    pixel_count,
                     frame_index,
                 )?;
             }

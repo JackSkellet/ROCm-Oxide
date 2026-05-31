@@ -178,7 +178,6 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     LaunchConfig::for_num_elems_with_block_size(pixel_count, block_x),
                     &device_frame,
                     &device_camera,
-                    pixel_count,
                     frame_index,
                 )?;
             }

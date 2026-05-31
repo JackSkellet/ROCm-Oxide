@@ -55,14 +55,13 @@ pub unsafe extern "C" fn affine_transform(
 
 #[kernel]
 pub unsafe extern "C" fn rainbow_geometry(
-    frame: *mut u32,
-    n: usize,
+    frame: gpu::DeviceSliceMut<u32>,
     width: u32,
     height: u32,
     frame_index: u32,
 ) {
     let i = gpu::global_id_x();
-    if i >= n {
+    if i >= frame.len() {
         return;
     }
 
@@ -93,21 +92,18 @@ pub unsafe extern "C" fn rainbow_geometry(
     let pulse = 96 + ((rings ^ diagonals) & 127);
     let rgb = wheel(hue, clamp_u32(pulse + grid, 0, 255));
 
-    unsafe {
-        *frame.add(i) = rgb;
-    }
+    unsafe { frame.write_unchecked(i, rgb) };
 }
 
 #[kernel]
 pub unsafe extern "C" fn stress_pattern(
-    frame: *mut u32,
-    n: usize,
+    frame: gpu::DeviceSliceMut<u32>,
     frame_index: u32,
     mode: u32,
     work_iters: u32,
 ) {
     let i = gpu::global_id_x();
-    if i >= n {
+    if i >= frame.len() {
         return;
     }
 
@@ -165,21 +161,18 @@ pub unsafe extern "C" fn stress_pattern(
     let intensity = 128 + ((v >> 24) & 95) + edge;
     let rgb = wheel(hue, clamp_u32(intensity, 0, 255));
 
-    unsafe {
-        *frame.add(i) = rgb;
-    }
+    unsafe { frame.write_unchecked(i, rgb) };
 }
 
 #[kernel]
 pub unsafe extern "C" fn stress_3d(
-    frame: *mut u32,
-    n: usize,
+    frame: gpu::DeviceSliceMut<u32>,
     frame_index: u32,
     mode: u32,
     work_iters: u32,
 ) {
     let i = gpu::global_id_x();
-    if i >= n {
+    if i >= frame.len() {
         return;
     }
 
@@ -289,41 +282,37 @@ pub unsafe extern "C" fn stress_3d(
         wheel(hue, clamp_u32(18 + sky + star, 0, 190))
     };
 
-    unsafe {
-        *frame.add(i) = rgb;
-    }
+    unsafe { frame.write_unchecked(i, rgb) };
 }
 
-// rocm-oxide: len(frame)=pixel_count
 // rocm-oxide: len(camera)=13
 #[kernel]
 pub unsafe extern "C" fn raytrace_world(
-    frame: *mut u32,
-    camera: *const f32,
-    pixel_count: usize,
+    frame: gpu::DeviceSliceMut<u32>,
+    camera: gpu::DeviceSlice<f32>,
     frame_index: u32,
 ) {
     let i = gpu::global_id_x();
-    if i >= pixel_count {
+    if i >= frame.len() {
         return;
     }
 
     let x = (i as u32) & 1023;
     let y = (i as u32) >> 10;
 
-    let cx = unsafe { *camera.add(0) };
-    let cy = unsafe { *camera.add(1) };
-    let cz = unsafe { *camera.add(2) };
-    let rx = unsafe { *camera.add(3) };
-    let ry = unsafe { *camera.add(4) };
-    let rz = unsafe { *camera.add(5) };
-    let ux = unsafe { *camera.add(6) };
-    let uy = unsafe { *camera.add(7) };
-    let uz = unsafe { *camera.add(8) };
-    let fx = unsafe { *camera.add(9) };
-    let fy = unsafe { *camera.add(10) };
-    let fz = unsafe { *camera.add(11) };
-    let flags = unsafe { *camera.add(12) } as u32;
+    let cx = unsafe { camera.read_unchecked(0) };
+    let cy = unsafe { camera.read_unchecked(1) };
+    let cz = unsafe { camera.read_unchecked(2) };
+    let rx = unsafe { camera.read_unchecked(3) };
+    let ry = unsafe { camera.read_unchecked(4) };
+    let rz = unsafe { camera.read_unchecked(5) };
+    let ux = unsafe { camera.read_unchecked(6) };
+    let uy = unsafe { camera.read_unchecked(7) };
+    let uz = unsafe { camera.read_unchecked(8) };
+    let fx = unsafe { camera.read_unchecked(9) };
+    let fy = unsafe { camera.read_unchecked(10) };
+    let fz = unsafe { camera.read_unchecked(11) };
+    let flags = unsafe { camera.read_unchecked(12) } as u32;
 
     let sx = ((x as f32) - 512.0) * (1.0 / 512.0);
     let sy = (288.0 - (y as f32)) * (1.0 / 512.0);
@@ -373,23 +362,18 @@ pub unsafe extern "C" fn raytrace_world(
         sky_color(dy)
     };
 
-    unsafe {
-        *frame.add(i) = rgb;
-    }
+    unsafe { frame.write_unchecked(i, rgb) };
 }
 
-// rocm-oxide: len(frame)=pixel_count
-// rocm-oxide: len(input)=pixel_count
 #[kernel]
 pub unsafe extern "C" fn window_fx(
-    frame: *mut u32,
-    input: *const u32,
-    pixel_count: usize,
+    frame: gpu::DeviceSliceMut<u32>,
+    input: gpu::DeviceSlice<u32>,
     frame_index: u32,
     mode: u32,
 ) {
     let i = gpu::global_id_x();
-    if i >= pixel_count {
+    if i >= frame.len() {
         return;
     }
 
@@ -429,9 +413,7 @@ pub unsafe extern "C" fn window_fx(
         let wy = fy / depth;
         let is_outside = wx < -1.0 || wx > 1.0 || wy < -0.5625 || wy > 0.5625;
         if is_outside {
-            unsafe {
-                *frame.add(i) = wheel((x ^ y).wrapping_add(frame_index) & 255, 26);
-            }
+            unsafe { frame.write_unchecked(i, wheel((x ^ y).wrapping_add(frame_index) & 255, 26)) };
             return;
         }
         src_xf = wx * (src_w as f32 * 0.5) + (src_w as f32 * 0.5);
@@ -447,11 +429,11 @@ pub unsafe extern "C" fn window_fx(
     let sx1 = min_u32(sx + 1, src_w - 1);
     let sy1 = min_u32(sy + 1, src_h - 1);
 
-    let center = unsafe { bilinear_input(input, sx, sy, sx1, sy1, fx, fy) };
-    let left = unsafe { sample_input(input, sx.saturating_sub(1), sy) };
-    let right = unsafe { sample_input(input, min_u32(sx + 1, src_w - 1), sy) };
-    let up = unsafe { sample_input(input, sx, sy.saturating_sub(1)) };
-    let down = unsafe { sample_input(input, sx, min_u32(sy + 1, src_h - 1)) };
+    let center = unsafe { bilinear_input(input.as_ptr(), sx, sy, sx1, sy1, fx, fy) };
+    let left = unsafe { sample_input(input.as_ptr(), sx.saturating_sub(1), sy) };
+    let right = unsafe { sample_input(input.as_ptr(), min_u32(sx + 1, src_w - 1), sy) };
+    let up = unsafe { sample_input(input.as_ptr(), sx, sy.saturating_sub(1)) };
+    let down = unsafe { sample_input(input.as_ptr(), sx, min_u32(sy + 1, src_h - 1)) };
 
     let cr = ((center >> 16) & 255) as i32;
     let cg = ((center >> 8) & 255) as i32;
@@ -474,18 +456,19 @@ pub unsafe extern "C" fn window_fx(
         let nx = clamp_i32(128 + (lx - rx), 0, 255) as u32;
         let ny = clamp_i32(128 + (uy - dy), 0, 255) as u32;
         let nz = 220u32.saturating_sub(((abs_i32(lx - rx) + abs_i32(uy - dy)) as u32) >> 1);
-        unsafe {
-            *frame.add(i) = (nx << 16) | (ny << 8) | nz;
-        }
+        unsafe { frame.write_unchecked(i, (nx << 16) | (ny << 8) | nz) };
         return;
     } else if m == 6 {
         let depth = luminance(center) as u32;
         unsafe {
-            *frame.add(i) = wheel(
-                (170u32.saturating_sub(depth >> 1)).wrapping_add(t) & 255,
-                depth,
-            );
-        }
+            frame.write_unchecked(
+                i,
+                wheel(
+                    (170u32.saturating_sub(depth >> 1)).wrapping_add(t) & 255,
+                    depth,
+                ),
+            )
+        };
         return;
     }
 
@@ -517,9 +500,7 @@ pub unsafe extern "C" fn window_fx(
         b = clamp_i32((b as i32 * shade) >> 8, 0, 255) as u32;
     }
 
-    unsafe {
-        *frame.add(i) = (r << 16) | (g << 8) | b;
-    }
+    unsafe { frame.write_unchecked(i, (r << 16) | (g << 8) | b) };
 }
 
 // rocm-oxide: len(frame)=pixel_count
@@ -527,14 +508,15 @@ pub unsafe extern "C" fn window_fx(
 // rocm-oxide: len(depth)=pixel_count/4
 #[kernel]
 pub unsafe extern "C" fn depth_aware_upscale(
-    frame: *mut u32,
-    color: *const u32,
-    depth: *const f32,
+    frame: gpu::DeviceSliceMut<u32>,
+    color: gpu::DeviceSlice<u32>,
+    depth: gpu::DeviceSlice<f32>,
     pixel_count: usize,
     mode: u32,
 ) {
     let i = gpu::global_id_x();
-    if i >= pixel_count {
+    let _ = pixel_count;
+    if i >= frame.len() {
         return;
     }
 
@@ -551,18 +533,18 @@ pub unsafe extern "C" fn depth_aware_upscale(
     let fx = src_xf - sx as f32;
     let fy = src_yf - sy as f32;
 
-    let d00 = unsafe { sample_depth_512(depth, sx, sy) };
-    let d10 = unsafe { sample_depth_512(depth, sx1, sy) };
-    let d01 = unsafe { sample_depth_512(depth, sx, sy1) };
-    let d11 = unsafe { sample_depth_512(depth, sx1, sy1) };
+    let d00 = unsafe { sample_depth_512(depth.as_ptr(), sx, sy) };
+    let d10 = unsafe { sample_depth_512(depth.as_ptr(), sx1, sy) };
+    let d01 = unsafe { sample_depth_512(depth.as_ptr(), sx, sy1) };
+    let d11 = unsafe { sample_depth_512(depth.as_ptr(), sx1, sy1) };
     let min_d = min_f32(min_f32(d00, d10), min_f32(d01, d11));
     let max_d = max_f32(max_f32(d00, d10), max_f32(d01, d11));
     let edge = max_d - min_d;
 
     let nearest_x = if fx < 0.5 { sx } else { sx1 };
     let nearest_y = if fy < 0.5 { sy } else { sy1 };
-    let nearest = unsafe { sample_color_512(color, nearest_x, nearest_y) };
-    let smooth = unsafe { bilinear_color_512(color, sx, sy, sx1, sy1, fx, fy) };
+    let nearest = unsafe { sample_color_512(color.as_ptr(), nearest_x, nearest_y) };
+    let smooth = unsafe { bilinear_color_512(color.as_ptr(), sx, sy, sx1, sy1, fx, fy) };
     let mut rgb = if edge > 0.09 { nearest } else { smooth };
 
     if (mode & 15) == 1 {
@@ -576,9 +558,7 @@ pub unsafe extern "C" fn depth_aware_upscale(
         rgb = sharpen_rgb(rgb, nearest, sharp);
     }
 
-    unsafe {
-        *frame.add(i) = rgb;
-    }
+    unsafe { frame.write_unchecked(i, rgb) };
 }
 
 // rocm-oxide: len(frame)=pixel_count
@@ -589,17 +569,18 @@ pub unsafe extern "C" fn depth_aware_upscale(
 // rocm-oxide: len(prev_history)=pixel_count
 #[kernel]
 pub unsafe extern "C" fn temporal_reconstruct_upscale(
-    frame: *mut u32,
-    history_out: *mut u32,
-    color: *const u32,
-    depth: *const f32,
-    motion_reactive: *const f32,
-    prev_history: *const u32,
+    frame: gpu::DeviceSliceMut<u32>,
+    history_out: gpu::DeviceSliceMut<u32>,
+    color: gpu::DeviceSlice<u32>,
+    depth: gpu::DeviceSlice<f32>,
+    motion_reactive: gpu::DeviceSlice<f32>,
+    prev_history: gpu::DeviceSlice<u32>,
     pixel_count: usize,
     mode: u32,
 ) {
     let i = gpu::global_id_x();
-    if i >= pixel_count {
+    let _ = pixel_count;
+    if i >= frame.len() {
         return;
     }
 
@@ -616,10 +597,10 @@ pub unsafe extern "C" fn temporal_reconstruct_upscale(
     let fx = src_xf - sx as f32;
     let fy = src_yf - sy as f32;
 
-    let current_smooth = unsafe { bilinear_color_512(color, sx, sy, sx1, sy1, fx, fy) };
+    let current_smooth = unsafe { bilinear_color_512(color.as_ptr(), sx, sy, sx1, sy1, fx, fy) };
     let current_nearest = unsafe {
         sample_color_512(
-            color,
+            color.as_ptr(),
             if fx < 0.5 { sx } else { sx1 },
             if fy < 0.5 { sy } else { sy1 },
         )
@@ -639,13 +620,13 @@ pub unsafe extern "C" fn temporal_reconstruct_upscale(
         while ox <= 1 {
             let nx = clamp_i32(base_x + ox, 0, 511) as u32;
             let ny = clamp_i32(base_y + oy, 0, 287) as u32;
-            let d = unsafe { sample_depth_512(depth, nx, ny) };
+            let d = unsafe { sample_depth_512(depth.as_ptr(), nx, ny) };
             farthest_depth = max_f32(farthest_depth, d);
             if d < nearest_depth {
                 nearest_depth = d;
-                motion_x = unsafe { sample_aux_512(motion_reactive, nx, ny, 0) };
-                motion_y = unsafe { sample_aux_512(motion_reactive, nx, ny, 1) };
-                reactive = unsafe { sample_aux_512(motion_reactive, nx, ny, 2) };
+                motion_x = unsafe { sample_aux_512(motion_reactive.as_ptr(), nx, ny, 0) };
+                motion_y = unsafe { sample_aux_512(motion_reactive.as_ptr(), nx, ny, 1) };
+                reactive = unsafe { sample_aux_512(motion_reactive.as_ptr(), nx, ny, 2) };
             }
             ox += 1;
         }
@@ -655,7 +636,7 @@ pub unsafe extern "C" fn temporal_reconstruct_upscale(
     let edge = clamp_f32((farthest_depth - nearest_depth) * 7.0, 0.0, 1.0);
     let prev_x = clamp_f32(x as f32 + motion_x, 0.0, 1023.0);
     let prev_y = clamp_f32(y as f32 + motion_y, 0.0, 575.0);
-    let history = unsafe { bilinear_history_1024(prev_history, prev_x, prev_y) };
+    let history = unsafe { bilinear_history_1024(prev_history.as_ptr(), prev_x, prev_y) };
 
     let current_weight = clamp_f32(0.14 + reactive * 0.86 + edge * 0.48, 0.10, 1.0);
     let mut rgb = mix_color(history, current, current_weight);
@@ -684,21 +665,22 @@ pub unsafe extern "C" fn temporal_reconstruct_upscale(
     }
 
     unsafe {
-        *frame.add(i) = rgb;
-        *history_out.add(i) = rgb;
+        frame.write_unchecked(i, rgb);
+        history_out.write_unchecked(i, rgb);
     }
 }
 
 // rocm-oxide: len(frame)=pixel_count
 #[kernel]
 pub unsafe extern "C" fn bvh_raytrace(
-    frame: *mut u32,
-    scene: *const f32,
+    frame: gpu::DeviceSliceMut<u32>,
+    scene: gpu::DeviceSlice<f32>,
     pixel_count: usize,
     mode: u32,
 ) {
     let i = gpu::global_id_x();
-    if i >= pixel_count {
+    let _ = pixel_count;
+    if i >= frame.len() {
         return;
     }
 
@@ -717,15 +699,16 @@ pub unsafe extern "C" fn bvh_raytrace(
     dy *= inv_len;
     dz *= inv_len;
 
-    let sphere_count = unsafe { *scene.add(0) } as u32;
-    let node_count = unsafe { *scene.add(1) } as u32;
-    let node_offset = unsafe { *scene.add(2) } as u32;
+    let scene_ptr = scene.as_ptr();
+    let sphere_count = unsafe { scene.read_unchecked(0) } as u32;
+    let node_count = unsafe { scene.read_unchecked(1) } as u32;
+    let node_offset = unsafe { scene.read_unchecked(2) } as u32;
 
     let (hit_t, hit_index) = if (mode & 1) == 0 {
-        trace_spheres_brute(scene, sphere_count, ox, oy, oz, dx, dy, dz)
+        trace_spheres_brute(scene_ptr, sphere_count, ox, oy, oz, dx, dy, dz)
     } else {
         trace_spheres_bvh(
-            scene,
+            scene_ptr,
             sphere_count,
             node_count,
             node_offset,
@@ -739,7 +722,7 @@ pub unsafe extern "C" fn bvh_raytrace(
     };
 
     let rgb = if hit_index >= 0 {
-        shade_scene_sphere(scene, hit_index as u32, ox, oy, oz, dx, dy, dz, hit_t)
+        shade_scene_sphere(scene_ptr, hit_index as u32, ox, oy, oz, dx, dy, dz, hit_t)
     } else if dy < -0.0001 {
         let t = (-1.35 - oy) / dy;
         let gx = ox + dx * t;
@@ -750,9 +733,7 @@ pub unsafe extern "C" fn bvh_raytrace(
         sky_color(dy)
     };
 
-    unsafe {
-        *frame.add(i) = rgb;
-    }
+    unsafe { frame.write_unchecked(i, rgb) };
 }
 
 fn trace_spheres_brute(

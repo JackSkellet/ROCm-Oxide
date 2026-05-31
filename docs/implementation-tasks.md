@@ -13,7 +13,7 @@ features on top of stronger contracts.
   - [x] teach generated bindings to pass pointer/length pairs automatically
   - [x] reject obvious mutable-buffer aliasing before launch
   - [x] convert simple kernels before large demo kernels
-  - [ ] convert image, upscaling, stress, and raytrace kernels
+  - [x] convert image, upscaling, stress, and raytrace kernels
 - [ ] Constant/global memory source markers:
   - [ ] add a marker such as `#[device_global]` or `#[constant]`
   - [ ] lower marked globals with ROCm address-space awareness

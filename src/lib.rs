@@ -150,6 +150,223 @@ macro_rules! launch {
         ];
         $kernel.launch_raw($config, &mut params)
     }};
+    ($kernel:expr, $config:expr, $a0:expr, $a1:expr, $a2:expr, $a3:expr, $a4:expr, $a5:expr, $a6:expr, $a7:expr, $a8:expr, $a9:expr $(,)?) => {{
+        let mut a0 = $a0;
+        let mut a1 = $a1;
+        let mut a2 = $a2;
+        let mut a3 = $a3;
+        let mut a4 = $a4;
+        let mut a5 = $a5;
+        let mut a6 = $a6;
+        let mut a7 = $a7;
+        let mut a8 = $a8;
+        let mut a9 = $a9;
+        let mut params = [
+            $crate::__private::arg_ptr(&mut a0),
+            $crate::__private::arg_ptr(&mut a1),
+            $crate::__private::arg_ptr(&mut a2),
+            $crate::__private::arg_ptr(&mut a3),
+            $crate::__private::arg_ptr(&mut a4),
+            $crate::__private::arg_ptr(&mut a5),
+            $crate::__private::arg_ptr(&mut a6),
+            $crate::__private::arg_ptr(&mut a7),
+            $crate::__private::arg_ptr(&mut a8),
+            $crate::__private::arg_ptr(&mut a9),
+        ];
+        $kernel.launch_raw($config, &mut params)
+    }};
+    ($kernel:expr, $config:expr, $a0:expr, $a1:expr, $a2:expr, $a3:expr, $a4:expr, $a5:expr, $a6:expr, $a7:expr, $a8:expr, $a9:expr, $a10:expr $(,)?) => {{
+        let mut a0 = $a0;
+        let mut a1 = $a1;
+        let mut a2 = $a2;
+        let mut a3 = $a3;
+        let mut a4 = $a4;
+        let mut a5 = $a5;
+        let mut a6 = $a6;
+        let mut a7 = $a7;
+        let mut a8 = $a8;
+        let mut a9 = $a9;
+        let mut a10 = $a10;
+        let mut params = [
+            $crate::__private::arg_ptr(&mut a0),
+            $crate::__private::arg_ptr(&mut a1),
+            $crate::__private::arg_ptr(&mut a2),
+            $crate::__private::arg_ptr(&mut a3),
+            $crate::__private::arg_ptr(&mut a4),
+            $crate::__private::arg_ptr(&mut a5),
+            $crate::__private::arg_ptr(&mut a6),
+            $crate::__private::arg_ptr(&mut a7),
+            $crate::__private::arg_ptr(&mut a8),
+            $crate::__private::arg_ptr(&mut a9),
+            $crate::__private::arg_ptr(&mut a10),
+        ];
+        $kernel.launch_raw($config, &mut params)
+    }};
+    ($kernel:expr, $config:expr, $a0:expr, $a1:expr, $a2:expr, $a3:expr, $a4:expr, $a5:expr, $a6:expr, $a7:expr, $a8:expr, $a9:expr, $a10:expr, $a11:expr $(,)?) => {{
+        let mut a0 = $a0;
+        let mut a1 = $a1;
+        let mut a2 = $a2;
+        let mut a3 = $a3;
+        let mut a4 = $a4;
+        let mut a5 = $a5;
+        let mut a6 = $a6;
+        let mut a7 = $a7;
+        let mut a8 = $a8;
+        let mut a9 = $a9;
+        let mut a10 = $a10;
+        let mut a11 = $a11;
+        let mut params = [
+            $crate::__private::arg_ptr(&mut a0),
+            $crate::__private::arg_ptr(&mut a1),
+            $crate::__private::arg_ptr(&mut a2),
+            $crate::__private::arg_ptr(&mut a3),
+            $crate::__private::arg_ptr(&mut a4),
+            $crate::__private::arg_ptr(&mut a5),
+            $crate::__private::arg_ptr(&mut a6),
+            $crate::__private::arg_ptr(&mut a7),
+            $crate::__private::arg_ptr(&mut a8),
+            $crate::__private::arg_ptr(&mut a9),
+            $crate::__private::arg_ptr(&mut a10),
+            $crate::__private::arg_ptr(&mut a11),
+        ];
+        $kernel.launch_raw($config, &mut params)
+    }};
+    ($kernel:expr, $config:expr, $a0:expr, $a1:expr, $a2:expr, $a3:expr, $a4:expr, $a5:expr, $a6:expr, $a7:expr, $a8:expr, $a9:expr, $a10:expr, $a11:expr, $a12:expr $(,)?) => {{
+        let mut a0 = $a0;
+        let mut a1 = $a1;
+        let mut a2 = $a2;
+        let mut a3 = $a3;
+        let mut a4 = $a4;
+        let mut a5 = $a5;
+        let mut a6 = $a6;
+        let mut a7 = $a7;
+        let mut a8 = $a8;
+        let mut a9 = $a9;
+        let mut a10 = $a10;
+        let mut a11 = $a11;
+        let mut a12 = $a12;
+        let mut params = [
+            $crate::__private::arg_ptr(&mut a0),
+            $crate::__private::arg_ptr(&mut a1),
+            $crate::__private::arg_ptr(&mut a2),
+            $crate::__private::arg_ptr(&mut a3),
+            $crate::__private::arg_ptr(&mut a4),
+            $crate::__private::arg_ptr(&mut a5),
+            $crate::__private::arg_ptr(&mut a6),
+            $crate::__private::arg_ptr(&mut a7),
+            $crate::__private::arg_ptr(&mut a8),
+            $crate::__private::arg_ptr(&mut a9),
+            $crate::__private::arg_ptr(&mut a10),
+            $crate::__private::arg_ptr(&mut a11),
+            $crate::__private::arg_ptr(&mut a12),
+        ];
+        $kernel.launch_raw($config, &mut params)
+    }};
+    ($kernel:expr, $config:expr, $a0:expr, $a1:expr, $a2:expr, $a3:expr, $a4:expr, $a5:expr, $a6:expr, $a7:expr, $a8:expr, $a9:expr, $a10:expr, $a11:expr, $a12:expr, $a13:expr $(,)?) => {{
+        let mut a0 = $a0;
+        let mut a1 = $a1;
+        let mut a2 = $a2;
+        let mut a3 = $a3;
+        let mut a4 = $a4;
+        let mut a5 = $a5;
+        let mut a6 = $a6;
+        let mut a7 = $a7;
+        let mut a8 = $a8;
+        let mut a9 = $a9;
+        let mut a10 = $a10;
+        let mut a11 = $a11;
+        let mut a12 = $a12;
+        let mut a13 = $a13;
+        let mut params = [
+            $crate::__private::arg_ptr(&mut a0),
+            $crate::__private::arg_ptr(&mut a1),
+            $crate::__private::arg_ptr(&mut a2),
+            $crate::__private::arg_ptr(&mut a3),
+            $crate::__private::arg_ptr(&mut a4),
+            $crate::__private::arg_ptr(&mut a5),
+            $crate::__private::arg_ptr(&mut a6),
+            $crate::__private::arg_ptr(&mut a7),
+            $crate::__private::arg_ptr(&mut a8),
+            $crate::__private::arg_ptr(&mut a9),
+            $crate::__private::arg_ptr(&mut a10),
+            $crate::__private::arg_ptr(&mut a11),
+            $crate::__private::arg_ptr(&mut a12),
+            $crate::__private::arg_ptr(&mut a13),
+        ];
+        $kernel.launch_raw($config, &mut params)
+    }};
+    ($kernel:expr, $config:expr, $a0:expr, $a1:expr, $a2:expr, $a3:expr, $a4:expr, $a5:expr, $a6:expr, $a7:expr, $a8:expr, $a9:expr, $a10:expr, $a11:expr, $a12:expr, $a13:expr, $a14:expr $(,)?) => {{
+        let mut a0 = $a0;
+        let mut a1 = $a1;
+        let mut a2 = $a2;
+        let mut a3 = $a3;
+        let mut a4 = $a4;
+        let mut a5 = $a5;
+        let mut a6 = $a6;
+        let mut a7 = $a7;
+        let mut a8 = $a8;
+        let mut a9 = $a9;
+        let mut a10 = $a10;
+        let mut a11 = $a11;
+        let mut a12 = $a12;
+        let mut a13 = $a13;
+        let mut a14 = $a14;
+        let mut params = [
+            $crate::__private::arg_ptr(&mut a0),
+            $crate::__private::arg_ptr(&mut a1),
+            $crate::__private::arg_ptr(&mut a2),
+            $crate::__private::arg_ptr(&mut a3),
+            $crate::__private::arg_ptr(&mut a4),
+            $crate::__private::arg_ptr(&mut a5),
+            $crate::__private::arg_ptr(&mut a6),
+            $crate::__private::arg_ptr(&mut a7),
+            $crate::__private::arg_ptr(&mut a8),
+            $crate::__private::arg_ptr(&mut a9),
+            $crate::__private::arg_ptr(&mut a10),
+            $crate::__private::arg_ptr(&mut a11),
+            $crate::__private::arg_ptr(&mut a12),
+            $crate::__private::arg_ptr(&mut a13),
+            $crate::__private::arg_ptr(&mut a14),
+        ];
+        $kernel.launch_raw($config, &mut params)
+    }};
+    ($kernel:expr, $config:expr, $a0:expr, $a1:expr, $a2:expr, $a3:expr, $a4:expr, $a5:expr, $a6:expr, $a7:expr, $a8:expr, $a9:expr, $a10:expr, $a11:expr, $a12:expr, $a13:expr, $a14:expr, $a15:expr $(,)?) => {{
+        let mut a0 = $a0;
+        let mut a1 = $a1;
+        let mut a2 = $a2;
+        let mut a3 = $a3;
+        let mut a4 = $a4;
+        let mut a5 = $a5;
+        let mut a6 = $a6;
+        let mut a7 = $a7;
+        let mut a8 = $a8;
+        let mut a9 = $a9;
+        let mut a10 = $a10;
+        let mut a11 = $a11;
+        let mut a12 = $a12;
+        let mut a13 = $a13;
+        let mut a14 = $a14;
+        let mut a15 = $a15;
+        let mut params = [
+            $crate::__private::arg_ptr(&mut a0),
+            $crate::__private::arg_ptr(&mut a1),
+            $crate::__private::arg_ptr(&mut a2),
+            $crate::__private::arg_ptr(&mut a3),
+            $crate::__private::arg_ptr(&mut a4),
+            $crate::__private::arg_ptr(&mut a5),
+            $crate::__private::arg_ptr(&mut a6),
+            $crate::__private::arg_ptr(&mut a7),
+            $crate::__private::arg_ptr(&mut a8),
+            $crate::__private::arg_ptr(&mut a9),
+            $crate::__private::arg_ptr(&mut a10),
+            $crate::__private::arg_ptr(&mut a11),
+            $crate::__private::arg_ptr(&mut a12),
+            $crate::__private::arg_ptr(&mut a13),
+            $crate::__private::arg_ptr(&mut a14),
+            $crate::__private::arg_ptr(&mut a15),
+        ];
+        $kernel.launch_raw($config, &mut params)
+    }};
 }
 
 #[doc(hidden)]

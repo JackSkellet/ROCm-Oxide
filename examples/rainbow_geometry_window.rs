@@ -37,7 +37,6 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             kernels.rainbow_geometry(
                 LaunchConfig::for_num_elems_with_block_size(n, block_x),
                 &device_frame,
-                n,
                 WIDTH as u32,
                 HEIGHT as u32,
                 frame_index,

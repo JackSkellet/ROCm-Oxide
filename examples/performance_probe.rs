@@ -109,7 +109,7 @@ fn probe_stress_3d(
 
     for steps in [32u32, 96, 256, 1024, 3000] {
         let ms = time_gpu_ms(iterations_for_ms_probe(steps), || unsafe {
-            kernels.stress_3d(config, &frame, PIXELS, 17, 2, steps)
+            kernels.stress_3d(config, &frame, 17, 2, steps)
         })?;
         record_sample(
             samples,
@@ -137,7 +137,7 @@ fn probe_stress_pattern(
 
     for steps in [32u32, 96, 256, 1024, 3000] {
         let ms = time_gpu_ms(iterations_for_ms_probe(steps), || unsafe {
-            kernels.stress_pattern(config, &frame, PIXELS, 17, 5, steps)
+            kernels.stress_pattern(config, &frame, 17, 5, steps)
         })?;
         record_sample(
             samples,
@@ -167,7 +167,7 @@ fn probe_raytrace_world(
     let config = LaunchConfig::for_num_elems_with_block_size(PIXELS, BLOCK_X);
 
     let ms = time_gpu_ms(24, || unsafe {
-        kernels.raytrace_world(config, &frame, &camera, PIXELS, 17)
+        kernels.raytrace_world(config, &frame, &camera, 17)
     })?;
     record_sample(
         samples,
