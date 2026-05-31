@@ -197,8 +197,19 @@ pub mod atomic {
         }
     }
 
+    unsafe extern "C" {
+        #[link_name = "__rocm_oxide_atomic_scope_workgroup"]
+        fn mark_atomic_scope_workgroup(ptr: *const u32);
+        #[link_name = "__rocm_oxide_atomic_scope_device"]
+        fn mark_atomic_scope_device(ptr: *const u32);
+        #[link_name = "__rocm_oxide_atomic_scope_system"]
+        fn mark_atomic_scope_system(ptr: *const u32);
+    }
+
     pub trait Scope {
         const SCOPE: AtomicScope;
+
+        unsafe fn mark_atomic_u32(ptr: *const u32);
     }
 
     pub enum Workgroup {}
@@ -207,14 +218,29 @@ pub mod atomic {
 
     impl Scope for Workgroup {
         const SCOPE: AtomicScope = AtomicScope::Workgroup;
+
+        #[inline(always)]
+        unsafe fn mark_atomic_u32(ptr: *const u32) {
+            unsafe { mark_atomic_scope_workgroup(ptr) };
+        }
     }
 
     impl Scope for Device {
         const SCOPE: AtomicScope = AtomicScope::Device;
+
+        #[inline(always)]
+        unsafe fn mark_atomic_u32(ptr: *const u32) {
+            unsafe { mark_atomic_scope_device(ptr) };
+        }
     }
 
     impl Scope for System {
         const SCOPE: AtomicScope = AtomicScope::System;
+
+        #[inline(always)]
+        unsafe fn mark_atomic_u32(ptr: *const u32) {
+            unsafe { mark_atomic_scope_system(ptr) };
+        }
     }
 
     #[repr(transparent)]
@@ -241,19 +267,19 @@ pub mod atomic {
 
         #[inline(always)]
         pub fn load(&self, ordering: AtomicOrdering) -> u32 {
-            let _ = S::SCOPE;
+            unsafe { S::mark_atomic_u32(self as *const Self as *const u32) };
             self.inner.load(ordering.as_core())
         }
 
         #[inline(always)]
         pub fn store(&self, value: u32, ordering: AtomicOrdering) {
-            let _ = S::SCOPE;
+            unsafe { S::mark_atomic_u32(self as *const Self as *const u32) };
             self.inner.store(value, ordering.as_core());
         }
 
         #[inline(always)]
         pub fn fetch_add(&self, value: u32, ordering: AtomicOrdering) -> u32 {
-            let _ = S::SCOPE;
+            unsafe { S::mark_atomic_u32(self as *const Self as *const u32) };
             self.inner.fetch_add(value, ordering.as_core())
         }
     }

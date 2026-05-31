@@ -305,14 +305,16 @@ This roadmap is grounded in the current local probe target:
   1024, max waves per CU 32, and 64 KB group/LDS segment.
 - Current generated artifact: 13 kernels, max VGPR 33, max SGPR 26, max kernarg
   368 bytes, static LDS 0, no dynamic stack users.
-- Current scoped atomic IR reaches global-memory `atomicrmw ... monotonic`, but
-  does not yet emit explicit LLVM `syncscope`.
+- Current scoped atomic IR reaches global-memory `atomicrmw` with explicit
+  `syncscope("workgroup")` or `syncscope("agent")` where requested. System scope
+  uses the AMDGPU backend default because this LLVM build rejects explicit
+  non-inclusive `syncscope("system")`.
 
 ### P0: Backend Correctness
 
-- Scope-specific atomic lowering: preserve workgroup/device/system intent through
-  the IR pass, lower it to AMDGPU LLVM memory scopes/orderings, and verify the
-  resulting IR/ISA against coarse-grained, fine-grained, and host-visible memory.
+- Scope-specific atomic verification: preserve the new workgroup/device
+  `syncscope` lowering, document the system-scope default, and verify resulting
+  IR/ISA against coarse-grained, fine-grained, and host-visible memory.
 - LDS/shared-memory completeness: add a real tiled/reduction kernel using dynamic
   LDS, validate requested shared memory against device and kernel limits, and
   report static plus dynamic LDS in generated metadata and bindings.

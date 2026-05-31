@@ -1610,6 +1610,9 @@ fn transform_ir(
                 device_globals,
             ));
         } else {
+            if atomic_scope_marker(line).is_some() || is_atomic_scope_marker_declaration(line) {
+                continue;
+            }
             output.push(rewrite_kernel_attributes(&rewrite_marked_globals(
                 line,
                 device_globals,
@@ -1738,11 +1741,16 @@ fn rewrite_kernel_body(
     device_globals: &BTreeMap<String, DeviceGlobal>,
 ) -> Vec<String> {
     let mut rewritten = Vec::with_capacity(lines.len());
+    let mut pending_atomic_scope = None;
 
     for line in lines {
         let mut current = rewrite_marked_globals(&line, device_globals);
         for (name, address_space) in &pointer_addrspaces {
             current = rewrite_pointer_operand(&current, name, address_space);
+        }
+        if let Some(scope) = atomic_scope_marker(&current) {
+            pending_atomic_scope = Some(scope);
+            continue;
         }
         if current.contains(" phi ptr ")
             && let Some(address_space) = pointer_addrspaces.iter().find_map(|(name, space)| {
@@ -1772,11 +1780,91 @@ fn rewrite_kernel_body(
         {
             pointer_addrspaces.insert(result, address_space);
         }
+        if let Some(scope) = pending_atomic_scope
+            && is_atomic_instruction(&current)
+        {
+            current = rewrite_atomic_syncscope(&current, scope);
+            pending_atomic_scope = None;
+        }
 
         rewritten.push(rewrite_kernel_attributes(&current));
     }
 
     rewritten
+}
+
+#[derive(Clone, Copy)]
+enum AtomicSyncScope {
+    Workgroup,
+    Agent,
+    System,
+}
+
+impl AtomicSyncScope {
+    fn llvm_name(self) -> Option<&'static str> {
+        match self {
+            Self::Workgroup => Some("workgroup"),
+            Self::Agent => Some("agent"),
+            Self::System => None,
+        }
+    }
+}
+
+fn atomic_scope_marker(line: &str) -> Option<AtomicSyncScope> {
+    if line.contains("@__rocm_oxide_atomic_scope_workgroup(") {
+        Some(AtomicSyncScope::Workgroup)
+    } else if line.contains("@__rocm_oxide_atomic_scope_device(") {
+        Some(AtomicSyncScope::Agent)
+    } else if line.contains("@__rocm_oxide_atomic_scope_system(") {
+        Some(AtomicSyncScope::System)
+    } else {
+        None
+    }
+}
+
+fn is_atomic_scope_marker_declaration(line: &str) -> bool {
+    line.trim_start().starts_with("declare ")
+        && line.contains("@__rocm_oxide_atomic_scope_")
+}
+
+fn is_atomic_instruction(line: &str) -> bool {
+    line.contains(" atomicrmw ")
+        || line.trim_start().starts_with("atomicrmw ")
+        || line.contains(" load atomic ")
+        || line.trim_start().starts_with("load atomic ")
+        || line.contains(" store atomic ")
+        || line.trim_start().starts_with("store atomic ")
+        || line.contains(" cmpxchg ")
+        || line.trim_start().starts_with("cmpxchg ")
+}
+
+fn rewrite_atomic_syncscope(line: &str, scope: AtomicSyncScope) -> String {
+    if line.contains(" syncscope(") {
+        return line.to_string();
+    }
+    let Some(scope_name) = scope.llvm_name() else {
+        return line.to_string();
+    };
+
+    for ordering in ["unordered", "monotonic", "acquire", "release", "acq_rel", "seq_cst"] {
+        for needle in [format!(" {ordering},"), format!(" {ordering} ")] {
+            if let Some(pos) = line.find(&needle) {
+                let mut rewritten = line.to_string();
+                rewritten.insert_str(pos, &format!(" syncscope(\"{scope_name}\")"));
+                return rewritten;
+            }
+        }
+        if let Some(prefix) = line.strip_suffix(ordering)
+            && prefix.ends_with(' ')
+        {
+            let pos = prefix.len() - 1;
+            let mut rewritten = line.to_string();
+            rewritten.insert_str(pos, &format!(" syncscope(\"{scope_name}\")"));
+            return rewritten;
+        }
+    }
+
+    line.to_string()
 }
 
 fn rewrite_pointer_operand(line: &str, name: &str, address_space: &str) -> String {
@@ -3106,6 +3194,49 @@ pub unsafe extern "C" fn pointer_ops(out: *mut u32, fallback: *mut u32, cond: bo
             output.contains("%phi = phi ptr addrspace(1) [ %selected, %start ], [ %gep, %start ]")
         );
         assert!(output.contains("store i32 7, ptr addrspace(1) %phi"));
+    }
+
+    #[test]
+    fn rewrites_atomic_scope_markers_to_llvm_syncscopes() {
+        let input = r#"; ModuleID = 'sample'
+target triple = "amdgcn-amd-amdhsa"
+
+define void @scoped(ptr noundef %counters) unnamed_addr #0 {
+start:
+  call void @__rocm_oxide_atomic_scope_workgroup(ptr %counters)
+  %wg = atomicrmw add ptr %counters, i32 1 monotonic, align 4
+  call void @__rocm_oxide_atomic_scope_device(ptr %counters)
+  %dev = atomicrmw add ptr %counters, i32 1 monotonic, align 4
+  call void @__rocm_oxide_atomic_scope_system(ptr %counters)
+  %sys = load atomic i32, ptr %counters acquire, align 4
+  ret void
+}
+
+declare void @__rocm_oxide_atomic_scope_workgroup(ptr)
+declare void @__rocm_oxide_atomic_scope_device(ptr)
+declare void @__rocm_oxide_atomic_scope_system(ptr)
+
+attributes #0 = { nounwind "target-cpu"="gfx1201" }
+"#;
+        let decls = kernel_map(
+            r#"
+#[kernel]
+pub unsafe extern "C" fn scoped(counters: *mut u32) {}
+"#,
+        );
+        let kernels = decls.keys().cloned().collect::<BTreeSet<_>>();
+        let output =
+            transform_ir(input, &kernels, &decls, &BTreeMap::new()).expect("transform should succeed");
+        assert!(output.contains(
+            "%wg = atomicrmw add ptr addrspace(1) %counters, i32 1 syncscope(\"workgroup\") monotonic, align 4"
+        ));
+        assert!(output.contains(
+            "%dev = atomicrmw add ptr addrspace(1) %counters, i32 1 syncscope(\"agent\") monotonic, align 4"
+        ));
+        assert!(output.contains(
+            "%sys = load atomic i32, ptr addrspace(1) %counters acquire, align 4"
+        ));
+        assert!(!output.contains("__rocm_oxide_atomic_scope_"));
     }
 
     #[test]

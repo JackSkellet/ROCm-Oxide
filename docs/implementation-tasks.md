@@ -41,16 +41,19 @@ Local probes on 2026-05-31:
   max waves per CU 32, 64 KB group/LDS segment.
 - Current generated artifact: 13 kernels, max VGPR 33, max SGPR 26, max
   kernarg 368 bytes, static LDS 0, no dynamic stack users.
-- Current scoped atomic IR uses `atomicrmw ... monotonic` in global address
-  space, but does not yet emit explicit LLVM `syncscope`.
+- Current scoped atomic IR emits global-memory `atomicrmw` with explicit
+  `syncscope("workgroup")` or `syncscope("agent")` where requested. System scope
+  intentionally uses the AMDGPU backend default because the local LLVM backend
+  rejects explicit non-inclusive `syncscope("system")`.
 
 ## Next Roadmap
 
 ### P0: Backend Correctness
 
 - [ ] Scope-specific atomic lowering:
-  - [ ] preserve source-level workgroup/device/system scope markers through IR
-  - [ ] lower atomic ordering and scope to AMDGPU LLVM `syncscope`/memory model
+  - [x] preserve source-level workgroup/device/system scope markers through IR
+  - [x] lower workgroup/device scope to AMDGPU LLVM `syncscope` and keep system
+        scope on the backend default
   - [ ] verify IR and ISA for coarse-grained, fine-grained, and host-visible memory
   - [ ] add negative docs/tests for system-scope atomics that downgrade on coarse memory
 - [ ] LDS/shared-memory completeness:
