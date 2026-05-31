@@ -42,6 +42,55 @@ pub unsafe extern "C" fn vector_add(
     }
 }
 
+// rocm-oxide: len(partials)=partial_count
+// rocm-oxide: len(input)=n
+#[kernel]
+pub unsafe extern "C" fn lds_block_sum(
+    partials: gpu::DeviceSliceMut<f32>,
+    input: gpu::DeviceSlice<f32>,
+    n: usize,
+    partial_count: usize,
+    block_x: u32,
+) {
+    let block_id = gpu::block_idx_x() as usize;
+    if block_id >= partial_count {
+        return;
+    }
+
+    let local = gpu::thread_idx_x() as usize;
+    let block_dim = gpu::block_dim_x() as usize;
+    if block_dim != block_x as usize {
+        return;
+    }
+
+    let scratch = unsafe { gpu::DynamicSharedMem::<f32>::get() };
+    let global = block_id * block_dim + local;
+    let value = if global < n {
+        unsafe { input.read_unchecked(global) }
+    } else {
+        0.0
+    };
+    unsafe { scratch.add(local).write(value) };
+    gpu::workgroup_barrier();
+
+    let mut active = block_dim;
+    while active > 1 {
+        let half = active.div_ceil(2);
+        if local < half && local + half < active {
+            let left = unsafe { scratch.add(local).read() };
+            let right = unsafe { scratch.add(local + half).read() };
+            unsafe { scratch.add(local).write(left + right) };
+        }
+        gpu::workgroup_barrier();
+        active = half;
+    }
+
+    if local == 0 {
+        let sum = unsafe { scratch.read() };
+        unsafe { partials.write_unchecked(block_id, sum) };
+    }
+}
+
 // rocm-oxide: len(params)=1
 #[kernel]
 pub unsafe extern "C" fn affine_transform(

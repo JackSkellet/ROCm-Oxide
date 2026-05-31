@@ -70,6 +70,67 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     assert_eq!(atomic_scope_out.copy_to_vec()?, vec![0, 1, 2, 0]);
     assert_eq!(atomic_counters.copy_to_vec()?, vec![256, 256, 256]);
 
+    let reduce_n = 1_000usize;
+    let reduce_block_x = 128u32;
+    let partial_count = reduce_n.div_ceil(reduce_block_x as usize);
+    let reduce_input = (0..reduce_n).map(|i| (i % 7) as f32).collect::<Vec<_>>();
+    let reduce_expected = reduce_input
+        .chunks(reduce_block_x as usize)
+        .map(|chunk| chunk.iter().sum::<f32>())
+        .collect::<Vec<_>>();
+    let d_reduce_input = DeviceBuffer::from_slice(&reduce_input)?;
+    let d_partials = DeviceBuffer::<f32>::new(partial_count)?;
+    let missing_shared_validation = unsafe {
+        kernels.lds_block_sum(
+            LaunchConfig::for_num_elems_with_block_size(reduce_n, reduce_block_x),
+            &d_partials,
+            &d_reduce_input,
+            reduce_n,
+            partial_count,
+            reduce_block_x,
+        )
+    };
+    match missing_shared_validation {
+        Err(rocm_oxide::Error::InvalidLaunch(message)) => {
+            println!("Validation rejected missing dynamic LDS: {message}");
+        }
+        Err(err) => return Err(format!("unexpected missing-LDS validation error: {err}").into()),
+        Ok(()) => return Err("missing dynamic LDS launch unexpectedly succeeded".into()),
+    }
+
+    unsafe {
+        kernels.lds_block_sum(
+            LaunchConfig::for_num_elems_with_block_size(reduce_n, reduce_block_x)
+                .try_with_dynamic_shared_mem::<f32>(reduce_block_x as usize)?,
+            &d_partials,
+            &d_reduce_input,
+            reduce_n,
+            partial_count,
+            reduce_block_x,
+        )?;
+    }
+    rocm_oxide::hip::synchronize()?;
+    assert_eq!(d_partials.copy_to_vec()?, reduce_expected);
+
+    let shared_validation = unsafe {
+        kernels.lds_block_sum(
+            LaunchConfig::for_num_elems_with_block_size(reduce_n, reduce_block_x)
+                .with_shared_mem_bytes(u32::MAX),
+            &d_partials,
+            &d_reduce_input,
+            reduce_n,
+            partial_count,
+            reduce_block_x,
+        )
+    };
+    match shared_validation {
+        Err(rocm_oxide::Error::InvalidLaunch(message)) => {
+            println!("Validation rejected excess dynamic LDS: {message}");
+        }
+        Err(err) => return Err(format!("unexpected LDS validation error: {err}").into()),
+        Ok(()) => return Err("excess dynamic LDS launch unexpectedly succeeded".into()),
+    }
+
     let short = DeviceBuffer::from_slice(&a[..n / 2])?;
     let validation = unsafe {
         kernels.vector_add(

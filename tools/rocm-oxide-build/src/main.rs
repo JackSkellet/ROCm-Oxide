@@ -43,6 +43,7 @@ fn run() -> Result<(), String> {
     let mut kernels = BTreeMap::new();
     let mut device_structs = BTreeMap::new();
     let mut device_globals = BTreeMap::new();
+    let mut kernel_irs = Vec::new();
     let mut objects = Vec::new();
 
     for device_crate in &device_crates {
@@ -99,6 +100,7 @@ fn run() -> Result<(), String> {
         })?;
         fs::write(&kernel_ir, transformed)
             .map_err(|err| format!("failed to write {}: {err}", kernel_ir.display()))?;
+        kernel_irs.push(kernel_ir.clone());
 
         run_command(
             Command::new(&tools.llc)
@@ -136,7 +138,10 @@ fn run() -> Result<(), String> {
     run_command(&mut link, "link AMDGPU code object with ROCm clang")?;
 
     validate_code_object(&hsaco, &kernel_names, &tools.llvm_readelf)?;
-    let code_object_metadata = read_code_object_metadata(&hsaco, &tools.llvm_readelf)?;
+    let mut code_object_metadata = read_code_object_metadata(&hsaco, &tools.llvm_readelf)?;
+    for kernel_ir in &kernel_irs {
+        annotate_dynamic_shared_mem_from_ir(&mut code_object_metadata, kernel_ir)?;
+    }
     write_metadata(
         &metadata,
         &arch,
@@ -145,7 +150,14 @@ fn run() -> Result<(), String> {
         &device_globals,
         &code_object_metadata,
     )?;
-    write_bindings(&bindings, &hsaco, &kernels, &device_structs, &device_globals)?;
+    write_bindings(
+        &bindings,
+        &hsaco,
+        &kernels,
+        &device_structs,
+        &device_globals,
+        &code_object_metadata,
+    )?;
     println!("{}", hsaco.display());
     Ok(())
 }
@@ -277,6 +289,7 @@ fn inspect_metadata(path: &Path) -> Result<(), String> {
     let max_sgpr = max_json_u32(&text, "sgpr_count");
     let max_lds = max_json_u32(&text, "group_segment_fixed_size");
     let max_private = max_json_u32(&text, "private_segment_fixed_size");
+    let dynamic_lds = text.matches("\"uses_dynamic_shared_mem\": true").count();
     let dynamic_stack = text.matches("\"uses_dynamic_stack\": true").count();
     println!("metadata: {}", path.display());
     println!("target: {target}");
@@ -298,22 +311,24 @@ fn inspect_metadata(path: &Path) -> Result<(), String> {
     if let Some(value) = max_private {
         println!("max private segment bytes: {value}");
     }
+    println!("kernels using dynamic LDS: {dynamic_lds}");
     println!("kernels using dynamic stack: {dynamic_stack}");
     if !resources.is_empty() {
         println!();
         println!("per-kernel resources:");
         println!(
-            "{:<30} {:>5} {:>5} {:>5} {:>7} {:>7} {:>8} {:>5} {:>5}",
-            "kernel", "vgpr", "sgpr", "wave", "lds", "private", "kernarg", "spill", "stack"
+            "{:<30} {:>5} {:>5} {:>5} {:>7} {:>6} {:>7} {:>8} {:>5} {:>5}",
+            "kernel", "vgpr", "sgpr", "wave", "lds", "dynlds", "private", "kernarg", "spill", "stack"
         );
         for row in resources {
             println!(
-                "{:<30} {:>5} {:>5} {:>5} {:>7} {:>7} {:>8} {:>5} {:>5}",
+                "{:<30} {:>5} {:>5} {:>5} {:>7} {:>6} {:>7} {:>8} {:>5} {:>5}",
                 row.name,
                 display_opt(row.vgpr_count),
                 display_opt(row.sgpr_count),
                 display_opt(row.wavefront_size),
                 display_opt(row.group_segment_fixed_size),
+                display_bool(row.uses_dynamic_shared_mem),
                 display_opt(row.private_segment_fixed_size),
                 display_opt(row.kernarg_segment_size),
                 display_spills(row.sgpr_spill_count, row.vgpr_spill_count),
@@ -336,6 +351,7 @@ struct KernelResourceRow {
     sgpr_spill_count: Option<u32>,
     vgpr_spill_count: Option<u32>,
     wavefront_size: Option<u32>,
+    uses_dynamic_shared_mem: Option<bool>,
     uses_dynamic_stack: Option<bool>,
 }
 
@@ -403,6 +419,8 @@ fn parse_kernel_resource_field(row: &mut KernelResourceRow, line: &str) {
         row.vgpr_spill_count = Some(value);
     } else if let Some(value) = json_u32_field(line, "wavefront_size") {
         row.wavefront_size = Some(value);
+    } else if let Some(value) = json_bool_field(line, "uses_dynamic_shared_mem") {
+        row.uses_dynamic_shared_mem = Some(value);
     } else if let Some(value) = json_bool_field(line, "uses_dynamic_stack") {
         row.uses_dynamic_stack = Some(value);
     }
@@ -997,8 +1015,19 @@ struct KernelObjectMetadata {
     sgpr_spill_count: Option<u32>,
     vgpr_spill_count: Option<u32>,
     wavefront_size: Option<u32>,
+    uses_dynamic_shared_mem: bool,
     uses_dynamic_stack: Option<bool>,
     args: BTreeMap<String, KernelArgObjectMetadata>,
+}
+
+impl KernelObjectMetadata {
+    fn uses_dynamic_shared_mem(&self) -> bool {
+        self.uses_dynamic_shared_mem
+            || self
+                .args
+                .values()
+                .any(|arg| arg.value_kind.as_deref() == Some("dynamic_shared_pointer"))
+    }
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
@@ -2069,6 +2098,57 @@ fn read_code_object_metadata(hsaco: &Path, llvm_readelf: &Path) -> Result<CodeOb
     parse_code_object_metadata(&String::from_utf8_lossy(&output.stdout))
 }
 
+fn annotate_dynamic_shared_mem_from_ir(
+    metadata: &mut CodeObjectMetadata,
+    kernel_ir: &Path,
+) -> Result<(), String> {
+    let text = fs::read_to_string(kernel_ir)
+        .map_err(|err| format!("failed to read {}: {err}", kernel_ir.display()))?;
+    let dynamic_symbols = dynamic_shared_symbols(&text);
+    if dynamic_symbols.is_empty() {
+        return Ok(());
+    }
+
+    let mut current_kernel: Option<String> = None;
+    for line in text.lines() {
+        if let Some(name) = amdgpu_kernel_name(line) {
+            current_kernel = Some(name.to_string());
+            continue;
+        }
+        if current_kernel.is_some() && line.trim() == "}" {
+            current_kernel = None;
+            continue;
+        }
+        let Some(kernel_name) = current_kernel.as_deref() else {
+            continue;
+        };
+        if dynamic_symbols
+            .iter()
+            .any(|symbol| line.contains(&format!("@{symbol}")))
+            && let Some(kernel) = metadata.kernels.get_mut(kernel_name)
+        {
+            kernel.uses_dynamic_shared_mem = true;
+        }
+    }
+
+    Ok(())
+}
+
+fn dynamic_shared_symbols(text: &str) -> BTreeSet<String> {
+    text.lines()
+        .filter(|line| {
+            line.contains("external") && line.contains("addrspace(3) global [0 x i8]")
+        })
+        .filter_map(|line| line.trim_start().strip_prefix('@'))
+        .filter_map(|line| line.split_once(' ').map(|(name, _)| name.to_string()))
+        .collect()
+}
+
+fn amdgpu_kernel_name(line: &str) -> Option<&str> {
+    let (_, rest) = line.split_once("amdgpu_kernel void @")?;
+    rest.split_once('(').map(|(name, _)| name)
+}
+
 fn parse_code_object_metadata(text: &str) -> Result<CodeObjectMetadata, String> {
     let mut metadata = CodeObjectMetadata::default();
     let mut block = Vec::new();
@@ -2373,6 +2453,10 @@ fn write_kernel_object_metadata(out: &mut String, metadata: Option<&KernelObject
     write_json_u32_field(out, "sgpr_spill_count", metadata.sgpr_spill_count, false);
     write_json_u32_field(out, "vgpr_spill_count", metadata.vgpr_spill_count, false);
     write_json_u32_field(out, "wavefront_size", metadata.wavefront_size, false);
+    out.push_str(&format!(
+        ",\n        \"uses_dynamic_shared_mem\": {}",
+        metadata.uses_dynamic_shared_mem()
+    ));
     if let Some(value) = metadata.uses_dynamic_stack {
         out.push_str(&format!(",\n        \"uses_dynamic_stack\": {value}"));
     }
@@ -2408,6 +2492,7 @@ fn write_bindings(
     kernels: &BTreeMap<String, KernelDecl>,
     device_structs: &BTreeMap<String, DeviceStruct>,
     device_globals: &BTreeMap<String, DeviceGlobal>,
+    code_object_metadata: &CodeObjectMetadata,
 ) -> Result<(), String> {
     let mut out = String::new();
     out.push_str("// Generated by rocm-oxide-build. Do not edit by hand.\n");
@@ -2447,7 +2532,10 @@ fn write_bindings(
     }
 
     for kernel in kernels.values() {
-        out.push_str(&generate_kernel_binding(kernel)?);
+        out.push_str(&generate_kernel_binding(
+            kernel,
+            code_object_metadata.kernels.get(&kernel.name),
+        )?);
         out.push('\n');
     }
 
@@ -2509,7 +2597,10 @@ fn to_snake_case(name: &str) -> String {
     out.trim_matches('_').to_string()
 }
 
-fn generate_kernel_binding(kernel: &KernelDecl) -> Result<String, String> {
+fn generate_kernel_binding(
+    kernel: &KernelDecl,
+    metadata: Option<&KernelObjectMetadata>,
+) -> Result<String, String> {
     let mut params = vec!["config: rocm_oxide::LaunchConfig".to_string()];
     let mut operation_params = vec!["config: rocm_oxide::LaunchConfig".to_string()];
     let mut launch_args = Vec::new();
@@ -2601,8 +2692,9 @@ fn generate_kernel_binding(kernel: &KernelDecl) -> Result<String, String> {
         has_block_x_arg,
         false,
     ));
+    let kernel_metadata = generated_kernel_metadata(metadata);
     out.push_str(&format!(
-        "        let kernel = self.module.kernel(c\"{}\")?;\n",
+        "        let kernel = self.module.kernel_with_metadata(c\"{}\", {kernel_metadata})?;\n",
         kernel.name
     ));
     out.push_str("        unsafe {\n");
@@ -2632,7 +2724,7 @@ fn generate_kernel_binding(kernel: &KernelDecl) -> Result<String, String> {
     ));
     out.push_str("        let module = std::sync::Arc::clone(&self.module);\n");
     out.push_str(&format!(
-        "        Ok(move |context: &rocm_oxide::ExecutionContext| -> rocm_oxide::Result<rocm_oxide::KernelLaunchCompletion> {{\n            let kernel = module.kernel(c\"{}\")?;\n",
+        "        Ok(move |context: &rocm_oxide::ExecutionContext| -> rocm_oxide::Result<rocm_oxide::KernelLaunchCompletion> {{\n            let kernel = module.kernel_with_metadata(c\"{}\", {kernel_metadata})?;\n",
         kernel.name
     ));
     if launch_args.is_empty() {
@@ -2665,6 +2757,25 @@ fn generate_kernel_binding(kernel: &KernelDecl) -> Result<String, String> {
     out.push_str("        })\n");
     out.push_str("    }\n");
     Ok(out)
+}
+
+fn generated_kernel_metadata(metadata: Option<&KernelObjectMetadata>) -> String {
+    let Some(metadata) = metadata else {
+        return "rocm_oxide::KernelMetadata::default()".to_string();
+    };
+    format!(
+        "rocm_oxide::KernelMetadata {{ max_flat_workgroup_size: {}, static_shared_mem_bytes: {}, uses_dynamic_shared_mem: {} }}",
+        generated_option_u32(metadata.max_flat_workgroup_size),
+        metadata.group_segment_fixed_size.unwrap_or(0),
+        metadata.uses_dynamic_shared_mem()
+    )
+}
+
+fn generated_option_u32(value: Option<u32>) -> String {
+    match value {
+        Some(value) => format!("Some({value})"),
+        None => "None".to_string(),
+    }
 }
 
 fn generate_kernel_validation_lines(
@@ -2820,11 +2931,12 @@ where
 #[cfg(test)]
 mod tests {
     use super::{
-        ArgKind, DeviceGlobalKind, compiler_step, discover_device_crate_bundle,
+        ArgKind, CodeObjectMetadata, DeviceGlobalKind, KernelObjectMetadata,
+        annotate_dynamic_shared_mem_from_ir, compiler_step, discover_device_crate_bundle,
         discover_device_globals_in_source, discover_device_structs_in_source,
-        discover_kernels_in_source, generate_device_global_binding, generate_device_struct_binding,
-        generate_kernel_binding, parse_inline_path_dependency, parse_kernel_resource_rows,
-        parse_package_name, transform_ir,
+        discover_kernels_in_source, generate_device_global_binding,
+        generate_device_struct_binding, generate_kernel_binding, parse_inline_path_dependency,
+        parse_kernel_resource_rows, parse_package_name, transform_ir,
     };
     use std::collections::{BTreeMap, BTreeSet};
     use std::fs;
@@ -2896,6 +3008,41 @@ pub unsafe extern "C" fn helper() {}
         assert_eq!(rows[0].sgpr_count, Some(11));
         assert_eq!(rows[0].vgpr_spill_count, Some(1));
         assert_eq!(rows[0].uses_dynamic_stack, Some(false));
+    }
+
+    #[test]
+    fn annotates_dynamic_shared_mem_from_kernel_ir() {
+        let input = r#"
+@scratch = external local_unnamed_addr addrspace(3) global [0 x i8], align 4
+
+define protected amdgpu_kernel void @lds_block_sum(ptr addrspace(1) %out) {
+start:
+  %slot = getelementptr inbounds float, ptr addrspace(3) @scratch, i32 0
+  store float 1.0, ptr addrspace(3) %slot, align 4
+  ret void
+}
+"#;
+        let path = std::env::temp_dir().join(format!(
+            "rocm-oxide-dynamic-lds-{}.ll",
+            std::process::id()
+        ));
+        fs::write(&path, input).expect("temp IR should be writable");
+        let mut metadata = CodeObjectMetadata::default();
+        metadata
+            .kernels
+            .insert("lds_block_sum".to_string(), KernelObjectMetadata::default());
+
+        annotate_dynamic_shared_mem_from_ir(&mut metadata, &path)
+            .expect("IR annotation should succeed");
+        let _ = fs::remove_file(&path);
+
+        assert!(
+            metadata
+                .kernels
+                .get("lds_block_sum")
+                .expect("kernel metadata exists")
+                .uses_dynamic_shared_mem()
+        );
     }
 
     #[test]
@@ -2976,7 +3123,7 @@ pub unsafe extern "C" fn vector_add(
         );
         assert_eq!(kernels[0].args[2].kind, ArgKind::Scalar);
 
-        let binding = generate_kernel_binding(&kernels[0]).expect("binding should generate");
+        let binding = generate_kernel_binding(&kernels[0], None).expect("binding should generate");
         assert!(binding.contains("out: &rocm_oxide::DeviceBuffer<f32>"));
         assert!(binding.contains("a: &rocm_oxide::DeviceBuffer<f32>"));
         assert!(binding.contains("n: usize"));
@@ -3022,7 +3169,7 @@ pub unsafe extern "C" fn vector_add(
             ArgKind::ConstSlice("f32".to_string())
         );
 
-        let binding = generate_kernel_binding(&kernels[0]).expect("binding should generate");
+        let binding = generate_kernel_binding(&kernels[0], None).expect("binding should generate");
         assert!(binding.contains("out: &rocm_oxide::DeviceBuffer<f32>"));
         assert!(binding.contains("a: &rocm_oxide::DeviceBuffer<f32>"));
         assert!(binding.contains("b: &rocm_oxide::DeviceBuffer<f32>"));
@@ -3142,7 +3289,7 @@ pub unsafe extern "C" fn temporal(
         )
         .expect("source should parse");
 
-        let binding = generate_kernel_binding(&kernels[0]).expect("binding should generate");
+        let binding = generate_kernel_binding(&kernels[0], None).expect("binding should generate");
         assert!(binding.contains("validate_buffer_len(\"frame\", frame.len(), pixel_count)?"));
         assert!(binding.contains("validate_buffer_len(\"color\", color.len(), pixel_count/4)?"));
         assert!(binding.contains("validate_buffer_len(\"aux\", aux.len(), pixel_count/4*3)?"));

@@ -58,6 +58,7 @@ pub type Result<T> = std::result::Result<T, Error>;
 pub struct Device {
     ordinal: i32,
     arch: String,
+    limits: DeviceLimits,
 }
 
 impl Device {
@@ -69,7 +70,12 @@ impl Device {
 
         hip::set_device(0)?;
         let arch = detect_arch().ok_or(Error::MissingArchitecture)?;
-        Ok(Self { ordinal: 0, arch })
+        let limits = DeviceLimits::query(0)?;
+        Ok(Self {
+            ordinal: 0,
+            arch,
+            limits,
+        })
     }
 
     pub fn ordinal(&self) -> i32 {
@@ -80,6 +86,10 @@ impl Device {
         &self.arch
     }
 
+    pub fn limits(&self) -> DeviceLimits {
+        self.limits
+    }
+
     pub fn compile_hip_source(&self, source: &str) -> Result<Module> {
         let code_object = hiprtc::compile_code_object(source, &self.arch)?;
         self.load_code_object(&code_object)
@@ -87,7 +97,10 @@ impl Device {
 
     pub fn load_code_object(&self, code_object: &[u8]) -> Result<Module> {
         let module = hip::Module::from_code_object(&code_object)?;
-        Ok(Module { module })
+        Ok(Module {
+            module,
+            limits: self.limits,
+        })
     }
 
     pub fn load_code_object_file(&self, path: impl AsRef<Path>) -> Result<Module> {
@@ -119,6 +132,60 @@ impl Dim3 {
     pub const fn as_tuple(self) -> (u32, u32, u32) {
         (self.x, self.y, self.z)
     }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct DeviceLimits {
+    pub max_threads_per_block: u32,
+    pub max_block_dim: Dim3,
+    pub max_shared_mem_per_block: u32,
+    pub max_shared_mem_per_block_optin: u32,
+    pub max_shared_mem_per_multiprocessor: u32,
+}
+
+impl DeviceLimits {
+    pub const fn prototype() -> Self {
+        Self {
+            max_threads_per_block: 1024,
+            max_block_dim: Dim3::new(1024, 1024, 1024),
+            max_shared_mem_per_block: 64 * 1024,
+            max_shared_mem_per_block_optin: 64 * 1024,
+            max_shared_mem_per_multiprocessor: 64 * 1024,
+        }
+    }
+
+    fn query(ordinal: i32) -> Result<Self> {
+        Ok(Self {
+            max_threads_per_block: hip::device_attribute(
+                ordinal,
+                hip::HIP_DEVICE_ATTRIBUTE_MAX_THREADS_PER_BLOCK,
+            )?,
+            max_block_dim: Dim3::new(
+                hip::device_attribute(ordinal, hip::HIP_DEVICE_ATTRIBUTE_MAX_BLOCK_DIM_X)?,
+                hip::device_attribute(ordinal, hip::HIP_DEVICE_ATTRIBUTE_MAX_BLOCK_DIM_Y)?,
+                hip::device_attribute(ordinal, hip::HIP_DEVICE_ATTRIBUTE_MAX_BLOCK_DIM_Z)?,
+            ),
+            max_shared_mem_per_block: hip::device_attribute(
+                ordinal,
+                hip::HIP_DEVICE_ATTRIBUTE_MAX_SHARED_MEMORY_PER_BLOCK,
+            )?,
+            max_shared_mem_per_block_optin: hip::device_attribute(
+                ordinal,
+                hip::HIP_DEVICE_ATTRIBUTE_SHARED_MEM_PER_BLOCK_OPTIN,
+            )?,
+            max_shared_mem_per_multiprocessor: hip::device_attribute(
+                ordinal,
+                hip::HIP_DEVICE_ATTRIBUTE_SHARED_MEM_PER_MULTIPROCESSOR,
+            )?,
+        })
+    }
+}
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct KernelMetadata {
+    pub max_flat_workgroup_size: Option<u32>,
+    pub static_shared_mem_bytes: u32,
+    pub uses_dynamic_shared_mem: bool,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -158,9 +225,33 @@ impl LaunchConfig {
         self.shared_mem_bytes = shared_mem_bytes;
         self
     }
+
+    pub fn try_with_dynamic_shared_mem<T>(self, elements: usize) -> Result<Self> {
+        let bytes = elements
+            .checked_mul(std::mem::size_of::<T>())
+            .ok_or_else(|| {
+                Error::InvalidLaunch(format!(
+                    "dynamic shared memory size overflows usize for {elements} elements"
+                ))
+            })?;
+        let bytes = u32::try_from(bytes).map_err(|_| {
+            Error::InvalidLaunch(format!(
+                "dynamic shared memory request is {bytes} bytes, exceeding u32 launch limit"
+            ))
+        })?;
+        Ok(self.with_shared_mem_bytes(bytes))
+    }
 }
 
 pub fn validate_launch_config(config: LaunchConfig) -> Result<()> {
+    validate_launch_config_for_limits(config, DeviceLimits::prototype(), KernelMetadata::default())
+}
+
+pub fn validate_launch_config_for_limits(
+    config: LaunchConfig,
+    limits: DeviceLimits,
+    metadata: KernelMetadata,
+) -> Result<()> {
     if config.grid.x == 0
         || config.grid.y == 0
         || config.grid.z == 0
@@ -180,9 +271,44 @@ pub fn validate_launch_config(config: LaunchConfig) -> Result<()> {
     }
 
     let block_threads = config.block.x as u64 * config.block.y as u64 * config.block.z as u64;
-    if block_threads > 1024 {
+    let max_threads = metadata
+        .max_flat_workgroup_size
+        .unwrap_or(limits.max_threads_per_block)
+        .min(limits.max_threads_per_block);
+    if block_threads > max_threads as u64 {
         return Err(Error::InvalidLaunch(format!(
-            "block has {block_threads} threads, maximum supported by this prototype is 1024"
+            "block has {block_threads} threads, but this kernel/device supports at most {max_threads}"
+        )));
+    }
+
+    if config.block.x > limits.max_block_dim.x
+        || config.block.y > limits.max_block_dim.y
+        || config.block.z > limits.max_block_dim.z
+    {
+        return Err(Error::InvalidLaunch(format!(
+            "block dimensions ({}, {}, {}) exceed device maximum ({}, {}, {})",
+            config.block.x,
+            config.block.y,
+            config.block.z,
+            limits.max_block_dim.x,
+            limits.max_block_dim.y,
+            limits.max_block_dim.z
+        )));
+    }
+
+    let total_shared_mem = metadata.static_shared_mem_bytes as u64 + config.shared_mem_bytes as u64;
+    if metadata.uses_dynamic_shared_mem && config.shared_mem_bytes == 0 {
+        return Err(Error::InvalidLaunch(
+            "kernel uses dynamic LDS/shared memory, but launch requested 0 dynamic bytes"
+                .to_string(),
+        ));
+    }
+    if total_shared_mem > limits.max_shared_mem_per_block as u64 {
+        return Err(Error::InvalidLaunch(format!(
+            "kernel requests {total_shared_mem} bytes of LDS/shared memory ({} static + {} dynamic), but device limit is {} bytes per block",
+            metadata.static_shared_mem_bytes,
+            config.shared_mem_bytes,
+            limits.max_shared_mem_per_block
         )));
     }
 
@@ -297,12 +423,19 @@ fn device_buffer_byte_range<T>(
 
 pub struct Module {
     module: hip::Module,
+    limits: DeviceLimits,
 }
 
 impl Module {
     pub fn kernel(&self, name: &CStr) -> Result<Kernel> {
+        self.kernel_with_metadata(name, KernelMetadata::default())
+    }
+
+    pub fn kernel_with_metadata(&self, name: &CStr, metadata: KernelMetadata) -> Result<Kernel> {
         Ok(Kernel {
             function: self.module.function(name)?,
+            limits: self.limits,
+            metadata,
         })
     }
 
@@ -313,6 +446,8 @@ impl Module {
 
 pub struct Kernel {
     function: hip::Function,
+    limits: DeviceLimits,
+    metadata: KernelMetadata,
 }
 
 impl Kernel {
@@ -321,6 +456,7 @@ impl Kernel {
         config: LaunchConfig,
         params: &mut [*mut c_void],
     ) -> Result<()> {
+        validate_launch_config_for_limits(config, self.limits, self.metadata)?;
         Ok(unsafe {
             self.function.launch(
                 config.grid.as_tuple(),
@@ -337,6 +473,7 @@ impl Kernel {
         config: LaunchConfig,
         params: &mut [*mut c_void],
     ) -> Result<()> {
+        validate_launch_config_for_limits(config, self.limits, self.metadata)?;
         Ok(unsafe {
             self.function.launch_on_stream(
                 config.grid.as_tuple(),
@@ -386,7 +523,7 @@ fn rocminfo_path() -> PathBuf {
 
 #[cfg(test)]
 mod tests {
-    use super::{Dim3, LaunchConfig};
+    use super::{DeviceLimits, Dim3, KernelMetadata, LaunchConfig};
     use crate::hip::DeviceBuffer;
 
     #[test]
@@ -412,6 +549,14 @@ mod tests {
     }
 
     #[test]
+    fn typed_dynamic_shared_memory_sets_byte_count() {
+        let config = LaunchConfig::for_num_elems_with_block_size(128, 128)
+            .try_with_dynamic_shared_mem::<f32>(128)
+            .expect("f32 LDS byte count should fit");
+        assert_eq!(config.shared_mem_bytes, 512);
+    }
+
+    #[test]
     fn dim3_keeps_axes_explicit() {
         assert_eq!(Dim3::new(2, 3, 4).as_tuple(), (2, 3, 4));
     }
@@ -421,6 +566,45 @@ mod tests {
         let err = super::validate_launch_config(LaunchConfig::new(Dim3::x(0), Dim3::x(256)))
             .expect_err("zero grid should fail");
         assert!(err.to_string().contains("nonzero"));
+    }
+
+    #[test]
+    fn launch_config_rejects_kernel_workgroup_limit() {
+        let config = LaunchConfig::new(Dim3::x(1), Dim3::x(256));
+        let metadata = KernelMetadata {
+            max_flat_workgroup_size: Some(128),
+            ..KernelMetadata::default()
+        };
+        let err =
+            super::validate_launch_config_for_limits(config, DeviceLimits::prototype(), metadata)
+                .expect_err("kernel workgroup limit should fail");
+        assert!(err.to_string().contains("at most 128"));
+    }
+
+    #[test]
+    fn launch_config_rejects_excess_shared_memory() {
+        let config = LaunchConfig::new(Dim3::x(1), Dim3::x(256)).with_shared_mem_bytes(512);
+        let metadata = KernelMetadata {
+            static_shared_mem_bytes: 64 * 1024,
+            ..KernelMetadata::default()
+        };
+        let err =
+            super::validate_launch_config_for_limits(config, DeviceLimits::prototype(), metadata)
+                .expect_err("total LDS over device limit should fail");
+        assert!(err.to_string().contains("LDS/shared memory"));
+    }
+
+    #[test]
+    fn launch_config_rejects_missing_dynamic_shared_memory() {
+        let config = LaunchConfig::new(Dim3::x(1), Dim3::x(256));
+        let metadata = KernelMetadata {
+            uses_dynamic_shared_mem: true,
+            ..KernelMetadata::default()
+        };
+        let err =
+            super::validate_launch_config_for_limits(config, DeviceLimits::prototype(), metadata)
+                .expect_err("dynamic LDS kernel should need dynamic bytes");
+        assert!(err.to_string().contains("requested 0 dynamic bytes"));
     }
 
     #[test]

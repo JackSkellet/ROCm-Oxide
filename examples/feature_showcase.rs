@@ -122,6 +122,32 @@ fn main() -> Result<()> {
     assert_eq!(lazy_out[8192], a[8192] + b[8192]);
     println!("ok: generated DeviceOperation binding launched on an execution stream");
 
+    let reduce_n = 768usize;
+    let reduce_block_x = 128u32;
+    let partial_count = reduce_n.div_ceil(reduce_block_x as usize);
+    let reduce_input = (0..reduce_n).map(|i| (i % 5) as f32).collect::<Vec<_>>();
+    let d_reduce_input = DeviceBuffer::from_slice(&reduce_input)?;
+    let d_partials = DeviceBuffer::<f32>::new(partial_count)?;
+    unsafe {
+        kernels.lds_block_sum(
+            LaunchConfig::for_num_elems_with_block_size(reduce_n, reduce_block_x)
+                .try_with_dynamic_shared_mem::<f32>(reduce_block_x as usize)?,
+            &d_partials,
+            &d_reduce_input,
+            reduce_n,
+            partial_count,
+            reduce_block_x,
+        )?;
+    }
+    rocm_oxide::hip::synchronize()?;
+    let partials = d_partials.copy_to_vec()?;
+    let expected = reduce_input
+        .chunks(reduce_block_x as usize)
+        .map(|chunk| chunk.iter().sum::<f32>())
+        .collect::<Vec<_>>();
+    assert_eq!(partials, expected);
+    println!("ok: dynamic launch-sized LDS handled a block reduction kernel");
+
     let params = DeviceBuffer::from_slice(&[generated::AffineParams {
         scale: 3.0,
         bias: -7.0,

@@ -39,8 +39,9 @@ Local probes on 2026-05-31:
 - HIP/runtime: `7.2.53211-364a905`; AMD LLVM/clang: `22.0.0git`.
 - Device limits from `rocminfo`: wavefront size 32, max workgroup size 1024,
   max waves per CU 32, 64 KB group/LDS segment.
-- Current generated artifact: 13 kernels, max VGPR 33, max SGPR 26, max
-  kernarg 368 bytes, static LDS 0, no dynamic stack users.
+- Current generated artifact: 14 kernels, 18 buffer contracts, max VGPR 33, max
+  SGPR 26, max kernarg 368 bytes, static LDS 0, one dynamic-LDS kernel, and no
+  dynamic stack users.
 - Current scoped atomic IR emits global-memory `atomicrmw` with explicit
   `syncscope("workgroup")` or `syncscope("agent")` where requested. System scope
   intentionally uses the AMDGPU backend default because the local LLVM backend
@@ -56,11 +57,15 @@ Local probes on 2026-05-31:
         scope on the backend default
   - [ ] verify IR and ISA for coarse-grained, fine-grained, and host-visible memory
   - [ ] add negative docs/tests for system-scope atomics that downgrade on coarse memory
-- [ ] LDS/shared-memory completeness:
-  - [ ] add a real tiled/reduction kernel that uses dynamic LDS
-  - [ ] validate requested `shared_mem_bytes` against device and kernel limits
-  - [ ] report static and dynamic LDS in generated metadata and host bindings
-  - [ ] expose ergonomic typed workgroup scratch helpers in device code
+- [x] LDS/shared-memory dynamic path:
+  - [x] add a real tiled/reduction kernel that uses dynamic LDS
+  - [x] validate requested `shared_mem_bytes` against device and kernel limits
+  - [x] report static and dynamic LDS in generated metadata and host bindings
+  - [x] expose ergonomic typed workgroup scratch helpers in device/host code
+- [ ] LDS/shared-memory static and ISA verification:
+  - [ ] add a static LDS kernel once address-space-safe Rust syntax is settled
+  - [ ] verify LDS IR and ISA for dynamic plus static cases
+  - [ ] feed LDS pressure into occupancy planning
 - [ ] Occupancy and resource model:
   - [ ] expose per-kernel VGPR, SGPR, LDS, private segment, kernarg, and wavefront metadata at runtime
   - [ ] wrap HIP occupancy APIs for launch planning

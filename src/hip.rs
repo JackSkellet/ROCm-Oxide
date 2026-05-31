@@ -12,11 +12,21 @@ pub type HipEvent = *mut c_void;
 pub const HIP_SUCCESS: HipError = 0;
 pub const HIP_MEMCPY_HOST_TO_DEVICE: c_int = 1;
 pub const HIP_MEMCPY_DEVICE_TO_HOST: c_int = 2;
+// hipDeviceAttribute_t discriminants used through hipDeviceGetAttribute.
+// Values match ROCm HIP 7.2 headers and the CUDA-compatible enum ordering.
+pub const HIP_DEVICE_ATTRIBUTE_MAX_BLOCK_DIM_X: c_int = 26;
+pub const HIP_DEVICE_ATTRIBUTE_MAX_BLOCK_DIM_Y: c_int = 27;
+pub const HIP_DEVICE_ATTRIBUTE_MAX_BLOCK_DIM_Z: c_int = 28;
+pub const HIP_DEVICE_ATTRIBUTE_MAX_THREADS_PER_BLOCK: c_int = 56;
+pub const HIP_DEVICE_ATTRIBUTE_MAX_SHARED_MEMORY_PER_BLOCK: c_int = 74;
+pub const HIP_DEVICE_ATTRIBUTE_SHARED_MEM_PER_BLOCK_OPTIN: c_int = 75;
+pub const HIP_DEVICE_ATTRIBUTE_SHARED_MEM_PER_MULTIPROCESSOR: c_int = 76;
 
 unsafe extern "C" {
     fn hipGetErrorString(error: HipError) -> *const c_char;
     fn hipGetDeviceCount(count: *mut c_int) -> HipError;
     fn hipSetDevice(device_id: c_int) -> HipError;
+    fn hipDeviceGetAttribute(value: *mut c_int, attr: c_int, device_id: c_int) -> HipError;
     fn hipMalloc(ptr: *mut *mut c_void, size: usize) -> HipError;
     fn hipMallocAsync(ptr: *mut *mut c_void, size: usize, stream: HipStream) -> HipError;
     fn hipFree(ptr: *mut c_void) -> HipError;
@@ -118,6 +128,18 @@ pub fn check(code: HipError) -> Result<()> {
     } else {
         Err(Error::from_code(code))
     }
+}
+
+pub fn device_attribute(device_id: i32, attribute: c_int) -> Result<u32> {
+    let mut value = 0;
+    unsafe {
+        check(hipDeviceGetAttribute(&mut value, attribute, device_id))?;
+    }
+    u32::try_from(value).map_err(|_| {
+        Error::invalid_value(format!(
+            "HIP device attribute {attribute} returned negative value {value}"
+        ))
+    })
 }
 
 fn checked_allocation_bytes<T>(len: usize, label: &str) -> Result<usize> {

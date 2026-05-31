@@ -8,9 +8,9 @@ pub use operation::{
     DeviceFuture, DeviceOperation, ExecutionContext, KernelLaunchCompletion, StreamPool, Value,
 };
 pub use runtime::{
-    Device, DeviceSlice, DeviceSliceMut, Dim3, Error, Kernel, LaunchConfig, Module, Result,
-    validate_block_x, validate_buffer_len, validate_device_buffers_disjoint,
-    validate_launch_config,
+    Device, DeviceLimits, DeviceSlice, DeviceSliceMut, Dim3, Error, Kernel, KernelMetadata,
+    LaunchConfig, Module, Result, validate_block_x, validate_buffer_len,
+    validate_device_buffers_disjoint, validate_launch_config, validate_launch_config_for_limits,
 };
 
 #[macro_export]

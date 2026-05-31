@@ -85,6 +85,7 @@ rather than hidden in comments or examples.
 
 The generated metadata now also records code-object facts parsed from the AMDGPU
 note section: argument offsets, ABI sizes, pointer address spaces, value kinds,
-kernarg segment size/alignment, max workgroup size, static LDS bytes, private
-segment bytes, SGPR/VGPR counts, spill counts, wavefront size, and dynamic-stack
-usage. Those are artifact facts rather than source contracts.
+kernarg segment size/alignment, max workgroup size, static LDS bytes,
+dynamic-LDS usage, private segment bytes, SGPR/VGPR counts, spill counts,
+wavefront size, and dynamic-stack usage. Those are artifact facts rather than
+source contracts.

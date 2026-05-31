@@ -223,8 +223,8 @@ execution ergonomics on ROCm:
 - generated-kernel performance probes without GUI/readback timing noise
 
 `cargo rocm-oxide inspect` prints per-kernel code-object resources such as VGPR,
-SGPR, static LDS, private segment bytes, kernarg size, spills, wavefront size,
-and dynamic-stack usage.
+SGPR, static LDS, dynamic LDS usage, private segment bytes, kernarg size, spills,
+wavefront size, and dynamic-stack usage.
 
 `cargo run --example performance_probe -- --json target/performance_probe.json`
 reports HIP-event GPU time for generated Rust kernels and can write benchmark
@@ -303,8 +303,9 @@ This roadmap is grounded in the current local probe target:
 - AMD LLVM/clang: `22.0.0git`.
 - Device limits seen through `rocminfo`: wavefront size 32, max workgroup size
   1024, max waves per CU 32, and 64 KB group/LDS segment.
-- Current generated artifact: 13 kernels, max VGPR 33, max SGPR 26, max kernarg
-  368 bytes, static LDS 0, no dynamic stack users.
+- Current generated artifact: 14 kernels, 18 buffer contracts, max VGPR 33, max
+  SGPR 26, max kernarg 368 bytes, static LDS 0, one dynamic-LDS kernel, and no
+  dynamic stack users.
 - Current scoped atomic IR reaches global-memory `atomicrmw` with explicit
   `syncscope("workgroup")` or `syncscope("agent")` where requested. System scope
   uses the AMDGPU backend default because this LLVM build rejects explicit
@@ -315,9 +316,9 @@ This roadmap is grounded in the current local probe target:
 - Scope-specific atomic verification: preserve the new workgroup/device
   `syncscope` lowering, document the system-scope default, and verify resulting
   IR/ISA against coarse-grained, fine-grained, and host-visible memory.
-- LDS/shared-memory completeness: add a real tiled/reduction kernel using dynamic
-  LDS, validate requested shared memory against device and kernel limits, and
-  report static plus dynamic LDS in generated metadata and bindings.
+- LDS/shared-memory follow-up: extend the new dynamic-LDS reduction and
+  per-kernel validation path to static LDS cases, ISA checks, and occupancy
+  planning.
 - Occupancy and resource model: expose per-kernel resource metadata at runtime,
   wrap HIP occupancy APIs, and flag VGPR/SGPR/LDS/private-memory limiters in
   benchmark output.
