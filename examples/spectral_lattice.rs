@@ -12,17 +12,25 @@ mod generated {
     include!(env!("ROCM_OXIDE_DEVICE_BINDINGS"));
 }
 
-const WIDTH: usize = 960;
-const HEIGHT: usize = 540;
 const PANEL_W: usize = 318;
 const BLOCK_X: u32 = 256;
 const DEFAULT_OUTPUT: &str = "target/spectral_lattice.png";
 const MODES: [&str; 4] = ["Core", "LDS", "Atomic", "Chain"];
+const FPS_LIMITS: [usize; 7] = [30, 60, 90, 120, 144, 240, 0];
+const RESOLUTION_PRESETS: [ResolutionPreset; 5] = [
+    ResolutionPreset::new("540p", 960, 540),
+    ResolutionPreset::new("720p", 1280, 720),
+    ResolutionPreset::new("1080p", 1920, 1080),
+    ResolutionPreset::new("1440p", 2560, 1440),
+    ResolutionPreset::new("4K", 3840, 2160),
+];
 
 struct DemoArgs {
     frames: Option<u32>,
     output: PathBuf,
     mode: Option<usize>,
+    size: RenderSize,
+    fps_limit: usize,
 }
 
 struct PaletteSeed {
@@ -43,6 +51,8 @@ struct DemoState {
     palette_source: String,
     status: String,
     fps: f64,
+    fps_limit: usize,
+    render_size: RenderSize,
     save_requested: bool,
 }
 
@@ -54,6 +64,7 @@ struct ResourceSnapshot {
 }
 
 struct DemoBuffers {
+    size: RenderSize,
     base: DeviceBuffer<u32>,
     post: DeviceBuffer<u32>,
     short: DeviceBuffer<u32>,
@@ -63,12 +74,53 @@ struct DemoBuffers {
     tile_count: usize,
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+struct RenderSize {
+    width: usize,
+    height: usize,
+}
+
+#[derive(Clone, Copy, Debug)]
+struct ResolutionPreset {
+    label: &'static str,
+    size: RenderSize,
+}
+
 #[derive(Clone, Copy)]
 struct Rect {
     x: usize,
     y: usize,
     w: usize,
     h: usize,
+}
+
+impl RenderSize {
+    const fn new(width: usize, height: usize) -> Self {
+        Self { width, height }
+    }
+
+    const fn pixel_count(self) -> usize {
+        self.width * self.height
+    }
+
+    fn label(self) -> String {
+        RESOLUTION_PRESETS
+            .iter()
+            .find(|preset| preset.size == self)
+            .map_or_else(
+                || format!("{}x{}", self.width, self.height),
+                |preset| preset.label.to_string(),
+            )
+    }
+}
+
+impl ResolutionPreset {
+    const fn new(label: &'static str, width: usize, height: usize) -> Self {
+        Self {
+            label,
+            size: RenderSize::new(width, height),
+        }
+    }
 }
 
 impl Rect {
@@ -85,10 +137,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let args = parse_args()?;
     let device = Device::first()?;
     let kernels = generated::DeviceKernels::load_embedded(&device)?;
-    let pixel_count = WIDTH * HEIGHT;
-    let buffers = DemoBuffers::new(pixel_count)?;
-    let mut host_frame = vec![0u32; pixel_count];
-    let resources = ResourceSnapshot::new(&device, &kernels, pixel_count)?;
+    let mut buffers = DemoBuffers::new(args.size)?;
+    let mut host_frame = vec![0u32; buffers.size.pixel_count()];
+    let mut resources = ResourceSnapshot::new(&device, &kernels, buffers.size.pixel_count())?;
     let palette = derive_palette(0);
     let mut state = DemoState {
         mode: 0,
@@ -103,6 +154,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         palette_source: palette.source,
         status: "ready: core + libs + contracts".into(),
         fps: 0.0,
+        fps_limit: args.fps_limit,
+        render_size: args.size,
         save_requested: false,
     };
     if let Some(mode) = args.mode {
@@ -120,13 +173,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             use_post = render_frame(&kernels, &buffers, &state)?;
         }
         rocm_oxide::hip::synchronize()?;
-        if use_post {
-            buffers.post.copy_to_host(&mut host_frame)?;
-        } else {
-            buffers.base.copy_to_host(&mut host_frame)?;
-        }
-        draw_overlay(&mut host_frame, &state, &resources);
-        save_png(&args.output, &host_frame)?;
+        copy_display_frame(&buffers, use_post, &mut host_frame)?;
+        draw_overlay(&mut host_frame, buffers.size, &state, &resources);
+        save_png(&args.output, &host_frame, buffers.size)?;
         println!(
             "saved Spectral Lattice GUI preview after {frames} frame(s): {}",
             args.output.display()
@@ -134,23 +183,14 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         return Ok(());
     }
 
-    let mut window = Window::new(
-        "ROCm-Oxide Spectral Lattice",
-        WIDTH,
-        HEIGHT,
-        WindowOptions {
-            resize: true,
-            scale: Scale::X1,
-            ..WindowOptions::default()
-        },
-    )?;
-    window.set_target_fps(60);
+    let mut window = create_window(buffers.size, state.fps_limit)?;
 
     let start = Instant::now();
     let mut last_fps = Instant::now();
     let mut frames_since_fps = 0u32;
     let mut mouse_was_down = false;
     let mut saved_once = false;
+    let mut applied_fps_limit = state.fps_limit;
     while window.is_open() && !window.is_key_down(Key::Escape) {
         handle_keyboard(&window, &mut state, &kernels, &buffers.short);
         handle_mouse(
@@ -161,6 +201,20 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             &mut mouse_was_down,
         );
 
+        if state.render_size != buffers.size {
+            buffers = DemoBuffers::new(state.render_size)?;
+            host_frame.resize(buffers.size.pixel_count(), 0);
+            resources = ResourceSnapshot::new(&device, &kernels, buffers.size.pixel_count())?;
+            window = create_window(buffers.size, state.fps_limit)?;
+            applied_fps_limit = state.fps_limit;
+            saved_once = false;
+            state.status = format!("resolution set to {}", buffers.size.label());
+        } else if state.fps_limit != applied_fps_limit {
+            window.set_target_fps(state.fps_limit);
+            applied_fps_limit = state.fps_limit;
+            state.status = format!("FPS limit set to {}", fps_label(state.fps_limit));
+        }
+
         if !state.paused {
             state.frame_index = (start.elapsed().as_secs_f32() * 60.0 * state.speed) as u32;
             if state.auto_cycle {
@@ -170,33 +224,60 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
         let use_post = render_frame(&kernels, &buffers, &state)?;
         rocm_oxide::hip::synchronize()?;
-        if use_post {
-            buffers.post.copy_to_host(&mut host_frame)?;
-        } else {
-            buffers.base.copy_to_host(&mut host_frame)?;
-        }
-        draw_overlay(&mut host_frame, &state, &resources);
+        copy_display_frame(&buffers, use_post, &mut host_frame)?;
+        draw_overlay(&mut host_frame, buffers.size, &state, &resources);
 
         if !saved_once || state.save_requested {
-            save_png(&args.output, &host_frame)?;
+            save_png(&args.output, &host_frame, buffers.size)?;
             state.status = format!("saved {}", args.output.display());
             state.save_requested = false;
             saved_once = true;
         }
 
-        window.update_with_buffer(&host_frame, WIDTH, HEIGHT)?;
+        window.update_with_buffer(&host_frame, buffers.size.width, buffers.size.height)?;
         frames_since_fps = frames_since_fps.saturating_add(1);
         if last_fps.elapsed() >= Duration::from_millis(500) {
             state.fps = frames_since_fps as f64 / last_fps.elapsed().as_secs_f64();
             frames_since_fps = 0;
             last_fps = Instant::now();
             window.set_title(&format!(
-                "ROCm-Oxide Spectral Lattice | {:.1} FPS | {} | warp {:.2}",
-                state.fps, MODES[state.mode], state.warp
+                "ROCm-Oxide Spectral Lattice | {} | {:.1} FPS | limit {} | {}",
+                buffers.size.label(),
+                state.fps,
+                fps_label(state.fps_limit),
+                MODES[state.mode]
             ));
         }
     }
 
+    Ok(())
+}
+
+fn create_window(size: RenderSize, fps_limit: usize) -> Result<Window, Box<dyn std::error::Error>> {
+    let mut window = Window::new(
+        "ROCm-Oxide Spectral Lattice",
+        size.width,
+        size.height,
+        WindowOptions {
+            resize: true,
+            scale: Scale::X1,
+            ..WindowOptions::default()
+        },
+    )?;
+    window.set_target_fps(fps_limit);
+    Ok(window)
+}
+
+fn copy_display_frame(
+    buffers: &DemoBuffers,
+    use_post: bool,
+    host_frame: &mut [u32],
+) -> Result<(), Box<dyn std::error::Error>> {
+    if use_post {
+        buffers.post.copy_to_host(host_frame)?;
+    } else {
+        buffers.base.copy_to_host(host_frame)?;
+    }
     Ok(())
 }
 
@@ -245,9 +326,11 @@ impl ResourceSnapshot {
 }
 
 impl DemoBuffers {
-    fn new(pixel_count: usize) -> rocm_oxide::Result<Self> {
+    fn new(size: RenderSize) -> rocm_oxide::Result<Self> {
+        let pixel_count = size.pixel_count();
         let tile_count = pixel_count.div_ceil(BLOCK_X as usize);
         Ok(Self {
+            size,
             base: DeviceBuffer::<u32>::new(pixel_count)?,
             post: DeviceBuffer::<u32>::new(pixel_count)?,
             short: DeviceBuffer::<u32>::new(pixel_count / 2)?,
@@ -266,11 +349,11 @@ fn render_frame(
 ) -> rocm_oxide::Result<bool> {
     unsafe {
         kernels.spectral_lattice(
-            LaunchConfig::for_num_elems_with_block_size(WIDTH * HEIGHT, BLOCK_X),
+            LaunchConfig::for_num_elems_with_block_size(buffers.size.pixel_count(), BLOCK_X),
             &buffers.base,
-            WIDTH as u32,
-            HEIGHT as u32,
-            WIDTH * HEIGHT,
+            buffers.size.width as u32,
+            buffers.size.height as u32,
+            buffers.size.pixel_count(),
             state.frame_index,
             state.mode as u32,
             state.palette[0],
@@ -283,15 +366,16 @@ fn render_frame(
 
     match state.mode {
         1 => {
-            let config = LaunchConfig::for_num_elems_with_block_size(WIDTH * HEIGHT, BLOCK_X)
-                .try_with_dynamic_shared_mem::<u32>(BLOCK_X as usize)?;
+            let config =
+                LaunchConfig::for_num_elems_with_block_size(buffers.size.pixel_count(), BLOCK_X)
+                    .try_with_dynamic_shared_mem::<u32>(BLOCK_X as usize)?;
             unsafe {
                 kernels.spectral_lds_tiles(
                     config,
                     &buffers.post,
                     &buffers.base,
                     &buffers.tile_stats,
-                    WIDTH * HEIGHT,
+                    buffers.size.pixel_count(),
                     buffers.tile_count,
                     BLOCK_X,
                     state.mode as u32,
@@ -303,19 +387,25 @@ fn render_frame(
             buffers.histogram.copy_from_host(&buffers.histogram_zero)?;
             unsafe {
                 kernels.spectral_atomic_histogram(
-                    LaunchConfig::for_num_elems_with_block_size(WIDTH * HEIGHT, BLOCK_X),
+                    LaunchConfig::for_num_elems_with_block_size(
+                        buffers.size.pixel_count(),
+                        BLOCK_X,
+                    ),
                     &buffers.histogram,
                     &buffers.base,
-                    WIDTH * HEIGHT,
+                    buffers.size.pixel_count(),
                 )?;
                 kernels.spectral_histogram_overlay(
-                    LaunchConfig::for_num_elems_with_block_size(WIDTH * HEIGHT, BLOCK_X),
+                    LaunchConfig::for_num_elems_with_block_size(
+                        buffers.size.pixel_count(),
+                        BLOCK_X,
+                    ),
                     &buffers.post,
                     &buffers.base,
                     &buffers.histogram,
-                    WIDTH as u32,
-                    HEIGHT as u32,
-                    WIDTH * HEIGHT,
+                    buffers.size.width as u32,
+                    buffers.size.height as u32,
+                    buffers.size.pixel_count(),
                     state.frame_index,
                 )?;
             }
@@ -324,12 +414,15 @@ fn render_frame(
         3 => {
             unsafe {
                 kernels.spectral_post_fx(
-                    LaunchConfig::for_num_elems_with_block_size(WIDTH * HEIGHT, BLOCK_X),
+                    LaunchConfig::for_num_elems_with_block_size(
+                        buffers.size.pixel_count(),
+                        BLOCK_X,
+                    ),
                     &buffers.post,
                     &buffers.base,
-                    WIDTH as u32,
-                    HEIGHT as u32,
-                    WIDTH * HEIGHT,
+                    buffers.size.width as u32,
+                    buffers.size.height as u32,
+                    buffers.size.pixel_count(),
                     state.frame_index,
                     state.mode as u32,
                     state.gain,
@@ -359,6 +452,10 @@ fn handle_keyboard(
             Key::Down => state.warp = clamp_f32(state.warp - 0.08, 0.05, 2.25),
             Key::PageUp => state.speed = clamp_f32(state.speed + 0.15, 0.1, 3.0),
             Key::PageDown => state.speed = clamp_f32(state.speed - 0.15, 0.1, 3.0),
+            Key::Minus => step_fps_limit(state, -1),
+            Key::Equal => step_fps_limit(state, 1),
+            Key::Comma => cycle_resolution(state, -1),
+            Key::Period => cycle_resolution(state, 1),
             Key::Space => state.paused = !state.paused,
             Key::A => state.auto_cycle = !state.auto_cycle,
             Key::R => reseed_palette(state),
@@ -378,7 +475,7 @@ fn handle_mouse(
 ) {
     let mouse_down = window.get_mouse_down(MouseButton::Left);
     let mouse_clicked = mouse_down && !*mouse_was_down;
-    if let Some((x, y)) = buffer_mouse_pos(window) {
+    if let Some((x, y)) = buffer_mouse_pos(window, state.render_size) {
         if mouse_down {
             handle_slider_drag(state, x, y);
         }
@@ -389,19 +486,19 @@ fn handle_mouse(
     *mouse_was_down = mouse_down;
 }
 
-fn buffer_mouse_pos(window: &Window) -> Option<(usize, usize)> {
+fn buffer_mouse_pos(window: &Window, size: RenderSize) -> Option<(usize, usize)> {
     let (mx, my) = window.get_unscaled_mouse_pos(MouseMode::Discard)?;
     let (win_w, win_h) = window.get_size();
     if win_w == 0 || win_h == 0 {
         return None;
     }
 
-    let x = ((mx.max(0.0) as f64) * WIDTH as f64 / win_w as f64)
+    let x = ((mx.max(0.0) as f64) * size.width as f64 / win_w as f64)
         .floor()
-        .clamp(0.0, (WIDTH - 1) as f64) as usize;
-    let y = ((my.max(0.0) as f64) * HEIGHT as f64 / win_h as f64)
+        .clamp(0.0, (size.width - 1) as f64) as usize;
+    let y = ((my.max(0.0) as f64) * size.height as f64 / win_h as f64)
         .floor()
-        .clamp(0.0, (HEIGHT - 1) as f64) as usize;
+        .clamp(0.0, (size.height - 1) as f64) as usize;
     Some((x, y))
 }
 
@@ -412,24 +509,27 @@ fn handle_click(
     x: usize,
     y: usize,
 ) {
+    let scale = ui_scale(state.render_size);
     for index in 0..MODES.len() {
-        if mode_rect(index).contains(x, y) {
+        if scale_rect(mode_rect(index), scale).contains(x, y) {
             set_mode(state, index);
             state.auto_cycle = false;
             return;
         }
     }
 
-    if button_rect(0).contains(x, y) {
+    if scale_rect(button_rect(0), scale).contains(x, y) {
         reseed_palette(state);
-    } else if button_rect(1).contains(x, y) {
+    } else if scale_rect(button_rect(1), scale).contains(x, y) {
         run_contract_check(state, kernels, short_frame);
-    } else if button_rect(2).contains(x, y) {
+    } else if scale_rect(button_rect(2), scale).contains(x, y) {
         state.paused = !state.paused;
-    } else if button_rect(3).contains(x, y) {
+    } else if scale_rect(button_rect(3), scale).contains(x, y) {
         state.auto_cycle = !state.auto_cycle;
-    } else if button_rect(4).contains(x, y) {
+    } else if scale_rect(button_rect(4), scale).contains(x, y) {
         state.save_requested = true;
+    } else if scale_rect(button_rect(5), scale).contains(x, y) {
+        cycle_resolution(state, 1);
     }
 }
 
@@ -439,12 +539,77 @@ fn set_mode(state: &mut DemoState, mode: usize) {
 }
 
 fn handle_slider_drag(state: &mut DemoState, x: usize, y: usize) {
-    if slider_rect(0).contains(x, y) {
-        state.warp = slider_value(x, slider_rect(0), 0.05, 2.25);
-    } else if slider_rect(1).contains(x, y) {
-        state.gain = slider_value(x, slider_rect(1), 0.35, 1.8);
-    } else if slider_rect(2).contains(x, y) {
-        state.speed = slider_value(x, slider_rect(2), 0.1, 3.0);
+    let scale = ui_scale(state.render_size);
+    if scale_rect(slider_rect(0), scale).contains(x, y) {
+        state.warp = slider_value(x, scale_rect(slider_rect(0), scale), 0.05, 2.25);
+    } else if scale_rect(slider_rect(1), scale).contains(x, y) {
+        state.gain = slider_value(x, scale_rect(slider_rect(1), scale), 0.35, 1.8);
+    } else if scale_rect(slider_rect(2), scale).contains(x, y) {
+        state.speed = slider_value(x, scale_rect(slider_rect(2), scale), 0.1, 3.0);
+    } else if scale_rect(slider_rect(3), scale).contains(x, y) {
+        set_fps_limit_from_slider(state, x);
+    }
+}
+
+fn cycle_resolution(state: &mut DemoState, delta: isize) {
+    let current = resolution_preset_index(state.render_size).unwrap_or_else(|| {
+        RESOLUTION_PRESETS
+            .iter()
+            .enumerate()
+            .min_by_key(|(_, preset)| {
+                preset
+                    .size
+                    .pixel_count()
+                    .abs_diff(state.render_size.pixel_count())
+            })
+            .map(|(index, _)| index)
+            .unwrap_or(0)
+    });
+    let len = RESOLUTION_PRESETS.len() as isize;
+    let next = (current as isize + delta).rem_euclid(len) as usize;
+    state.render_size = RESOLUTION_PRESETS[next].size;
+}
+
+fn resolution_preset_index(size: RenderSize) -> Option<usize> {
+    RESOLUTION_PRESETS
+        .iter()
+        .position(|preset| preset.size == size)
+}
+
+fn set_fps_limit_from_slider(state: &mut DemoState, x: usize) {
+    let rect = scale_rect(slider_rect(3), ui_scale(state.render_size));
+    let t = ((x.saturating_sub(rect.x)) as f32 / rect.w.max(1) as f32).clamp(0.0, 1.0);
+    let index = (t * (FPS_LIMITS.len() - 1) as f32).round() as usize;
+    state.fps_limit = FPS_LIMITS[index.min(FPS_LIMITS.len() - 1)];
+}
+
+fn step_fps_limit(state: &mut DemoState, delta: isize) {
+    let current = fps_limit_index(state.fps_limit);
+    let len = FPS_LIMITS.len() as isize;
+    let next = (current as isize + delta).rem_euclid(len) as usize;
+    state.fps_limit = FPS_LIMITS[next];
+}
+
+fn fps_limit_index(limit: usize) -> usize {
+    FPS_LIMITS
+        .iter()
+        .position(|value| *value == limit)
+        .unwrap_or_else(|| {
+            FPS_LIMITS
+                .iter()
+                .enumerate()
+                .filter(|(_, value)| **value != 0)
+                .min_by_key(|(_, value)| value.abs_diff(limit))
+                .map(|(index, _)| index)
+                .unwrap_or(1)
+        })
+}
+
+fn fps_label(limit: usize) -> String {
+    if limit == 0 {
+        "uncapped".into()
+    } else {
+        format!("{limit}")
     }
 }
 
@@ -464,11 +629,11 @@ fn run_contract_check(
 ) {
     let result = unsafe {
         kernels.spectral_lattice(
-            LaunchConfig::for_num_elems_with_block_size(WIDTH * HEIGHT, BLOCK_X),
+            LaunchConfig::for_num_elems_with_block_size(state.render_size.pixel_count(), BLOCK_X),
             short_frame,
-            WIDTH as u32,
-            HEIGHT as u32,
-            WIDTH * HEIGHT,
+            state.render_size.width as u32,
+            state.render_size.height as u32,
+            state.render_size.pixel_count(),
             state.frame_index,
             state.mode as u32,
             state.palette[0],
@@ -538,24 +703,65 @@ fn fallback_palette(seed: u32) -> [f32; 4] {
     ]
 }
 
-fn draw_overlay(frame: &mut [u32], state: &DemoState, resources: &ResourceSnapshot) {
-    blend_rect(frame, 0, 0, PANEL_W, HEIGHT, 0x071018, 224);
-    blend_rect(frame, 12, 12, PANEL_W - 24, 82, 0x102030, 190);
-    draw_text(frame, 24, 24, "Spectral Lattice", 0xffffff);
-    draw_text(frame, 24, 44, "ROCm-Oxide Visual Workbench", 0x93dcff);
+fn draw_overlay(
+    frame: &mut [u32],
+    size: RenderSize,
+    state: &DemoState,
+    resources: &ResourceSnapshot,
+) {
+    let scale = ui_scale(size);
+    let panel_w = PANEL_W * scale;
+    blend_rect(frame, size, 0, 0, panel_w, size.height, 0x071018, 224);
+    blend_rect(
+        frame,
+        size,
+        12 * scale,
+        12 * scale,
+        (PANEL_W - 24) * scale,
+        82 * scale,
+        0x102030,
+        190,
+    );
     draw_text(
         frame,
-        24,
-        66,
-        &format!("mode={} fps={:.1}", MODES[state.mode], state.fps),
+        size,
+        scale,
+        24 * scale,
+        24 * scale,
+        "Spectral Lattice",
+        0xffffff,
+    );
+    draw_text(
+        frame,
+        size,
+        scale,
+        24 * scale,
+        44 * scale,
+        "ROCm-Oxide Visual Workbench",
+        0x93dcff,
+    );
+    draw_text(
+        frame,
+        size,
+        scale,
+        24 * scale,
+        66 * scale,
+        &format!(
+            "mode={} fps={:.1} limit={}",
+            MODES[state.mode],
+            state.fps,
+            fps_label(state.fps_limit)
+        ),
         0xdce8f4,
     );
 
     for index in 0..MODES.len() {
-        let rect = mode_rect(index);
+        let rect = scale_rect(mode_rect(index), scale);
         let active = index == state.mode;
         draw_button(
             frame,
+            size,
+            scale,
             rect,
             MODES[index],
             if active { 0x2b8ee8 } else { 0x1a3045 },
@@ -565,26 +771,56 @@ fn draw_overlay(frame: &mut [u32], state: &DemoState, resources: &ResourceSnapsh
 
     draw_text_clipped(
         frame,
-        24,
-        146,
+        size,
+        scale,
+        24 * scale,
+        146 * scale,
         mode_detail(state.mode),
         0x9adfb1,
-        PANEL_W - 42,
+        (PANEL_W - 42) * scale,
     );
 
-    draw_text(frame, 24, 160, "Controls", 0xffffff);
-    draw_button(frame, button_rect(0), "R BLAS Palette", 0x244b3b, false);
-    draw_button(frame, button_rect(1), "C Contract", 0x483842, false);
+    draw_text(
+        frame,
+        size,
+        scale,
+        24 * scale,
+        160 * scale,
+        "Controls",
+        0xffffff,
+    );
     draw_button(
         frame,
-        button_rect(2),
+        size,
+        scale,
+        scale_rect(button_rect(0), scale),
+        "R BLAS Palette",
+        0x244b3b,
+        false,
+    );
+    draw_button(
+        frame,
+        size,
+        scale,
+        scale_rect(button_rect(1), scale),
+        "C Contract",
+        0x483842,
+        false,
+    );
+    draw_button(
+        frame,
+        size,
+        scale,
+        scale_rect(button_rect(2), scale),
         if state.paused { "Resume" } else { "Pause" },
         0x3a3e58,
         state.paused,
     );
     draw_button(
         frame,
-        button_rect(3),
+        size,
+        scale,
+        scale_rect(button_rect(3), scale),
         if state.auto_cycle {
             "Auto On"
         } else {
@@ -593,54 +829,145 @@ fn draw_overlay(frame: &mut [u32], state: &DemoState, resources: &ResourceSnapsh
         0x344733,
         state.auto_cycle,
     );
-    draw_button(frame, button_rect(4), "S Save", 0x3f384f, false);
+    draw_button(
+        frame,
+        size,
+        scale,
+        scale_rect(button_rect(4), scale),
+        "S Save",
+        0x3f384f,
+        false,
+    );
+    draw_button(
+        frame,
+        size,
+        scale,
+        scale_rect(button_rect(5), scale),
+        &format!("Res {}", state.render_size.label()),
+        0x34485f,
+        false,
+    );
 
-    draw_slider(frame, "Warp", slider_rect(0), state.warp, 0.05, 2.25);
-    draw_slider(frame, "Gain", slider_rect(1), state.gain, 0.35, 1.8);
-    draw_slider(frame, "Speed", slider_rect(2), state.speed, 0.1, 3.0);
+    draw_slider(
+        frame,
+        size,
+        scale,
+        "Warp",
+        scale_rect(slider_rect(0), scale),
+        state.warp,
+        0.05,
+        2.25,
+    );
+    draw_slider(
+        frame,
+        size,
+        scale,
+        "Gain",
+        scale_rect(slider_rect(1), scale),
+        state.gain,
+        0.35,
+        1.8,
+    );
+    draw_slider(
+        frame,
+        size,
+        scale,
+        "Speed",
+        scale_rect(slider_rect(2), scale),
+        state.speed,
+        0.1,
+        3.0,
+    );
+    draw_fps_slider(
+        frame,
+        size,
+        scale,
+        scale_rect(slider_rect(3), scale),
+        state.fps_limit,
+    );
 
-    draw_text(frame, 24, 416, "Runtime", 0xffffff);
+    draw_text(
+        frame,
+        size,
+        scale,
+        24 * scale,
+        448 * scale,
+        "Runtime",
+        0xffffff,
+    );
     draw_text_clipped(
         frame,
-        24,
-        438,
+        size,
+        scale,
+        24 * scale,
+        468 * scale,
         &resources.resource_line,
         0xc7d4e0,
-        PANEL_W - 42,
+        (PANEL_W - 42) * scale,
     );
     draw_text_clipped(
         frame,
-        24,
-        456,
+        size,
+        scale,
+        24 * scale,
+        486 * scale,
         &resources.launch_line,
         0xc7d4e0,
-        PANEL_W - 42,
+        (PANEL_W - 42) * scale,
     );
     draw_text_clipped(
         frame,
-        24,
-        474,
+        size,
+        scale,
+        24 * scale,
+        504 * scale,
         &resources.library_line,
         0xc7d4e0,
-        PANEL_W - 42,
+        (PANEL_W - 42) * scale,
     );
     draw_text_clipped(
         frame,
-        24,
-        492,
+        size,
+        scale,
+        24 * scale,
+        522 * scale,
         &resources.parity_line,
         0xc7d4e0,
-        PANEL_W - 42,
+        (PANEL_W - 42) * scale,
     );
-    draw_text_clipped(
-        frame,
-        24,
-        512,
-        &format!("palette: {}", state.palette_source),
-        0x9adfb1,
-        PANEL_W - 42,
-    );
-    draw_text_clipped(frame, 24, 528, &state.status, 0xffcc8a, PANEL_W - 42);
+    if size.height >= 560 * scale {
+        draw_text_clipped(
+            frame,
+            size,
+            scale,
+            24 * scale,
+            540 * scale,
+            &format!("palette: {}", state.palette_source),
+            0x9adfb1,
+            (PANEL_W - 42) * scale,
+        );
+        draw_text_clipped(
+            frame,
+            size,
+            scale,
+            24 * scale,
+            558 * scale,
+            &state.status,
+            0xffcc8a,
+            (PANEL_W - 42) * scale,
+        );
+    } else {
+        draw_text_clipped(
+            frame,
+            size,
+            scale,
+            24 * scale,
+            528 * scale,
+            &state.status,
+            0xffcc8a,
+            (PANEL_W - 42) * scale,
+        );
+    }
 }
 
 fn mode_detail(mode: usize) -> &'static str {
@@ -652,9 +979,18 @@ fn mode_detail(mode: usize) -> &'static str {
     }
 }
 
-fn draw_button(frame: &mut [u32], rect: Rect, label: &str, color: u32, active: bool) {
+fn draw_button(
+    frame: &mut [u32],
+    size: RenderSize,
+    scale: usize,
+    rect: Rect,
+    label: &str,
+    color: u32,
+    active: bool,
+) {
     blend_rect(
         frame,
+        size,
         rect.x,
         rect.y,
         rect.w,
@@ -664,28 +1000,89 @@ fn draw_button(frame: &mut [u32], rect: Rect, label: &str, color: u32, active: b
     );
     draw_rect_outline(
         frame,
+        size,
         rect.x,
         rect.y,
         rect.w,
         rect.h,
         if active { 0xd7f6ff } else { 0x557083 },
     );
-    draw_text_clipped(frame, rect.x + 8, rect.y + 9, label, 0xf6fbff, rect.w - 14);
+    draw_text_clipped(
+        frame,
+        size,
+        scale,
+        rect.x + 8 * scale,
+        rect.y + 9 * scale,
+        label,
+        0xf6fbff,
+        rect.w - 14 * scale,
+    );
 }
 
-fn draw_slider(frame: &mut [u32], label: &str, rect: Rect, value: f32, min: f32, max: f32) {
+fn draw_slider(
+    frame: &mut [u32],
+    size: RenderSize,
+    scale: usize,
+    label: &str,
+    rect: Rect,
+    value: f32,
+    min: f32,
+    max: f32,
+) {
     draw_text(
         frame,
+        size,
+        scale,
         rect.x,
-        rect.y.saturating_sub(18),
+        rect.y.saturating_sub(18 * scale),
         &format!("{label} {:.2}", value),
         0xdce8f4,
     );
-    blend_rect(frame, rect.x, rect.y, rect.w, rect.h, 0x142434, 210);
+    blend_rect(frame, size, rect.x, rect.y, rect.w, rect.h, 0x142434, 210);
     let t = ((value - min) / (max - min)).clamp(0.0, 1.0);
     let fill = ((rect.w - 4) as f32 * t) as usize;
-    draw_rect(frame, rect.x + 2, rect.y + 2, fill, rect.h - 4, 0x2b8ee8);
-    draw_rect_outline(frame, rect.x, rect.y, rect.w, rect.h, 0x66889e);
+    draw_rect(
+        frame,
+        size,
+        rect.x + 2,
+        rect.y + 2,
+        fill,
+        rect.h - 4,
+        0x2b8ee8,
+    );
+    draw_rect_outline(frame, size, rect.x, rect.y, rect.w, rect.h, 0x66889e);
+}
+
+fn draw_fps_slider(
+    frame: &mut [u32],
+    size: RenderSize,
+    scale: usize,
+    rect: Rect,
+    fps_limit: usize,
+) {
+    draw_text(
+        frame,
+        size,
+        scale,
+        rect.x,
+        rect.y.saturating_sub(18 * scale),
+        &format!("FPS Limit {}", fps_label(fps_limit)),
+        0xdce8f4,
+    );
+    blend_rect(frame, size, rect.x, rect.y, rect.w, rect.h, 0x142434, 210);
+    let index = fps_limit_index(fps_limit);
+    let t = index as f32 / (FPS_LIMITS.len() - 1) as f32;
+    let fill = ((rect.w - 4) as f32 * t) as usize;
+    draw_rect(
+        frame,
+        size,
+        rect.x + 2,
+        rect.y + 2,
+        fill,
+        rect.h - 4,
+        0x2b8ee8,
+    );
+    draw_rect_outline(frame, size, rect.x, rect.y, rect.w, rect.h, 0x66889e);
 }
 
 fn mode_rect(index: usize) -> Rect {
@@ -699,7 +1096,26 @@ fn button_rect(index: usize) -> Rect {
 }
 
 fn slider_rect(index: usize) -> Rect {
-    Rect::new(24, 290 + index * 48, PANEL_W - 48, 16)
+    Rect::new(24, 306 + index * 36, PANEL_W - 48, 16)
+}
+
+fn ui_scale(size: RenderSize) -> usize {
+    if size.height >= 1800 || size.width >= 3200 {
+        3
+    } else if size.height >= 1200 || size.width >= 2200 {
+        2
+    } else {
+        1
+    }
+}
+
+fn scale_rect(rect: Rect, scale: usize) -> Rect {
+    Rect::new(
+        rect.x * scale,
+        rect.y * scale,
+        rect.w * scale,
+        rect.h * scale,
+    )
 }
 
 fn slider_value(x: usize, rect: Rect, min: f32, max: f32) -> f32 {
@@ -707,16 +1123,20 @@ fn slider_value(x: usize, rect: Rect, min: f32, max: f32) -> f32 {
     min + (max - min) * t
 }
 
-fn save_png(path: &Path, frame: &[u32]) -> Result<(), Box<dyn std::error::Error>> {
+fn save_png(
+    path: &Path,
+    frame: &[u32],
+    size: RenderSize,
+) -> Result<(), Box<dyn std::error::Error>> {
     if let Some(parent) = path.parent()
         && !parent.as_os_str().is_empty()
     {
         std::fs::create_dir_all(parent)?;
     }
-    let mut image = RgbImage::new(WIDTH as u32, HEIGHT as u32);
+    let mut image = RgbImage::new(size.width as u32, size.height as u32);
     for (index, pixel) in frame.iter().copied().enumerate() {
-        let x = (index % WIDTH) as u32;
-        let y = (index / WIDTH) as u32;
+        let x = (index % size.width) as u32;
+        let y = (index / size.width) as u32;
         image.put_pixel(
             x,
             y,
@@ -735,6 +1155,8 @@ fn parse_args() -> Result<DemoArgs, Box<dyn std::error::Error>> {
     let mut frames = None;
     let mut output = PathBuf::from(DEFAULT_OUTPUT);
     let mut mode = None;
+    let mut size = RESOLUTION_PRESETS[0].size;
+    let mut fps_limit = 60usize;
     let mut args = std::env::args().skip(1);
     while let Some(arg) = args.next() {
         match arg.as_str() {
@@ -756,9 +1178,21 @@ fn parse_args() -> Result<DemoArgs, Box<dyn std::error::Error>> {
                 })?;
                 mode = Some(parse_mode(&value)?);
             }
+            "--resolution" | "--res" => {
+                let value = args
+                    .next()
+                    .ok_or_else(|| "--resolution requires a preset or WIDTHxHEIGHT".to_string())?;
+                size = parse_resolution(&value)?;
+            }
+            "--fps" | "--fps-limit" => {
+                let value = args
+                    .next()
+                    .ok_or_else(|| "--fps-limit requires a number or uncapped".to_string())?;
+                fps_limit = parse_fps_limit(&value)?;
+            }
             "--help" | "-h" => {
                 println!(
-                    "Usage: cargo run --example spectral_lattice -- [--frames N] [--mode MODE] [--output PATH]"
+                    "Usage: cargo run --example spectral_lattice -- [--frames N] [--mode MODE] [--resolution 4k|WIDTHxHEIGHT] [--fps-limit FPS|uncapped] [--output PATH]"
                 );
                 std::process::exit(0);
             }
@@ -769,6 +1203,8 @@ fn parse_args() -> Result<DemoArgs, Box<dyn std::error::Error>> {
         frames,
         output,
         mode,
+        size,
+        fps_limit,
     })
 }
 
@@ -796,42 +1232,127 @@ fn parse_mode(value: &str) -> Result<usize, Box<dyn std::error::Error>> {
         })
 }
 
-fn blend_rect(frame: &mut [u32], x: usize, y: usize, w: usize, h: usize, color: u32, alpha: u32) {
-    let x_end = (x + w).min(WIDTH);
-    let y_end = (y + h).min(HEIGHT);
-    for py in y.min(HEIGHT)..y_end {
-        let row = py * WIDTH;
-        for px in x.min(WIDTH)..x_end {
+fn parse_resolution(value: &str) -> Result<RenderSize, Box<dyn std::error::Error>> {
+    if let Some(preset) = RESOLUTION_PRESETS
+        .iter()
+        .find(|preset| preset.label.eq_ignore_ascii_case(value))
+    {
+        return Ok(preset.size);
+    }
+
+    match value.to_ascii_lowercase().as_str() {
+        "540" | "540p" => return Ok(RESOLUTION_PRESETS[0].size),
+        "720" | "720p" => return Ok(RESOLUTION_PRESETS[1].size),
+        "1080" | "1080p" | "fhd" => return Ok(RESOLUTION_PRESETS[2].size),
+        "1440" | "1440p" | "qhd" => return Ok(RESOLUTION_PRESETS[3].size),
+        "2160" | "2160p" | "uhd" | "4k" => return Ok(RESOLUTION_PRESETS[4].size),
+        _ => {}
+    }
+
+    let Some((width, height)) = value.split_once(['x', 'X']) else {
+        return Err(format!(
+            "unknown resolution `{value}`; expected 540p, 720p, 1080p, 1440p, 4k, or WIDTHxHEIGHT"
+        )
+        .into());
+    };
+    let width = width.parse::<usize>()?;
+    let height = height.parse::<usize>()?;
+    if width < 640 || height < 360 || width > 7680 || height > 4320 {
+        return Err(format!(
+            "resolution {width}x{height} is outside supported bounds 640x360..7680x4320"
+        )
+        .into());
+    }
+    width
+        .checked_mul(height)
+        .ok_or_else(|| format!("resolution {width}x{height} overflows pixel count"))?;
+    Ok(RenderSize::new(width, height))
+}
+
+fn parse_fps_limit(value: &str) -> Result<usize, Box<dyn std::error::Error>> {
+    if value.eq_ignore_ascii_case("uncapped") || value.eq_ignore_ascii_case("off") {
+        return Ok(0);
+    }
+    let fps = value.parse::<usize>()?;
+    if fps != 0 && !(15..=360).contains(&fps) {
+        return Err(
+            format!("FPS limit {fps} is outside supported bounds 15..360, or 0/uncapped").into(),
+        );
+    }
+    Ok(fps)
+}
+
+fn blend_rect(
+    frame: &mut [u32],
+    size: RenderSize,
+    x: usize,
+    y: usize,
+    w: usize,
+    h: usize,
+    color: u32,
+    alpha: u32,
+) {
+    let x_end = (x + w).min(size.width);
+    let y_end = (y + h).min(size.height);
+    for py in y.min(size.height)..y_end {
+        let row = py * size.width;
+        for px in x.min(size.width)..x_end {
             let index = row + px;
             frame[index] = blend(frame[index], color, alpha);
         }
     }
 }
 
-fn draw_rect(frame: &mut [u32], x: usize, y: usize, w: usize, h: usize, color: u32) {
-    let x_end = (x + w).min(WIDTH);
-    let y_end = (y + h).min(HEIGHT);
-    for py in y.min(HEIGHT)..y_end {
-        let row = py * WIDTH;
-        for px in x.min(WIDTH)..x_end {
+fn draw_rect(
+    frame: &mut [u32],
+    size: RenderSize,
+    x: usize,
+    y: usize,
+    w: usize,
+    h: usize,
+    color: u32,
+) {
+    let x_end = (x + w).min(size.width);
+    let y_end = (y + h).min(size.height);
+    for py in y.min(size.height)..y_end {
+        let row = py * size.width;
+        for px in x.min(size.width)..x_end {
             frame[row + px] = color;
         }
     }
 }
 
-fn draw_rect_outline(frame: &mut [u32], x: usize, y: usize, w: usize, h: usize, color: u32) {
-    draw_rect(frame, x, y, w, 1, color);
-    draw_rect(frame, x, y + h.saturating_sub(1), w, 1, color);
-    draw_rect(frame, x, y, 1, h, color);
-    draw_rect(frame, x + w.saturating_sub(1), y, 1, h, color);
+fn draw_rect_outline(
+    frame: &mut [u32],
+    size: RenderSize,
+    x: usize,
+    y: usize,
+    w: usize,
+    h: usize,
+    color: u32,
+) {
+    draw_rect(frame, size, x, y, w, 1, color);
+    draw_rect(frame, size, x, y + h.saturating_sub(1), w, 1, color);
+    draw_rect(frame, size, x, y, 1, h, color);
+    draw_rect(frame, size, x + w.saturating_sub(1), y, 1, h, color);
 }
 
-fn draw_text(frame: &mut [u32], x: usize, y: usize, text: &str, color: u32) {
-    draw_text_clipped(frame, x, y, text, color, WIDTH - x);
+fn draw_text(
+    frame: &mut [u32],
+    size: RenderSize,
+    scale: usize,
+    x: usize,
+    y: usize,
+    text: &str,
+    color: u32,
+) {
+    draw_text_clipped(frame, size, scale, x, y, text, color, size.width - x);
 }
 
 fn draw_text_clipped(
     frame: &mut [u32],
+    size: RenderSize,
+    scale: usize,
     x: usize,
     y: usize,
     text: &str,
@@ -839,7 +1360,7 @@ fn draw_text_clipped(
     max_width: usize,
 ) {
     let mut cx = x;
-    let max_x = x.saturating_add(max_width).min(WIDTH);
+    let max_x = x.saturating_add(max_width).min(size.width);
     for ch in text.chars() {
         if cx + 8 > max_x {
             break;
@@ -848,16 +1369,22 @@ fn draw_text_clipped(
             for (row, bits) in glyph.iter().enumerate() {
                 for col in 0..8 {
                     if (bits >> col) & 1 == 1 {
-                        let px = cx + col;
-                        let py = y + row;
-                        if px < WIDTH && py < HEIGHT {
-                            frame[py * WIDTH + px] = color;
+                        let base_x = cx + col * scale;
+                        let base_y = y + row * scale;
+                        for oy in 0..scale {
+                            for ox in 0..scale {
+                                let px = base_x + ox;
+                                let py = base_y + oy;
+                                if px < size.width && py < size.height {
+                                    frame[py * size.width + px] = color;
+                                }
+                            }
                         }
                     }
                 }
             }
         }
-        cx += 8;
+        cx += 8 * scale;
     }
 }
 

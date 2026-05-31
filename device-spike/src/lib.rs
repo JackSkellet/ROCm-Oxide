@@ -510,9 +510,11 @@ pub unsafe extern "C" fn spectral_lattice(
     let prism = abs_f32(gpu::math::sin_f32((px + py) * 9.0 + radius * 13.0 - t * 2.1));
     let bloom = 1.0 / (1.0 + radius * radius * 4.2);
     let center = 1.0 - clamp_f32(radius * 0.72, 0.0, 1.0);
-    let h = hash32((x << 16) ^ y ^ frame_index.wrapping_mul(97));
-    let spark = if (h & 2047) < 5 + ((center * 20.0) as u32) {
-        0.42
+    let h = hash32((x << 16) ^ y);
+    let spark = if (h & 4095) < 6 + ((center * 18.0) as u32) {
+        let phase = ((h >> 12) & 255) as f32 * 0.024_543_693;
+        let pulse = gpu::math::sin_f32(t * 0.72 + phase) * 0.5 + 0.5;
+        0.16 + pulse * 0.22
     } else {
         0.0
     };
