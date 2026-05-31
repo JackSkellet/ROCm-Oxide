@@ -56,6 +56,19 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     assert_eq!(math[14], 1.0, "max_f32 should propagate NaN");
     assert_close("min_f64", math[15], -2.0, 0.0001)?;
 
+    let atomic_scope_out = DeviceBuffer::<u32>::new(4)?;
+    let atomic_counters = DeviceBuffer::from_slice(&[0u32; 3])?;
+    unsafe {
+        kernels.scoped_atomics(
+            LaunchConfig::new(Dim3::x(1), Dim3::x(256)),
+            &atomic_scope_out,
+            &atomic_counters,
+        )?;
+    }
+    rocm_oxide::hip::synchronize()?;
+    assert_eq!(atomic_scope_out.copy_to_vec()?, vec![0, 1, 2, 0]);
+    assert_eq!(atomic_counters.copy_to_vec()?, vec![256, 256, 256]);
+
     let short = DeviceBuffer::from_slice(&a[..n / 2])?;
     let validation = unsafe {
         kernels.vector_add(

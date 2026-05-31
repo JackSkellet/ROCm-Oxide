@@ -21,9 +21,9 @@ features on top of stronger contracts.
 - [x] Math intrinsic lowering:
   - [x] map common `f32`/`f64` math calls to AMDGPU/ROCm-supported lowering
   - [x] add tests for `sqrt`, `rsqrt`, `sin`, `cos`, `atan`, min/max, and NaN behavior
-- [ ] Explicit memory-scope atomics:
-  - [ ] expose workgroup/device/system scope where ROCm supports it
-  - [ ] keep relaxed/basic atomics as the compatibility path
+- [x] Explicit memory-scope atomics:
+  - [x] expose workgroup/device/system scope where ROCm supports it
+  - [x] keep relaxed/basic atomics as the compatibility path
 - [ ] Generated lazy operations:
   - [ ] allow generated kernel bindings to return `DeviceOperation` values
   - [ ] support stream-pool scheduling without eager launch
@@ -32,5 +32,7 @@ features on top of stronger contracts.
 ## Later
 
 - [ ] Direct exported generic-kernel monomorphization without wrapper functions.
+- [ ] Scope-specific LLVM `syncscope` selection for atomics once the backend has
+      a robust marker-to-IR lowering path.
 - [ ] ROCm-specific replacements for CUDA cluster launch, TMA, and WGMMA concepts.
 - [ ] ROCm code-object artifact linking layer once the basic artifact model is stable.

@@ -7,7 +7,7 @@
 
 use core::arch::amdgpu;
 use core::intrinsics::gpu::{amdgpu_dispatch_ptr, gpu_launch_sized_workgroup_mem};
-use core::sync::atomic::{AtomicU32, Ordering};
+use core::sync::atomic::Ordering;
 use core::{marker::PhantomData, ptr};
 
 pub mod math {
@@ -148,6 +148,177 @@ pub mod math {
     }
 }
 
+pub mod atomic {
+    use core::marker::PhantomData;
+    use core::sync::atomic::{AtomicU32, Ordering};
+
+    #[repr(u8)]
+    #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+    pub enum AtomicScope {
+        Workgroup = 0,
+        Device = 1,
+        System = 2,
+    }
+
+    #[repr(u8)]
+    #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+    pub enum AtomicOrdering {
+        Relaxed = 0,
+        Acquire = 1,
+        Release = 2,
+        AcqRel = 3,
+        SeqCst = 4,
+    }
+
+    impl AtomicOrdering {
+        #[inline(always)]
+        pub fn as_core(self) -> Ordering {
+            match self {
+                Self::Relaxed => Ordering::Relaxed,
+                Self::Acquire => Ordering::Acquire,
+                Self::Release => Ordering::Release,
+                Self::AcqRel => Ordering::AcqRel,
+                Self::SeqCst => Ordering::SeqCst,
+            }
+        }
+    }
+
+    impl From<Ordering> for AtomicOrdering {
+        #[inline(always)]
+        fn from(ordering: Ordering) -> Self {
+            match ordering {
+                Ordering::Relaxed => Self::Relaxed,
+                Ordering::Acquire => Self::Acquire,
+                Ordering::Release => Self::Release,
+                Ordering::AcqRel => Self::AcqRel,
+                Ordering::SeqCst => Self::SeqCst,
+                _ => Self::SeqCst,
+            }
+        }
+    }
+
+    pub trait Scope {
+        const SCOPE: AtomicScope;
+    }
+
+    pub enum Workgroup {}
+    pub enum Device {}
+    pub enum System {}
+
+    impl Scope for Workgroup {
+        const SCOPE: AtomicScope = AtomicScope::Workgroup;
+    }
+
+    impl Scope for Device {
+        const SCOPE: AtomicScope = AtomicScope::Device;
+    }
+
+    impl Scope for System {
+        const SCOPE: AtomicScope = AtomicScope::System;
+    }
+
+    #[repr(transparent)]
+    pub struct AtomicU32Ref<S: Scope> {
+        inner: AtomicU32,
+        _scope: PhantomData<S>,
+    }
+
+    impl<S: Scope> AtomicU32Ref<S> {
+        #[inline(always)]
+        pub unsafe fn from_ptr<'a>(ptr: *mut u32) -> &'a Self {
+            unsafe { &*ptr.cast::<Self>() }
+        }
+
+        #[inline(always)]
+        pub unsafe fn from_const_ptr<'a>(ptr: *const u32) -> &'a Self {
+            unsafe { &*ptr.cast::<Self>() }
+        }
+
+        #[inline(always)]
+        pub const fn scope() -> AtomicScope {
+            S::SCOPE
+        }
+
+        #[inline(always)]
+        pub fn load(&self, ordering: AtomicOrdering) -> u32 {
+            let _ = S::SCOPE;
+            self.inner.load(ordering.as_core())
+        }
+
+        #[inline(always)]
+        pub fn store(&self, value: u32, ordering: AtomicOrdering) {
+            let _ = S::SCOPE;
+            self.inner.store(value, ordering.as_core());
+        }
+
+        #[inline(always)]
+        pub fn fetch_add(&self, value: u32, ordering: AtomicOrdering) -> u32 {
+            let _ = S::SCOPE;
+            self.inner.fetch_add(value, ordering.as_core())
+        }
+    }
+
+    pub type WorkgroupAtomicU32 = AtomicU32Ref<Workgroup>;
+    pub type DeviceAtomicU32 = AtomicU32Ref<Device>;
+    pub type SystemAtomicU32 = AtomicU32Ref<System>;
+
+    #[inline(always)]
+    pub unsafe fn atomic_add_u32_scoped(
+        ptr: *mut u32,
+        value: u32,
+        scope: AtomicScope,
+        ordering: AtomicOrdering,
+    ) -> u32 {
+        match scope {
+            AtomicScope::Workgroup => {
+                unsafe { WorkgroupAtomicU32::from_ptr(ptr) }.fetch_add(value, ordering)
+            }
+            AtomicScope::Device => unsafe { DeviceAtomicU32::from_ptr(ptr) }
+                .fetch_add(value, ordering),
+            AtomicScope::System => unsafe { SystemAtomicU32::from_ptr(ptr) }
+                .fetch_add(value, ordering),
+        }
+    }
+
+    #[inline(always)]
+    pub unsafe fn atomic_store_u32_scoped(
+        ptr: *mut u32,
+        value: u32,
+        scope: AtomicScope,
+        ordering: AtomicOrdering,
+    ) {
+        match scope {
+            AtomicScope::Workgroup => {
+                unsafe { WorkgroupAtomicU32::from_ptr(ptr) }.store(value, ordering)
+            }
+            AtomicScope::Device => unsafe { DeviceAtomicU32::from_ptr(ptr) }
+                .store(value, ordering),
+            AtomicScope::System => unsafe { SystemAtomicU32::from_ptr(ptr) }
+                .store(value, ordering),
+        }
+    }
+
+    #[inline(always)]
+    pub unsafe fn atomic_load_u32_scoped(
+        ptr: *const u32,
+        scope: AtomicScope,
+        ordering: AtomicOrdering,
+    ) -> u32 {
+        match scope {
+            AtomicScope::Workgroup => unsafe { WorkgroupAtomicU32::from_const_ptr(ptr) }
+                .load(ordering),
+            AtomicScope::Device => unsafe { DeviceAtomicU32::from_const_ptr(ptr) }
+                .load(ordering),
+            AtomicScope::System => unsafe { SystemAtomicU32::from_const_ptr(ptr) }
+                .load(ordering),
+        }
+    }
+}
+
+pub use atomic::{
+    AtomicOrdering, AtomicScope, DeviceAtomicU32, SystemAtomicU32, WorkgroupAtomicU32,
+};
+
 #[inline(always)]
 pub fn thread_idx_x() -> u32 {
     amdgpu::workitem_id_x()
@@ -285,19 +456,24 @@ pub fn wave_reduce_max_u32(value: u32) -> u32 {
 
 #[inline(always)]
 pub unsafe fn atomic_add_u32(ptr: *mut u32, value: u32) -> u32 {
-    unsafe { (*(ptr.cast::<AtomicU32>())).fetch_add(value, Ordering::Relaxed) }
-}
-
-#[inline(always)]
-pub unsafe fn atomic_store_u32(ptr: *mut u32, value: u32, ordering: Ordering) {
     unsafe {
-        (*(ptr.cast::<AtomicU32>())).store(value, ordering);
+        atomic::atomic_add_u32_scoped(
+            ptr,
+            value,
+            AtomicScope::Device,
+            AtomicOrdering::Relaxed,
+        )
     }
 }
 
 #[inline(always)]
+pub unsafe fn atomic_store_u32(ptr: *mut u32, value: u32, ordering: Ordering) {
+    unsafe { DeviceAtomicU32::from_ptr(ptr) }.store(value, ordering.into());
+}
+
+#[inline(always)]
 pub unsafe fn atomic_load_u32(ptr: *const u32, ordering: Ordering) -> u32 {
-    unsafe { (*(ptr.cast::<AtomicU32>())).load(ordering) }
+    unsafe { DeviceAtomicU32::from_const_ptr(ptr) }.load(ordering.into())
 }
 
 #[repr(C)]

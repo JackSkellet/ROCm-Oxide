@@ -290,14 +290,15 @@ now wraps the raw AMDGPU intrinsics used by kernels. It provides thread/block
 IDs, dispatch-packet-derived block/grid dimensions, global IDs, wavefront
 metadata, barriers, dynamic launch-sized LDS pointers, ballot/reduction helpers,
 typed device slices, math helpers for `sqrt`, `rsqrt`, `sin`, `cos`, `atan`,
-min/max, and basic `u32` atomics so device code does not need to call
+min/max, scoped `u32` atomics for workgroup/device/system intent, and the basic
+relaxed `u32` atomic compatibility helpers so device code does not need to call
 `core::arch::amdgpu` directly.
 
 ## Next Implementation Slice
 
-The next useful step is compiler completeness: richer pointer propagation in the
-IR post-pass, span-preserving diagnostics, generic kernel monomorphization
-tests, and cross-crate kernel discovery/bundling.
+The next useful step is generated lazy operations: teach generated kernel
+bindings to return `DeviceOperation` values for stream-pool scheduling while
+keeping the immediate launch API as the convenience path.
 
 ## Verification
 

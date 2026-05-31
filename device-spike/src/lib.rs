@@ -96,6 +96,50 @@ pub unsafe extern "C" fn math_intrinsics(
     }
 }
 
+// rocm-oxide: len(out)=4
+// rocm-oxide: len(counters)=3
+#[kernel]
+pub unsafe extern "C" fn scoped_atomics(
+    out: gpu::DeviceSliceMut<u32>,
+    counters: gpu::DeviceSliceMut<u32>,
+) {
+    let i = gpu::global_id_x();
+    if i >= 256 {
+        return;
+    }
+
+    let counters_ptr = counters.as_mut_ptr();
+    unsafe {
+        gpu::atomic::atomic_add_u32_scoped(
+            counters_ptr.add(0),
+            1,
+            gpu::AtomicScope::Workgroup,
+            gpu::AtomicOrdering::Relaxed,
+        );
+        gpu::atomic::atomic_add_u32_scoped(
+            counters_ptr.add(1),
+            1,
+            gpu::AtomicScope::Device,
+            gpu::AtomicOrdering::Relaxed,
+        );
+        gpu::atomic::atomic_add_u32_scoped(
+            counters_ptr.add(2),
+            1,
+            gpu::AtomicScope::System,
+            gpu::AtomicOrdering::Relaxed,
+        );
+    }
+
+    if i == 0 {
+        unsafe {
+            out.write_unchecked(0, gpu::WorkgroupAtomicU32::scope() as u32);
+            out.write_unchecked(1, gpu::DeviceAtomicU32::scope() as u32);
+            out.write_unchecked(2, gpu::SystemAtomicU32::scope() as u32);
+            out.write_unchecked(3, gpu::AtomicOrdering::Relaxed as u32);
+        }
+    }
+}
+
 #[kernel]
 pub unsafe extern "C" fn rainbow_geometry(
     frame: gpu::DeviceSliceMut<u32>,

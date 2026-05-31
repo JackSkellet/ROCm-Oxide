@@ -95,7 +95,7 @@ not the product.
   - [x] dynamic shared memory/LDS wrappers
   - [x] typed device slices for pointer/length kernel ABI
   - [x] basic `u32` atomics
-  - [ ] explicit memory-scope atomics
+  - [x] explicit memory-scope atomics
   - [x] math intrinsic lowering
 - [ ] Compiler completeness:
   - [x] support more pointer-producing IR ops beyond `getelementptr`
@@ -114,3 +114,5 @@ not the product.
       should be a separate integration layer.
 - [ ] NVVM/LTOIR and nvJitLink concepts map only partially to ROCm code-object
       linking; implement after the basic artifact model is stable.
+- [ ] Fine-grained LLVM `syncscope` selection for ROCm atomics should follow the
+      typed scoped API once the backend has a source marker path for that IR.
