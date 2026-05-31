@@ -30,6 +30,7 @@ not the product.
 - [x] Stream-aware raw kernel launch.
 - [x] Lazy host-side `DeviceOperation` model.
 - [x] Stream-pool operation scheduling.
+- [x] Generated kernel bindings can return lazy `DeviceOperation` launch jobs.
 - [x] HIP module global lookup.
 - [x] Typed host setters/getters for module globals.
 - [x] `rocm-oxide-device` no-std helper crate for AMDGPU intrinsics.

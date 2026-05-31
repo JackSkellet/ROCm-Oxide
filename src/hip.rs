@@ -503,6 +503,11 @@ pub struct Module {
     raw: HipModule,
 }
 
+// HIP module handles are immutable after load and launches bind the target
+// device before use through `ExecutionContext`.
+unsafe impl Send for Module {}
+unsafe impl Sync for Module {}
+
 impl Module {
     pub fn from_code_object(bytes: &[u8]) -> Result<Self> {
         let mut raw = ptr::null_mut();

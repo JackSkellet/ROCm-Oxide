@@ -1,7 +1,7 @@
 use rocm_oxide::{
     Device, DeviceBuffer, DeviceOperation, ExecutionContext, LaunchConfig, Result, StreamPool,
 };
-use std::sync::mpsc;
+use std::sync::{Arc, mpsc};
 use std::time::Duration;
 
 mod generated {
@@ -79,11 +79,11 @@ fn main() -> Result<()> {
 
     println!("ROCm-Oxide feature showcase on {}", device.arch());
 
-    let d_a = DeviceBuffer::from_slice(&a)?;
-    let d_b = DeviceBuffer::from_slice(&b)?;
-    let d_out = DeviceBuffer::<f32>::new(n)?;
+    let d_a = Arc::new(DeviceBuffer::from_slice(&a)?);
+    let d_b = Arc::new(DeviceBuffer::from_slice(&b)?);
+    let d_out = Arc::new(DeviceBuffer::<f32>::new(n)?);
 
-    let short = DeviceBuffer::from_slice(&a[..n / 2])?;
+    let short = Arc::new(DeviceBuffer::from_slice(&a[..n / 2])?);
     let rejected = unsafe {
         kernels.vector_add(
             LaunchConfig::for_num_elems_with_block_size(n, block_x),
@@ -107,6 +107,20 @@ fn main() -> Result<()> {
     let out = d_out.copy_to_vec()?;
     assert_eq!(out[4096], a[4096] + b[4096]);
     println!("ok: Rust-authored AMDGPU vector_add launched from generated host bindings");
+
+    let completion = unsafe {
+        kernels.vector_add_operation(
+            LaunchConfig::for_num_elems_with_block_size(n, block_x),
+            Arc::clone(&d_out),
+            Arc::clone(&d_a),
+            Arc::clone(&d_b),
+        )?
+    }
+    .sync_on(&device.execution_context()?)?;
+    assert_eq!(completion.retained_count(), 3);
+    let lazy_out = d_out.copy_to_vec()?;
+    assert_eq!(lazy_out[8192], a[8192] + b[8192]);
+    println!("ok: generated DeviceOperation binding launched on an execution stream");
 
     let params = DeviceBuffer::from_slice(&[generated::AffineParams {
         scale: 3.0,

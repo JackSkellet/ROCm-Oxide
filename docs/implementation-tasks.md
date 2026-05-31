@@ -24,10 +24,10 @@ features on top of stronger contracts.
 - [x] Explicit memory-scope atomics:
   - [x] expose workgroup/device/system scope where ROCm supports it
   - [x] keep relaxed/basic atomics as the compatibility path
-- [ ] Generated lazy operations:
-  - [ ] allow generated kernel bindings to return `DeviceOperation` values
-  - [ ] support stream-pool scheduling without eager launch
-  - [ ] keep the immediate launch API as a convenience wrapper
+- [x] Generated lazy operations:
+  - [x] allow generated kernel bindings to return `DeviceOperation` values
+  - [x] support stream-pool scheduling without eager launch
+  - [x] keep the immediate launch API as a convenience wrapper
 
 ## Later
 

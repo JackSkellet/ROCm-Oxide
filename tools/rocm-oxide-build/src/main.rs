@@ -2338,15 +2338,19 @@ fn write_bindings(
     }
     out.push_str("#[allow(dead_code)]\n");
     out.push_str("pub struct DeviceKernels {\n");
-    out.push_str("    module: rocm_oxide::Module,\n");
+    out.push_str("    module: std::sync::Arc<rocm_oxide::Module>,\n");
     out.push_str("}\n\n");
     out.push_str("#[allow(dead_code)]\n");
     out.push_str("impl DeviceKernels {\n");
     out.push_str("    pub fn load(device: &rocm_oxide::Device, hsaco: impl AsRef<Path>) -> rocm_oxide::Result<Self> {\n");
-    out.push_str("        Ok(Self { module: device.load_code_object_file(hsaco)? })\n");
+    out.push_str(
+        "        Ok(Self { module: std::sync::Arc::new(device.load_code_object_file(hsaco)?) })\n",
+    );
     out.push_str("    }\n\n");
     out.push_str("    pub fn load_embedded(device: &rocm_oxide::Device) -> rocm_oxide::Result<Self> {\n");
-    out.push_str("        Ok(Self { module: device.load_code_object(DEVICE_HSACO_BYTES)? })\n");
+    out.push_str(
+        "        Ok(Self { module: std::sync::Arc::new(device.load_code_object(DEVICE_HSACO_BYTES)?) })\n",
+    );
     out.push_str("    }\n\n");
 
     for global in device_globals.values() {
@@ -2419,8 +2423,10 @@ fn to_snake_case(name: &str) -> String {
 
 fn generate_kernel_binding(kernel: &KernelDecl) -> Result<String, String> {
     let mut params = vec!["config: rocm_oxide::LaunchConfig".to_string()];
+    let mut operation_params = vec!["config: rocm_oxide::LaunchConfig".to_string()];
     let mut launch_args = Vec::new();
     let mut buffer_arg_names = Vec::new();
+    let mut keep_alive_arg_names = Vec::new();
     let has_len_arg = kernel
         .args
         .iter()
@@ -2437,37 +2443,58 @@ fn generate_kernel_binding(kernel: &KernelDecl) -> Result<String, String> {
                     "{}: &rocm_oxide::DeviceBuffer<{}>",
                     arg.name, inner
                 ));
+                operation_params.push(format!(
+                    "{}: std::sync::Arc<rocm_oxide::DeviceBuffer<{}>>",
+                    arg.name, inner
+                ));
                 launch_args.push(format!("{}.as_mut_ptr()", arg.name));
                 buffer_arg_names.push((arg.name.clone(), true));
+                keep_alive_arg_names.push(arg.name.clone());
             }
             ArgKind::ConstPtr(inner) => {
                 params.push(format!(
                     "{}: &rocm_oxide::DeviceBuffer<{}>",
                     arg.name, inner
                 ));
+                operation_params.push(format!(
+                    "{}: std::sync::Arc<rocm_oxide::DeviceBuffer<{}>>",
+                    arg.name, inner
+                ));
                 launch_args.push(format!("{}.as_ptr()", arg.name));
                 buffer_arg_names.push((arg.name.clone(), false));
+                keep_alive_arg_names.push(arg.name.clone());
             }
             ArgKind::MutSlice(inner) => {
                 params.push(format!(
                     "{}: &rocm_oxide::DeviceBuffer<{}>",
                     arg.name, inner
                 ));
+                operation_params.push(format!(
+                    "{}: std::sync::Arc<rocm_oxide::DeviceBuffer<{}>>",
+                    arg.name, inner
+                ));
                 launch_args.push(format!("{}.as_mut_ptr()", arg.name));
                 launch_args.push(format!("{}.len()", arg.name));
                 buffer_arg_names.push((arg.name.clone(), true));
+                keep_alive_arg_names.push(arg.name.clone());
             }
             ArgKind::ConstSlice(inner) => {
                 params.push(format!(
                     "{}: &rocm_oxide::DeviceBuffer<{}>",
                     arg.name, inner
                 ));
+                operation_params.push(format!(
+                    "{}: std::sync::Arc<rocm_oxide::DeviceBuffer<{}>>",
+                    arg.name, inner
+                ));
                 launch_args.push(format!("{}.as_ptr()", arg.name));
                 launch_args.push(format!("{}.len()", arg.name));
                 buffer_arg_names.push((arg.name.clone(), false));
+                keep_alive_arg_names.push(arg.name.clone());
             }
             ArgKind::Scalar => {
                 params.push(format!("{}: {}", arg.name, arg.ty));
+                operation_params.push(format!("{}: {}", arg.name, arg.ty));
                 launch_args.push(arg.name.clone());
             }
         }
@@ -2479,9 +2506,89 @@ fn generate_kernel_binding(kernel: &KernelDecl) -> Result<String, String> {
         kernel.name,
         params.join(", ")
     ));
+    out.push_str(&generate_kernel_validation_lines(
+        kernel,
+        &buffer_arg_names,
+        has_len_arg,
+        has_block_x_arg,
+        false,
+    ));
+    out.push_str(&format!(
+        "        let kernel = self.module.kernel(c\"{}\")?;\n",
+        kernel.name
+    ));
+    out.push_str("        unsafe {\n");
+    out.push_str("            rocm_oxide::launch!(\n");
+    out.push_str("                kernel,\n");
+    out.push_str("                config");
+    for arg in &launch_args {
+        out.push_str(",\n                ");
+        out.push_str(&arg);
+    }
+    out.push_str(",\n            )\n");
+    out.push_str("        }\n");
+    out.push_str("    }\n");
+
+    out.push('\n');
+    out.push_str(&format!(
+        "    pub unsafe fn {}_operation(&self, {}) -> rocm_oxide::Result<impl rocm_oxide::DeviceOperation<Output = rocm_oxide::KernelLaunchCompletion> + 'static> {{\n",
+        kernel.name,
+        operation_params.join(", ")
+    ));
+    out.push_str(&generate_kernel_validation_lines(
+        kernel,
+        &buffer_arg_names,
+        has_len_arg,
+        has_block_x_arg,
+        true,
+    ));
+    out.push_str("        let module = std::sync::Arc::clone(&self.module);\n");
+    out.push_str(&format!(
+        "        Ok(move |context: &rocm_oxide::ExecutionContext| -> rocm_oxide::Result<rocm_oxide::KernelLaunchCompletion> {{\n            let kernel = module.kernel(c\"{}\")?;\n",
+        kernel.name
+    ));
+    if launch_args.is_empty() {
+        out.push_str("            let mut __params: [*mut std::ffi::c_void; 0] = [];\n");
+    } else {
+        for (index, arg) in launch_args.iter().enumerate() {
+            out.push_str(&format!("            let mut __arg{index} = {arg};\n"));
+        }
+        out.push_str("            let mut __params = [\n");
+        for index in 0..launch_args.len() {
+            out.push_str(&format!(
+                "                rocm_oxide::__private::arg_ptr(&mut __arg{index}),\n"
+            ));
+        }
+        out.push_str("            ];\n");
+    }
+    out.push_str("            unsafe {\n");
+    out.push_str(
+        "                kernel.launch_raw_on_stream(context.stream(), config, &mut __params)?;\n",
+    );
+    out.push_str("            }\n");
+    out.push_str("            let mut __completion = rocm_oxide::KernelLaunchCompletion::new();\n");
+    for arg_name in &keep_alive_arg_names {
+        out.push_str(&format!(
+            "            __completion.keep_alive({arg_name});\n"
+        ));
+    }
+    out.push_str("            Ok(__completion)\n");
+    out.push_str("        })\n");
+    out.push_str("    }\n");
+    Ok(out)
+}
+
+fn generate_kernel_validation_lines(
+    kernel: &KernelDecl,
+    buffer_arg_names: &[(String, bool)],
+    has_len_arg: bool,
+    has_block_x_arg: bool,
+    operation_args: bool,
+) -> String {
+    let mut out = String::new();
     out.push_str("        rocm_oxide::validate_launch_config(config)?;\n");
     if kernel.contracts.is_empty() && has_len_arg {
-        for (arg_name, _) in &buffer_arg_names {
+        for (arg_name, _) in buffer_arg_names {
             out.push_str(&format!(
                 "        rocm_oxide::validate_buffer_len(\"{arg_name}\", {arg_name}.len(), n)?;\n"
             ));
@@ -2510,28 +2617,23 @@ fn generate_kernel_binding(kernel: &KernelDecl) -> Result<String, String> {
             let (left_name, left_mut) = &buffer_arg_names[left_index];
             let (right_name, right_mut) = &buffer_arg_names[right_index];
             if *left_mut || *right_mut {
+                let left_arg = if operation_args {
+                    format!("{left_name}.as_ref()")
+                } else {
+                    left_name.clone()
+                };
+                let right_arg = if operation_args {
+                    format!("{right_name}.as_ref()")
+                } else {
+                    right_name.clone()
+                };
                 out.push_str(&format!(
-                    "        rocm_oxide::validate_device_buffers_disjoint(\"{left_name}\", {left_name}, \"{right_name}\", {right_name})?;\n"
+                    "        rocm_oxide::validate_device_buffers_disjoint(\"{left_name}\", {left_arg}, \"{right_name}\", {right_arg})?;\n"
                 ));
             }
         }
     }
-    out.push_str(&format!(
-        "        let kernel = self.module.kernel(c\"{}\")?;\n",
-        kernel.name
-    ));
-    out.push_str("        unsafe {\n");
-    out.push_str("            rocm_oxide::launch!(\n");
-    out.push_str("                kernel,\n");
-    out.push_str("                config");
-    for arg in launch_args {
-        out.push_str(",\n                ");
-        out.push_str(&arg);
-    }
-    out.push_str(",\n            )\n");
-    out.push_str("        }\n");
-    out.push_str("    }\n");
-    Ok(out)
+    out
 }
 
 impl ArgKind {
@@ -2794,6 +2896,13 @@ pub unsafe extern "C" fn vector_add(
         assert!(binding.contains("validate_buffer_len(\"a\", a.len(), n)?"));
         assert!(binding.contains("out.as_mut_ptr()"));
         assert!(binding.contains("a.as_ptr()"));
+        assert!(binding.contains("pub unsafe fn vector_add_operation"));
+        assert!(binding.contains("out: std::sync::Arc<rocm_oxide::DeviceBuffer<f32>>"));
+        assert!(binding.contains("a: std::sync::Arc<rocm_oxide::DeviceBuffer<f32>>"));
+        assert!(binding.contains("Output = rocm_oxide::KernelLaunchCompletion"));
+        assert!(binding.contains("launch_raw_on_stream(context.stream(), config, &mut __params)?"));
+        assert!(binding.contains("__completion.keep_alive(out);"));
+        assert!(binding.contains("__completion.keep_alive(a);"));
     }
 
     #[test]
@@ -2831,6 +2940,12 @@ pub unsafe extern "C" fn vector_add(
         assert!(binding.contains("validate_buffer_len(\"b\", b.len(), out.len())?"));
         assert!(binding.contains("validate_device_buffers_disjoint(\"out\", out, \"a\", a)?"));
         assert!(binding.contains("validate_device_buffers_disjoint(\"out\", out, \"b\", b)?"));
+        assert!(binding.contains(
+            "validate_device_buffers_disjoint(\"out\", out.as_ref(), \"a\", a.as_ref())?"
+        ));
+        assert!(binding.contains(
+            "validate_device_buffers_disjoint(\"out\", out.as_ref(), \"b\", b.as_ref())?"
+        ));
         assert!(binding.contains("out.as_mut_ptr()"));
         assert!(binding.contains("out.len()"));
         assert!(binding.contains("a.as_ptr()"));

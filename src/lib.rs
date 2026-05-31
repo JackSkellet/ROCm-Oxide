@@ -4,7 +4,9 @@ pub mod operation;
 mod runtime;
 
 pub use hip::{DeviceBuffer, Event, Global, PinnedHostBuffer, Stream};
-pub use operation::{DeviceFuture, DeviceOperation, ExecutionContext, StreamPool, Value};
+pub use operation::{
+    DeviceFuture, DeviceOperation, ExecutionContext, KernelLaunchCompletion, StreamPool, Value,
+};
 pub use runtime::{
     Device, DeviceSlice, DeviceSliceMut, Dim3, Error, Kernel, LaunchConfig, Module, Result,
     validate_block_x, validate_buffer_len, validate_device_buffers_disjoint,

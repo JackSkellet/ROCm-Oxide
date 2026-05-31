@@ -6,6 +6,35 @@ use std::sync::{Arc, Mutex, mpsc};
 use std::task::{Context, Poll, Waker};
 use std::thread;
 
+pub struct KernelLaunchCompletion {
+    keep_alive: Vec<Box<dyn Send>>,
+}
+
+impl KernelLaunchCompletion {
+    pub fn new() -> Self {
+        Self {
+            keep_alive: Vec::new(),
+        }
+    }
+
+    pub fn keep_alive<T>(&mut self, value: T)
+    where
+        T: Send + 'static,
+    {
+        self.keep_alive.push(Box::new(value));
+    }
+
+    pub fn retained_count(&self) -> usize {
+        self.keep_alive.len()
+    }
+}
+
+impl Default for KernelLaunchCompletion {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 #[derive(Clone)]
 pub struct ExecutionContext {
     device_ordinal: i32,

@@ -1,4 +1,5 @@
-use rocm_oxide::{Device, DeviceBuffer, Dim3, LaunchConfig};
+use rocm_oxide::{Device, DeviceBuffer, DeviceOperation, Dim3, LaunchConfig, StreamPool};
+use std::sync::Arc;
 
 mod generated {
     include!(env!("ROCM_OXIDE_DEVICE_BINDINGS"));
@@ -156,6 +157,24 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             return Err(format!("mismatch at {index}: got {got}, expected {expected}").into());
         }
     }
+
+    let pool = StreamPool::new(&device, 2)?;
+    let lazy_a = Arc::new(DeviceBuffer::from_slice(&a)?);
+    let lazy_b = Arc::new(DeviceBuffer::from_slice(&b)?);
+    let lazy_out = Arc::new(DeviceBuffer::<f32>::new(n)?);
+    let lazy_completion = unsafe {
+        kernels.vector_add_operation(
+            LaunchConfig::for_num_elems_with_block_size(n, block_x),
+            Arc::clone(&lazy_out),
+            Arc::clone(&lazy_a),
+            Arc::clone(&lazy_b),
+        )?
+    }
+    .async_in(&pool)
+    .wait()?;
+    assert_eq!(lazy_completion.retained_count(), 3);
+    let lazy = lazy_out.copy_to_vec()?;
+    assert_eq!(lazy[4096], a[4096] + b[4096]);
 
     let params = DeviceBuffer::from_slice(&[generated::AffineParams {
         scale: 2.0,
