@@ -478,10 +478,12 @@ pub unsafe extern "C" fn spectral_lattice(
     height: u32,
     pixel_count: usize,
     frame_index: u32,
+    mode: u32,
     palette_a: f32,
     palette_b: f32,
     palette_c: f32,
     warp: f32,
+    gain: f32,
 ) {
     let i = gpu::global_id_x();
     if width == 0 || height == 0 || i >= pixel_count || i >= frame.len() {
@@ -515,7 +517,11 @@ pub unsafe extern "C" fn spectral_lattice(
         0.0
     };
 
-    let energy = clamp_f32(0.06 + ridge * 0.44 + prism * 0.2 + bloom * 0.5 + spark, 0.0, 1.0);
+    let energy = clamp_f32(
+        (0.06 + ridge * 0.44 + prism * 0.2 + bloom * 0.5 + spark) * gain,
+        0.0,
+        1.0,
+    );
     let red = energy
         * clamp_f32(
             0.28 + bloom * 0.72 + gpu::math::sin_f32(px * 5.0 + palette_c + t) * 0.22,
@@ -535,7 +541,33 @@ pub unsafe extern "C" fn spectral_lattice(
             1.0,
         );
 
-    unsafe { frame.write_unchecked(i, pack_rgbf(red, green, blue)) };
+    let mode = mode & 3;
+    let rgb = if mode == 1 {
+        pack_rgbf(
+            energy,
+            clamp_f32(ridge * gain, 0.0, 1.0),
+            clamp_f32(bloom + spark, 0.0, 1.0),
+        )
+    } else if mode == 2 {
+        let cut = if ridge > 0.86 { 1.0 } else { ridge * 0.34 };
+        let veins = if prism > 0.92 { 1.0 } else { prism * 0.18 };
+        pack_rgbf(
+            clamp_f32(cut + bloom * 0.35, 0.0, 1.0),
+            clamp_f32(veins + center * 0.42, 0.0, 1.0),
+            clamp_f32(0.22 + ridge * prism * gain, 0.0, 1.0),
+        )
+    } else if mode == 3 {
+        let hue_mix = gpu::math::sin_f32(px * palette_a + py * palette_b + t) * 0.5 + 0.5;
+        pack_rgbf(
+            clamp_f32(red * 0.7 + hue_mix * energy * 0.65, 0.0, 1.0),
+            clamp_f32(green * 0.55 + bloom * gain * 0.55, 0.0, 1.0),
+            clamp_f32(blue * 0.85 + (1.0 - hue_mix) * prism * 0.5, 0.0, 1.0),
+        )
+    } else {
+        pack_rgbf(red, green, blue)
+    };
+
+    unsafe { frame.write_unchecked(i, rgb) };
 }
 
 // rocm-oxide: len(camera)=13

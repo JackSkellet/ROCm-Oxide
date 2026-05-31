@@ -60,8 +60,14 @@ cargo run --example module_global
 cargo run --example rainbow_geometry_window
 cargo run --example stress_test_gui
 cargo run --example stress_3d_gui
+cargo run --example spectral_lattice
 cargo run --example spectral_lattice -- --frames 3
 ```
+
+`spectral_lattice` is an interactive visual workbench: clickable mode tabs,
+warp/gain/speed sliders, rocBLAS palette reseeding, generated-binding contract
+checks, live kernel resource facts, library availability, and a headless
+`--frames` path for CI/preview PNGs.
 
 The root [build.rs](/home/jack/Documents/GitKraken_Projects/ROCm-Oxide/build.rs)
 generates device artifacts before the host crate compiles. It exposes these
