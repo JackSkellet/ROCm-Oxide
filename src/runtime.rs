@@ -189,6 +189,36 @@ pub struct KernelMetadata {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct KernelResource {
+    pub name: &'static str,
+    pub kernarg_segment_size: Option<u32>,
+    pub kernarg_segment_align: Option<u32>,
+    pub max_flat_workgroup_size: Option<u32>,
+    pub group_segment_fixed_size: Option<u32>,
+    pub private_segment_fixed_size: Option<u32>,
+    pub sgpr_count: Option<u32>,
+    pub vgpr_count: Option<u32>,
+    pub sgpr_spill_count: Option<u32>,
+    pub vgpr_spill_count: Option<u32>,
+    pub wavefront_size: Option<u32>,
+    pub uses_dynamic_shared_mem: bool,
+    pub uses_dynamic_stack: Option<bool>,
+}
+
+impl KernelResource {
+    pub const fn launch_metadata(self) -> KernelMetadata {
+        KernelMetadata {
+            max_flat_workgroup_size: self.max_flat_workgroup_size,
+            static_shared_mem_bytes: match self.group_segment_fixed_size {
+                Some(value) => value,
+                None => 0,
+            },
+            uses_dynamic_shared_mem: self.uses_dynamic_shared_mem,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct LaunchConfig {
     pub grid: Dim3,
     pub block: Dim3,

@@ -277,96 +277,22 @@ struct ProbeSample {
     gpu_ms: f32,
     est_fps: f32,
     notes: String,
-    resources: Option<KernelResource>,
+    resources: Option<rocm_oxide::KernelResource>,
 }
 
 #[derive(Debug, Default)]
 struct KernelResources {
-    by_kernel: BTreeMap<String, KernelResource>,
+    by_kernel: BTreeMap<&'static str, rocm_oxide::KernelResource>,
 }
 
 impl KernelResources {
     fn load_embedded() -> Self {
-        let text = fs::read_to_string(env!("ROCM_OXIDE_DEVICE_METADATA")).unwrap_or_default();
         Self {
-            by_kernel: parse_kernel_resources(&text),
+            by_kernel: generated::DEVICE_KERNEL_RESOURCES
+                .iter()
+                .map(|resource| (resource.name, *resource))
+                .collect(),
         }
-    }
-}
-
-#[derive(Debug, Clone, Default)]
-struct KernelResource {
-    kernarg_segment_size: Option<u32>,
-    max_flat_workgroup_size: Option<u32>,
-    group_segment_fixed_size: Option<u32>,
-    private_segment_fixed_size: Option<u32>,
-    sgpr_count: Option<u32>,
-    vgpr_count: Option<u32>,
-    sgpr_spill_count: Option<u32>,
-    vgpr_spill_count: Option<u32>,
-    wavefront_size: Option<u32>,
-    uses_dynamic_stack: Option<bool>,
-}
-
-fn parse_kernel_resources(text: &str) -> BTreeMap<String, KernelResource> {
-    let mut resources = BTreeMap::new();
-    let mut name: Option<String> = None;
-    let mut current = KernelResource::default();
-    let mut in_code_object = false;
-
-    for line in text.lines() {
-        if line.starts_with("      \"name\":") {
-            if let Some(name) = name.take() {
-                resources.insert(name, std::mem::take(&mut current));
-            }
-            name = find_json_string(line, "name");
-            in_code_object = false;
-            continue;
-        }
-
-        let trimmed = line.trim();
-        if trimmed == "\"code_object\": {" {
-            in_code_object = true;
-            continue;
-        }
-        if !in_code_object {
-            continue;
-        }
-        if trimmed.trim_end_matches(',') == "}" {
-            in_code_object = false;
-            continue;
-        }
-
-        parse_resource_field(&mut current, trimmed);
-    }
-
-    if let Some(name) = name {
-        resources.insert(name, current);
-    }
-    resources
-}
-
-fn parse_resource_field(resource: &mut KernelResource, line: &str) {
-    if let Some(value) = json_u32_field(line, "kernarg_segment_size") {
-        resource.kernarg_segment_size = Some(value);
-    } else if let Some(value) = json_u32_field(line, "max_flat_workgroup_size") {
-        resource.max_flat_workgroup_size = Some(value);
-    } else if let Some(value) = json_u32_field(line, "group_segment_fixed_size") {
-        resource.group_segment_fixed_size = Some(value);
-    } else if let Some(value) = json_u32_field(line, "private_segment_fixed_size") {
-        resource.private_segment_fixed_size = Some(value);
-    } else if let Some(value) = json_u32_field(line, "sgpr_count") {
-        resource.sgpr_count = Some(value);
-    } else if let Some(value) = json_u32_field(line, "vgpr_count") {
-        resource.vgpr_count = Some(value);
-    } else if let Some(value) = json_u32_field(line, "sgpr_spill_count") {
-        resource.sgpr_spill_count = Some(value);
-    } else if let Some(value) = json_u32_field(line, "vgpr_spill_count") {
-        resource.vgpr_spill_count = Some(value);
-    } else if let Some(value) = json_u32_field(line, "wavefront_size") {
-        resource.wavefront_size = Some(value);
-    } else if let Some(value) = json_bool_field(line, "uses_dynamic_stack") {
-        resource.uses_dynamic_stack = Some(value);
     }
 }
 
@@ -427,13 +353,23 @@ fn write_sample_json(out: &mut String, sample: &ProbeSample) {
     out.push_str("    }");
 }
 
-fn write_resource_json(out: &mut String, resources: &KernelResource) {
+fn write_resource_json(out: &mut String, resources: &rocm_oxide::KernelResource) {
     out.push_str("{\n");
+    out.push_str(&format!(
+        "        \"name\": \"{}\"",
+        json_escape(resources.name)
+    ));
     write_json_u32(
         out,
         "kernarg_segment_size",
         resources.kernarg_segment_size,
-        true,
+        false,
+    );
+    write_json_u32(
+        out,
+        "kernarg_segment_align",
+        resources.kernarg_segment_align,
+        false,
     );
     write_json_u32(
         out,
@@ -458,6 +394,10 @@ fn write_resource_json(out: &mut String, resources: &KernelResource) {
     write_json_u32(out, "sgpr_spill_count", resources.sgpr_spill_count, false);
     write_json_u32(out, "vgpr_spill_count", resources.vgpr_spill_count, false);
     write_json_u32(out, "wavefront_size", resources.wavefront_size, false);
+    out.push_str(&format!(
+        ",\n        \"uses_dynamic_shared_mem\": {}",
+        resources.uses_dynamic_shared_mem
+    ));
     if let Some(value) = resources.uses_dynamic_stack {
         out.push_str(&format!(",\n        \"uses_dynamic_stack\": {value}"));
     }
@@ -470,32 +410,6 @@ fn write_json_u32(out: &mut String, key: &str, value: Option<u32>, first: bool) 
             out.push_str(",\n");
         }
         out.push_str(&format!("        \"{key}\": {value}"));
-    }
-}
-
-fn find_json_string(text: &str, key: &str) -> Option<String> {
-    let needle = format!("\"{key}\": \"");
-    let start = text.find(&needle)? + needle.len();
-    let rest = &text[start..];
-    let end = rest.find('"')?;
-    Some(rest[..end].to_string())
-}
-
-fn json_u32_field(line: &str, key: &str) -> Option<u32> {
-    let needle = format!("\"{key}\": ");
-    line.trim()
-        .strip_prefix(&needle)?
-        .trim_end_matches(',')
-        .parse::<u32>()
-        .ok()
-}
-
-fn json_bool_field(line: &str, key: &str) -> Option<bool> {
-    let needle = format!("\"{key}\": ");
-    match line.trim().strip_prefix(&needle)?.trim_end_matches(',') {
-        "true" => Some(true),
-        "false" => Some(false),
-        _ => None,
     }
 }
 

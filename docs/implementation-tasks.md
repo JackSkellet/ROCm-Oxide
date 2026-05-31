@@ -67,7 +67,8 @@ Local probes on 2026-05-31:
   - [ ] verify LDS IR and ISA for dynamic plus static cases
   - [ ] feed LDS pressure into occupancy planning
 - [ ] Occupancy and resource model:
-  - [ ] expose per-kernel VGPR, SGPR, LDS, private segment, kernarg, and wavefront metadata at runtime
+  - [x] expose per-kernel VGPR, SGPR, LDS, private segment, kernarg, and wavefront metadata at runtime
+  - [x] switch `performance_probe` to the generated runtime resource table
   - [ ] wrap HIP occupancy APIs for launch planning
   - [ ] add benchmark output that flags occupancy limiters and spills
 

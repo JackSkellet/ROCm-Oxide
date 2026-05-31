@@ -225,6 +225,8 @@ execution ergonomics on ROCm:
 `cargo rocm-oxide inspect` prints per-kernel code-object resources such as VGPR,
 SGPR, static LDS, dynamic LDS usage, private segment bytes, kernarg size, spills,
 wavefront size, and dynamic-stack usage.
+Generated bindings expose the same facts through `DEVICE_KERNEL_RESOURCES`,
+`DeviceKernels::resources()`, and `DeviceKernels::resource(name)`.
 
 `cargo run --example performance_probe -- --json target/performance_probe.json`
 reports HIP-event GPU time for generated Rust kernels and can write benchmark
@@ -319,7 +321,7 @@ This roadmap is grounded in the current local probe target:
 - LDS/shared-memory follow-up: extend the new dynamic-LDS reduction and
   per-kernel validation path to static LDS cases, ISA checks, and occupancy
   planning.
-- Occupancy and resource model: expose per-kernel resource metadata at runtime,
+- Occupancy and resource model: build on the generated runtime resource table,
   wrap HIP occupancy APIs, and flag VGPR/SGPR/LDS/private-memory limiters in
   benchmark output.
 

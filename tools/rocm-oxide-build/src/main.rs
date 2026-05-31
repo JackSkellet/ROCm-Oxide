@@ -2501,10 +2501,27 @@ fn write_bindings(
         .file_name()
         .and_then(OsStr::to_str)
         .ok_or_else(|| format!("invalid hsaco path: {}", hsaco.display()))?;
+    let metadata_file = hsaco
+        .file_stem()
+        .and_then(OsStr::to_str)
+        .map(|stem| format!("{stem}.metadata.json"))
+        .ok_or_else(|| format!("invalid hsaco path: {}", hsaco.display()))?;
     out.push_str(&format!(
         "pub const DEVICE_HSACO_BYTES: &[u8] = include_bytes!(\"{}\");\n\n",
         hsaco_file
     ));
+    out.push_str(&format!(
+        "#[allow(dead_code)]\npub const DEVICE_METADATA_JSON: &str = include_str!(\"{}\");\n\n",
+        metadata_file
+    ));
+    out.push_str("pub const DEVICE_KERNEL_RESOURCES: &[rocm_oxide::KernelResource] = &[\n");
+    for kernel in kernels.values() {
+        out.push_str(&generate_kernel_resource_binding(
+            kernel,
+            code_object_metadata.kernels.get(&kernel.name),
+        ));
+    }
+    out.push_str("];\n\n");
     for device_struct in device_structs.values() {
         out.push_str(&generate_device_struct_binding(device_struct));
         out.push('\n');
@@ -2524,6 +2541,16 @@ fn write_bindings(
     out.push_str(
         "        Ok(Self { module: std::sync::Arc::new(device.load_code_object(DEVICE_HSACO_BYTES)?) })\n",
     );
+    out.push_str("    }\n\n");
+    out.push_str(
+        "    pub const fn resources(&self) -> &'static [rocm_oxide::KernelResource] {\n",
+    );
+    out.push_str("        DEVICE_KERNEL_RESOURCES\n");
+    out.push_str("    }\n\n");
+    out.push_str(
+        "    pub fn resource(&self, name: &str) -> Option<&'static rocm_oxide::KernelResource> {\n",
+    );
+    out.push_str("        DEVICE_KERNEL_RESOURCES.iter().find(|resource| resource.name == name)\n");
     out.push_str("    }\n\n");
 
     for global in device_globals.values() {
@@ -2568,6 +2595,30 @@ fn generate_device_global_binding(global: &DeviceGlobal) -> String {
     ));
     out.push_str("    }\n");
     out
+}
+
+fn generate_kernel_resource_binding(
+    kernel: &KernelDecl,
+    metadata: Option<&KernelObjectMetadata>,
+) -> String {
+    let default = KernelObjectMetadata::default();
+    let metadata = metadata.unwrap_or(&default);
+    format!(
+        "    rocm_oxide::KernelResource {{ name: \"{}\", kernarg_segment_size: {}, kernarg_segment_align: {}, max_flat_workgroup_size: {}, group_segment_fixed_size: {}, private_segment_fixed_size: {}, sgpr_count: {}, vgpr_count: {}, sgpr_spill_count: {}, vgpr_spill_count: {}, wavefront_size: {}, uses_dynamic_shared_mem: {}, uses_dynamic_stack: {} }},\n",
+        json_escape(&kernel.name),
+        generated_option_u32(metadata.kernarg_segment_size),
+        generated_option_u32(metadata.kernarg_segment_align),
+        generated_option_u32(metadata.max_flat_workgroup_size),
+        generated_option_u32(metadata.group_segment_fixed_size),
+        generated_option_u32(metadata.private_segment_fixed_size),
+        generated_option_u32(metadata.sgpr_count),
+        generated_option_u32(metadata.vgpr_count),
+        generated_option_u32(metadata.sgpr_spill_count),
+        generated_option_u32(metadata.vgpr_spill_count),
+        generated_option_u32(metadata.wavefront_size),
+        metadata.uses_dynamic_shared_mem(),
+        generated_option_bool(metadata.uses_dynamic_stack),
+    )
 }
 
 fn device_global_method_name(name: &str) -> String {
@@ -2778,6 +2829,13 @@ fn generated_option_u32(value: Option<u32>) -> String {
     }
 }
 
+fn generated_option_bool(value: Option<bool>) -> String {
+    match value {
+        Some(value) => format!("Some({value})"),
+        None => "None".to_string(),
+    }
+}
+
 fn generate_kernel_validation_lines(
     kernel: &KernelDecl,
     buffer_arg_names: &[(String, bool)],
@@ -2935,8 +2993,8 @@ mod tests {
         annotate_dynamic_shared_mem_from_ir, compiler_step, discover_device_crate_bundle,
         discover_device_globals_in_source, discover_device_structs_in_source,
         discover_kernels_in_source, generate_device_global_binding,
-        generate_device_struct_binding, generate_kernel_binding, parse_inline_path_dependency,
-        parse_kernel_resource_rows, parse_package_name, transform_ir,
+        generate_device_struct_binding, generate_kernel_binding, generate_kernel_resource_binding,
+        parse_inline_path_dependency, parse_kernel_resource_rows, parse_package_name, transform_ir,
     };
     use std::collections::{BTreeMap, BTreeSet};
     use std::fs;
@@ -3187,6 +3245,37 @@ pub unsafe extern "C" fn vector_add(
         assert!(binding.contains("out.len()"));
         assert!(binding.contains("a.as_ptr()"));
         assert!(binding.contains("a.len()"));
+    }
+
+    #[test]
+    fn generates_kernel_resource_binding() {
+        let kernels = discover_kernels_in_source(
+            r#"
+#[kernel]
+pub unsafe extern "C" fn lds_block_sum(out: *mut f32) {}
+"#,
+        )
+        .expect("source should parse");
+        let metadata = KernelObjectMetadata {
+            kernarg_segment_size: Some(312),
+            kernarg_segment_align: Some(8),
+            max_flat_workgroup_size: Some(1024),
+            group_segment_fixed_size: Some(0),
+            private_segment_fixed_size: Some(0),
+            sgpr_count: Some(14),
+            vgpr_count: Some(6),
+            sgpr_spill_count: Some(0),
+            vgpr_spill_count: Some(0),
+            wavefront_size: Some(32),
+            uses_dynamic_shared_mem: true,
+            uses_dynamic_stack: Some(false),
+            args: BTreeMap::new(),
+        };
+        let binding = generate_kernel_resource_binding(&kernels[0], Some(&metadata));
+        assert!(binding.contains("name: \"lds_block_sum\""));
+        assert!(binding.contains("kernarg_segment_size: Some(312)"));
+        assert!(binding.contains("uses_dynamic_shared_mem: true"));
+        assert!(binding.contains("uses_dynamic_stack: Some(false)"));
     }
 
     #[test]

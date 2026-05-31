@@ -72,6 +72,14 @@ fn vector_add_operation(
 fn main() -> Result<()> {
     let device = Device::first()?;
     let kernels = generated::DeviceKernels::load_embedded(&device)?;
+    let lds_resource = kernels
+        .resource("lds_block_sum")
+        .expect("generated resource metadata should include lds_block_sum");
+    assert!(lds_resource.uses_dynamic_shared_mem);
+    assert_eq!(
+        kernels.resources().len(),
+        generated::DEVICE_KERNEL_RESOURCES.len()
+    );
     let n = 1 << 16;
     let block_x = 256;
     let a = (0..n).map(|i| i as f32).collect::<Vec<_>>();

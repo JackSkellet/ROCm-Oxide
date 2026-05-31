@@ -88,4 +88,5 @@ note section: argument offsets, ABI sizes, pointer address spaces, value kinds,
 kernarg segment size/alignment, max workgroup size, static LDS bytes,
 dynamic-LDS usage, private segment bytes, SGPR/VGPR counts, spill counts,
 wavefront size, and dynamic-stack usage. Those are artifact facts rather than
-source contracts.
+source contracts. Generated bindings expose them as `rocm_oxide::KernelResource`
+entries for host-side planning and benchmark reporting.
