@@ -470,6 +470,74 @@ pub unsafe extern "C" fn stress_3d(
     unsafe { frame.write_unchecked(i, rgb) };
 }
 
+// rocm-oxide: len(frame)=pixel_count
+#[kernel]
+pub unsafe extern "C" fn spectral_lattice(
+    frame: gpu::DeviceSliceMut<u32>,
+    width: u32,
+    height: u32,
+    pixel_count: usize,
+    frame_index: u32,
+    palette_a: f32,
+    palette_b: f32,
+    palette_c: f32,
+    warp: f32,
+) {
+    let i = gpu::global_id_x();
+    if width == 0 || height == 0 || i >= pixel_count || i >= frame.len() {
+        return;
+    }
+
+    let x = (i as u32) % width;
+    let y = (i as u32) / width;
+    let aspect = (width as f32) / (height as f32);
+    let fx = (((x as f32) + 0.5) / (width as f32) - 0.5) * 2.0 * aspect;
+    let fy = (((y as f32) + 0.5) / (height as f32) - 0.5) * -2.0;
+    let t = (frame_index as f32) * 0.018;
+    let radius = gpu::math::sqrt_f32(fx * fx + fy * fy) + 0.0001;
+
+    let twist = gpu::math::sin_f32(radius * 8.5 - t * 1.7) * warp;
+    let st = gpu::math::sin_f32(twist);
+    let ct = gpu::math::cos_f32(twist);
+    let px = fx * ct - fy * st;
+    let py = fx * st + fy * ct;
+
+    let lattice_a = abs_f32(gpu::math::sin_f32(px * 18.0 + py * 3.0 + t + palette_a));
+    let lattice_b = abs_f32(gpu::math::cos_f32(py * 16.0 - px * 4.0 - t * 1.3 + palette_b));
+    let ridge = 1.0 - abs_f32(lattice_a - lattice_b);
+    let prism = abs_f32(gpu::math::sin_f32((px + py) * 9.0 + radius * 13.0 - t * 2.1));
+    let bloom = 1.0 / (1.0 + radius * radius * 4.2);
+    let center = 1.0 - clamp_f32(radius * 0.72, 0.0, 1.0);
+    let h = hash32((x << 16) ^ y ^ frame_index.wrapping_mul(97));
+    let spark = if (h & 2047) < 5 + ((center * 20.0) as u32) {
+        0.42
+    } else {
+        0.0
+    };
+
+    let energy = clamp_f32(0.06 + ridge * 0.44 + prism * 0.2 + bloom * 0.5 + spark, 0.0, 1.0);
+    let red = energy
+        * clamp_f32(
+            0.28 + bloom * 0.72 + gpu::math::sin_f32(px * 5.0 + palette_c + t) * 0.22,
+            0.0,
+            1.0,
+        );
+    let green = energy
+        * clamp_f32(
+            0.22 + ridge * 0.62 + gpu::math::cos_f32(py * 4.0 + palette_a - t) * 0.18,
+            0.0,
+            1.0,
+        );
+    let blue = energy
+        * clamp_f32(
+            0.42 + prism * 0.55 + gpu::math::sin_f32(radius * 10.0 + palette_b) * 0.2,
+            0.0,
+            1.0,
+        );
+
+    unsafe { frame.write_unchecked(i, pack_rgbf(red, green, blue)) };
+}
+
 // rocm-oxide: len(camera)=13
 #[kernel]
 pub unsafe extern "C" fn raytrace_world(

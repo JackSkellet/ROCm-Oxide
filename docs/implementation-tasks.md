@@ -44,9 +44,10 @@ Local probes on 2026-05-31:
   pools are available; direct host access to device-resident managed memory,
   pageable-memory access, and registered host-pointer reuse are not reported on
   this dGPU.
-- Current generated artifact: 16 kernels, 22 buffer contracts, one linked
+- Current generated artifact: 17 kernels, 23 buffer contracts, one linked
   object input, max VGPR 33, max SGPR 26, max kernarg 368 bytes, max static LDS
-  1024 bytes, one dynamic-LDS kernel, and no dynamic stack users.
+  1024 bytes, max private segment 260 bytes, one dynamic-LDS kernel, and no
+  dynamic stack users.
 - Current scoped atomic IR emits global-memory `atomicrmw` with explicit
   `syncscope("workgroup")` or `syncscope("agent")` where requested. System scope
   intentionally uses the AMDGPU backend default because the local LLVM backend
@@ -114,6 +115,12 @@ Local probes on 2026-05-31:
 
 ### P2: ROCm-Specific Feature Parity
 
-- [ ] ROCm-specific replacements for CUDA cluster launch, TMA, and WGMMA concepts.
-- [ ] rocBLAS/rocFFT/library interop layer after the code-object model is stable.
+- [x] ROCm-specific replacements for CUDA cluster launch, TMA, and WGMMA concepts:
+  - [x] expose HIP cooperative module launches and cooperative-launch device properties
+  - [x] add an AMD-specific feature-parity planner for cluster/TMA/WGMMA ports
+  - [x] document the explicit replacement model instead of pretending CUDA-only concepts are ABI-compatible
+- [x] rocBLAS/rocFFT/library interop layer after the code-object model is stable:
+  - [x] dynamically load rocBLAS/rocFFT so missing optional libraries do not break the core runtime
+  - [x] expose a checked rocBLAS SGEMM wrapper for `DeviceBuffer<f32>`
+  - [x] expose first rocFFT setup/plan/execute wrappers for in-place complex `f32` buffers
 - [ ] ROCm Compute Profiler integration for achieved occupancy and memory behavior.

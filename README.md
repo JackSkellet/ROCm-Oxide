@@ -60,6 +60,7 @@ cargo run --example module_global
 cargo run --example rainbow_geometry_window
 cargo run --example stress_test_gui
 cargo run --example stress_3d_gui
+cargo run --example spectral_lattice -- --frames 3
 ```
 
 The root [build.rs](/home/jack/Documents/GitKraken_Projects/ROCm-Oxide/build.rs)
@@ -366,9 +367,10 @@ This roadmap is grounded in the current local probe target:
   are reported available; direct host access to device-resident managed memory,
   pageable-memory access, and registered host-pointer reuse are not reported on
   this dGPU.
-- Current generated artifact: 16 kernels, 22 buffer contracts, one linked
+- Current generated artifact: 17 kernels, 23 buffer contracts, one linked
   object input, max VGPR 33, max SGPR 26, max kernarg 368 bytes, max static LDS
-  1024 bytes, one dynamic-LDS kernel, and no dynamic stack users.
+  1024 bytes, max private segment 260 bytes, one dynamic-LDS kernel, and no
+  dynamic stack users.
 - Current scoped atomic IR reaches global-memory `atomicrmw` with explicit
   `syncscope("workgroup")` or `syncscope("agent")` where requested. System scope
   uses the AMDGPU backend default because this LLVM build rejects explicit
@@ -416,8 +418,14 @@ This roadmap is grounded in the current local probe target:
 
 ### P2: ROCm-Specific Feature Parity
 
-- ROCm-specific replacements for CUDA cluster launch, TMA, and WGMMA concepts.
-- rocBLAS/rocFFT/library interop after the code-object model is stable.
+- ROCm-specific replacements for CUDA cluster launch, TMA, and WGMMA concepts:
+  cooperative module-launch wrappers, device capability flags, and a parity
+  planner now map these CUDA-only concepts to HIP cooperative grids,
+  stream/LDS staged transfers, and rocWMMA/rocBLAS/tiled-kernel matrix paths.
+- rocBLAS/rocFFT/library interop: optional dynamic loading keeps the core
+  runtime buildable without every ROCm library installed, while rocBLAS SGEMM
+  and first rocFFT in-place complex-plan wrappers operate on `DeviceBuffer`
+  values.
 - ROCm Compute Profiler integration for achieved occupancy and memory behavior.
 
 Roadmap source docs:
@@ -432,6 +440,8 @@ Roadmap source docs:
 [HIP atomics](https://rocm.docs.amd.com/projects/HIP/en/develop/how-to/hip_cpp_language_extensions.html#atomic-functions),
 [ROCm hardware atomics](https://rocm.docs.amd.com/en/latest/reference/gpu-atomics-operation.html),
 [AMDGPU LLVM backend](https://rocm.docs.amd.com/projects/llvm-project/en/latest/LLVM/llvm/html/AMDGPUUsage.html),
+[rocBLAS](https://rocm.docs.amd.com/projects/rocBLAS/en/latest/),
+[rocFFT](https://rocm.docs.amd.com/projects/rocFFT/en/latest/),
 and
 [ROCm Compute Profiler occupancy examples](https://rocm.docs.amd.com/projects/rocprofiler-compute/en/docs-7.2.0/tutorial/profiling-by-example.html).
 

@@ -92,8 +92,11 @@ lazy operation instead of launching immediately.
 Do not directly port CUDA cluster launch, TMA, WGMMA, NVVM, or nvJitLink APIs.
 They need AMD equivalents or separate abstractions:
 
-- Thread block clusters and DSMEM need an AMD-specific cooperative-group story.
-- TMA/WGMMA map to CDNA/RDNA matrix and async-copy capabilities only through a
-  ROCm-specific design.
+- Thread block clusters and DSMEM now map to the ROCm feature-parity planner:
+  HIP cooperative module launches when supported, otherwise explicit
+  stream/graph-scheduled workgroup tiling and global-memory rendezvous.
+- TMA/WGMMA map through ROCm-specific abstractions: stream-ordered transfers
+  plus LDS tile staging for memory movement, and rocWMMA/rocBLAS/tiled Rust
+  kernels for matrix math.
 - NVVM/LTOIR/nvJitLink should become a generic artifact/link layer over HSACO
   and ROCm code objects.

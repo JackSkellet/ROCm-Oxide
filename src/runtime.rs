@@ -11,6 +11,7 @@ pub enum Error {
     Io(std::io::Error),
     InvalidLaunch(String),
     Async(String),
+    Library(String),
     NoDevice,
     MissingArchitecture,
 }
@@ -41,6 +42,7 @@ impl fmt::Display for Error {
             Self::Io(err) => write!(f, "{err}"),
             Self::InvalidLaunch(message) => write!(f, "invalid kernel launch: {message}"),
             Self::Async(message) => write!(f, "async device operation failed: {message}"),
+            Self::Library(message) => write!(f, "ROCm library interop failed: {message}"),
             Self::NoDevice => write!(f, "no HIP devices are visible"),
             Self::MissingArchitecture => write!(
                 f,
@@ -163,6 +165,20 @@ impl Device {
         hip::set_device(self.ordinal)?;
         Ok(hip::disable_peer_access(peer.ordinal)?)
     }
+
+    pub fn supports_cooperative_launch(&self) -> Result<bool> {
+        Ok(hip::device_attribute_bool(
+            self.ordinal,
+            hip::HIP_DEVICE_ATTRIBUTE_COOPERATIVE_LAUNCH,
+        )?)
+    }
+
+    pub fn supports_cooperative_multi_device_launch(&self) -> Result<bool> {
+        Ok(hip::device_attribute_bool(
+            self.ordinal,
+            hip::HIP_DEVICE_ATTRIBUTE_COOPERATIVE_MULTI_DEVICE_LAUNCH,
+        )?)
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -170,6 +186,8 @@ pub struct DeviceProperties {
     pub ordinal: i32,
     pub managed_memory: bool,
     pub concurrent_managed_access: bool,
+    pub cooperative_launch: bool,
+    pub cooperative_multi_device_launch: bool,
     pub direct_managed_mem_access_from_host: bool,
     pub can_map_host_memory: bool,
     pub can_use_host_pointer_for_registered_mem: bool,
@@ -195,6 +213,14 @@ impl DeviceProperties {
             concurrent_managed_access: hip::device_attribute_bool(
                 ordinal,
                 hip::HIP_DEVICE_ATTRIBUTE_CONCURRENT_MANAGED_ACCESS,
+            )?,
+            cooperative_launch: hip::device_attribute_bool(
+                ordinal,
+                hip::HIP_DEVICE_ATTRIBUTE_COOPERATIVE_LAUNCH,
+            )?,
+            cooperative_multi_device_launch: hip::device_attribute_bool(
+                ordinal,
+                hip::HIP_DEVICE_ATTRIBUTE_COOPERATIVE_MULTI_DEVICE_LAUNCH,
             )?,
             direct_managed_mem_access_from_host: hip::device_attribute_bool(
                 ordinal,
@@ -565,6 +591,24 @@ pub fn validate_launch_config_for_limits(
     Ok(())
 }
 
+pub fn validate_cooperative_launch_config(config: LaunchConfig) -> Result<()> {
+    const HIP_COOPERATIVE_WORK_ITEMS_LIMIT: u64 = 1u64 << 32;
+    let dims = [
+        ("x", config.grid.x as u64, config.block.x as u64),
+        ("y", config.grid.y as u64, config.block.y as u64),
+        ("z", config.grid.z as u64, config.block.z as u64),
+    ];
+    for (axis, grid, block) in dims {
+        let work_items = grid * block;
+        if work_items >= HIP_COOPERATIVE_WORK_ITEMS_LIMIT {
+            return Err(Error::InvalidLaunch(format!(
+                "cooperative launch has grid.{axis} * block.{axis} = {work_items}, but HIP requires each dimension to stay below 2^32 work-items"
+            )));
+        }
+    }
+    Ok(())
+}
+
 pub fn validate_buffer_len(name: &str, actual: usize, required: usize) -> Result<()> {
     if actual < required {
         Err(Error::InvalidLaunch(format!(
@@ -828,6 +872,25 @@ impl Kernel {
             )?;
         })
     }
+
+    pub unsafe fn launch_cooperative_raw_on_stream(
+        &self,
+        stream: &hip::Stream,
+        config: LaunchConfig,
+        params: &mut [*mut c_void],
+    ) -> Result<()> {
+        validate_launch_config_for_limits(config, self.limits, self.metadata)?;
+        validate_cooperative_launch_config(config)?;
+        Ok(unsafe {
+            self.function.launch_cooperative_on_stream(
+                config.grid.as_tuple(),
+                config.block.as_tuple(),
+                config.shared_mem_bytes,
+                stream.as_raw(),
+                params,
+            )?;
+        })
+    }
 }
 
 fn detect_arch() -> Option<String> {
@@ -983,6 +1046,8 @@ mod tests {
             ordinal: 0,
             managed_memory: true,
             concurrent_managed_access: true,
+            cooperative_launch: true,
+            cooperative_multi_device_launch: false,
             direct_managed_mem_access_from_host: true,
             can_map_host_memory: true,
             can_use_host_pointer_for_registered_mem: true,
@@ -1016,6 +1081,8 @@ mod tests {
             ordinal: 0,
             managed_memory: true,
             concurrent_managed_access: false,
+            cooperative_launch: false,
+            cooperative_multi_device_launch: false,
             direct_managed_mem_access_from_host: false,
             can_map_host_memory: false,
             can_use_host_pointer_for_registered_mem: false,

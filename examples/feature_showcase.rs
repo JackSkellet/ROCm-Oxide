@@ -1,6 +1,7 @@
 use rocm_oxide::{
     AtomicMemoryKind, Device, DeviceBuffer, DeviceOperation, Dim3, ExecutionContext, LaunchConfig,
-    ManagedBuffer, ManagedMemoryKind, PinnedHostBuffer, Result, StreamPool,
+    ManagedBuffer, ManagedMemoryKind, PinnedHostBuffer, Result, RocBlas, RocmLibraryReport,
+    SgemmLayout, StreamPool, rocm_feature_parity_for_device,
 };
 use std::sync::{Arc, mpsc};
 use std::time::Duration;
@@ -135,6 +136,23 @@ fn main() -> Result<()> {
     println!("ROCm-Oxide feature showcase on {}", device.arch());
     println!("ok: HIP occupancy wrappers reported launch guidance");
     println!("ok: generated launch recommendation produced a 1D vector_add shape");
+    let device_properties = device.properties()?;
+    let parity = rocm_feature_parity_for_device(device_properties);
+    assert!(
+        parity.cluster_launch.replacement.contains("HIP") || !device_properties.cooperative_launch
+    );
+    println!(
+        "ok: ROCm parity planner mapped cluster/TMA/WGMMA ports to AMD-specific launch, LDS, and matrix-library paths"
+    );
+    let libraries = RocmLibraryReport::query();
+    println!(
+        "ok: library interop status: rocBLAS={} rocFFT={}",
+        libraries.rocblas.available, libraries.rocfft.available
+    );
+    match run_rocblas_sgemm_smoke() {
+        Ok(()) => println!("ok: optional rocBLAS SGEMM interop completed on device buffers"),
+        Err(err) => println!("skip: optional rocBLAS SGEMM smoke: {err}"),
+    }
 
     let d_a = Arc::new(DeviceBuffer::from_slice(&a)?);
     let d_b = Arc::new(DeviceBuffer::from_slice(&b)?);
@@ -463,5 +481,25 @@ fn main() -> Result<()> {
     println!("ok: dropping DeviceFuture did not cancel in-flight work");
 
     println!("feature showcase passed");
+    Ok(())
+}
+
+fn run_rocblas_sgemm_smoke() -> Result<()> {
+    let blas = RocBlas::open()?;
+    let handle = blas.create_handle()?;
+    let a = DeviceBuffer::from_slice(&[1.0f32, 3.0, 2.0, 4.0])?;
+    let b = DeviceBuffer::from_slice(&[5.0f32, 7.0, 6.0, 8.0])?;
+    let c = DeviceBuffer::<f32>::new(4)?;
+    handle.sgemm_nn(SgemmLayout::column_major(2, 2, 2)?, 1.0, &a, &b, 0.0, &c)?;
+    rocm_oxide::hip::synchronize()?;
+    let out = c.copy_to_vec()?;
+    let expected = [19.0f32, 43.0, 22.0, 50.0];
+    for (actual, expected) in out.iter().zip(expected) {
+        if (actual - expected).abs() > 0.01 {
+            return Err(rocm_oxide::Error::Library(format!(
+                "unexpected SGEMM output {out:?}"
+            )));
+        }
+    }
     Ok(())
 }

@@ -1,22 +1,32 @@
 pub mod hip;
 pub mod hiprtc;
+pub mod libraries;
 pub mod operation;
+pub mod parity;
 mod runtime;
 
 pub use hip::{
     DeviceBuffer, Event, Global, ManagedBuffer, ManagedMemoryKind, MemPool, PinnedHostBuffer,
     Stream,
 };
+pub use libraries::{
+    LibraryAvailability, RocBlas, RocBlasHandle, RocFft, RocFftComplexDirection,
+    RocFftExecutionInfo, RocFftPlan, RocFftSession, RocmLibraryReport, SgemmLayout,
+};
 pub use operation::{
     CapturedGraph, DeviceFuture, DeviceOperation, ExecutionContext, KernelLaunchCompletion,
     StreamPool, Value,
+};
+pub use parity::{
+    CudaPortingConcept, MatrixMathBackend, RocmFeaturePlan, RocmFeatureSet, RocmMatrixMathPlan,
+    RocmTileTransferPlan, RocmWorkgroupClusterPlan, rocm_feature_parity_for_device,
 };
 pub use runtime::{
     AtomicMemoryKind, Device, DeviceLimits, DeviceProperties, DeviceSlice, DeviceSliceMut, Dim3,
     Error, Kernel, KernelMetadata, KernelResource, LaunchConfig, LaunchRecommendation, Module,
     OccupancyActiveBlocks, OccupancyMaxPotentialBlockSize, Result, SystemScopeAtomicVisibility,
-    validate_block_x, validate_buffer_len, validate_device_buffers_disjoint,
-    validate_launch_config, validate_launch_config_for_limits,
+    validate_block_x, validate_buffer_len, validate_cooperative_launch_config,
+    validate_device_buffers_disjoint, validate_launch_config, validate_launch_config_for_limits,
 };
 
 #[macro_export]

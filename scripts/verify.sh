@@ -22,4 +22,5 @@ cargo run --example module_global
 cargo run --example depth_aware_upscale
 cargo run --example temporal_upscale
 cargo run --example bvh_raytrace_benchmark
+cargo run --example spectral_lattice -- --frames 3 --output target/spectral_lattice.png
 cargo run

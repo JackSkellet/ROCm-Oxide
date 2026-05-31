@@ -28,6 +28,8 @@ pub const HIP_DEVICE_ATTRIBUTE_ASYNC_ENGINE_COUNT: c_int = 2;
 pub const HIP_DEVICE_ATTRIBUTE_CAN_MAP_HOST_MEMORY: c_int = 3;
 pub const HIP_DEVICE_ATTRIBUTE_CAN_USE_HOST_POINTER_FOR_REGISTERED_MEM: c_int = 4;
 pub const HIP_DEVICE_ATTRIBUTE_CONCURRENT_MANAGED_ACCESS: c_int = 9;
+pub const HIP_DEVICE_ATTRIBUTE_COOPERATIVE_LAUNCH: c_int = 10;
+pub const HIP_DEVICE_ATTRIBUTE_COOPERATIVE_MULTI_DEVICE_LAUNCH: c_int = 11;
 pub const HIP_DEVICE_ATTRIBUTE_DIRECT_MANAGED_MEM_ACCESS_FROM_HOST: c_int = 13;
 pub const HIP_DEVICE_ATTRIBUTE_HOST_NATIVE_ATOMIC_SUPPORTED: c_int = 15;
 pub const HIP_DEVICE_ATTRIBUTE_MANAGED_MEMORY: c_int = 24;
@@ -140,6 +142,18 @@ unsafe extern "C" {
         stream: HipStream,
         kernel_params: *mut *mut c_void,
         extra: *mut *mut c_void,
+    ) -> HipError;
+    fn hipModuleLaunchCooperativeKernel(
+        function: HipFunction,
+        grid_dim_x: c_uint,
+        grid_dim_y: c_uint,
+        grid_dim_z: c_uint,
+        block_dim_x: c_uint,
+        block_dim_y: c_uint,
+        block_dim_z: c_uint,
+        shared_mem_bytes: c_uint,
+        stream: HipStream,
+        kernel_params: *mut *mut c_void,
     ) -> HipError;
     fn hipModuleOccupancyMaxPotentialBlockSize(
         grid_size: *mut c_int,
@@ -1199,6 +1213,30 @@ impl Function {
                 stream,
                 params.as_mut_ptr(),
                 ptr::null_mut(),
+            )
+        })
+    }
+
+    pub unsafe fn launch_cooperative_on_stream(
+        &self,
+        grid: (u32, u32, u32),
+        block: (u32, u32, u32),
+        shared_mem_bytes: u32,
+        stream: HipStream,
+        params: &mut [*mut c_void],
+    ) -> Result<()> {
+        check(unsafe {
+            hipModuleLaunchCooperativeKernel(
+                self.raw,
+                grid.0,
+                grid.1,
+                grid.2,
+                block.0,
+                block.1,
+                block.2,
+                shared_mem_bytes,
+                stream,
+                params.as_mut_ptr(),
             )
         })
     }

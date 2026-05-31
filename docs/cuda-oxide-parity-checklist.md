@@ -109,9 +109,9 @@ not the product.
 
 ## Lower-Priority Or Vendor-Specific
 
-- [ ] CUDA-specific TMA/WGMMA equivalents need ROCm-specific replacements, not
+- [x] CUDA-specific TMA/WGMMA equivalents need ROCm-specific replacements, not
       direct ports.
-- [ ] cuBLASDx/cuFFTDx interop maps to rocBLAS/rocFFT or HIP library FFI and
+- [x] cuBLASDx/cuFFTDx interop maps to rocBLAS/rocFFT or HIP library FFI and
       should be a separate integration layer.
 - [ ] NVVM/LTOIR and nvJitLink concepts map only partially to ROCm code-object
       linking; implement after the basic artifact model is stable.
