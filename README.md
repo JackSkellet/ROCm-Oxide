@@ -77,7 +77,7 @@ cargo run --example rust_device_generated_bindings
 
 ## Notable examples
 
-- **`spectral_lattice`**: interactive visual GPU workbench (multiple render/compute paths, GUI controls, headless frame export)
+- **`spectral_lattice`**: interactive visual GPU workbench (multiple render/compute paths, GUI controls, headless frame export, CPU/OpenGL/Vulkan present paths)
 - **`compiler_feature_lab`**: GUI for probing compiler/runtime/device feature slices
 - **`performance_probe`**: emits timing/resource snapshots and JSON benchmark output
 
@@ -87,12 +87,19 @@ Example commands:
 cargo run --example spectral_lattice
 cargo run --example spectral_lattice -- --frames 3 --resolution 4k --fps-limit 120
 cargo run --example spectral_lattice -- --present gl --resolution 1440p --fps-limit uncapped
+cargo run --example spectral_lattice -- --present vulkan --resolution 1440p --fps-limit uncapped
 
 cargo run --example compiler_feature_lab
 cargo run --example compiler_feature_lab -- --frames 1
 
 cargo run --example performance_probe -- --json target/performance_probe.json
 ```
+
+`spectral_lattice --present vulkan` allocates exportable Vulkan device memory,
+imports its `OPAQUE_FD` handle into HIP, and copies the rendered frame
+device-to-device into that shared buffer before Vulkan blits it to the swapchain.
+`--present gl` keeps the HIP/OpenGL pixel-buffer path, while the default remains
+the CPU-readback compatibility path.
 
 ---
 

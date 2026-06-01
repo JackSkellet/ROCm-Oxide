@@ -8,6 +8,7 @@ license = "MIT OR Apache-2.0"
 [build-dependencies]
 
 [dependencies]
+ash = "0.38"
 font8x8 = "0.3"
 gl = "0.14"
 image = "0.25"
