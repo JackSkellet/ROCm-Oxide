@@ -1,8 +1,9 @@
 use rocm_oxide::{
     AtomicMemoryKind, Comgr, Device, DeviceBuffer, DeviceOperation, Dim3, ExecutionContext,
-    HipBlasLt, LaunchConfig, ManagedBuffer, ManagedMemoryKind, MatrixIntegrationReport,
-    PinnedHostBuffer, Result, RocBlas, RocPrim, RocTx, RocmLibraryReport, SgemmLayout, StreamPool,
-    hiprtc, rocm_code_object_interop_plan, rocm_feature_parity_for_device,
+    HipBlasLt, HipBlasLtHeuristicSummary, HipBlasLtMatmulProblem, LaunchConfig, ManagedBuffer,
+    ManagedMemoryKind, MatrixIntegrationReport, PinnedHostBuffer, Result, RocBlas, RocPrim, RocTx,
+    RocmLibraryReport, SgemmLayout, StreamPool, hiprtc, rocm_code_object_interop_plan,
+    rocm_feature_parity_for_device,
 };
 use std::sync::{Arc, mpsc};
 use std::time::Duration;
@@ -245,8 +246,14 @@ fn main() -> Result<()> {
         matrix_libraries.rocwmma.available
     );
     match run_hipblaslt_smoke() {
-        Ok(version) => println!("ok: hipBLASLt handle/version smoke completed: version={version}"),
-        Err(err) => println!("skip: hipBLASLt handle/version smoke: {err}"),
+        Ok((version, heuristics)) => println!(
+            "ok: hipBLASLt descriptor/heuristic smoke completed: version={version} algos={}/{} best_workspace={:?} waves={:?}",
+            heuristics.returned_algo_count,
+            heuristics.requested_algo_count,
+            heuristics.best_workspace_bytes,
+            heuristics.best_waves_count
+        ),
+        Err(err) => println!("skip: hipBLASLt descriptor/heuristic smoke: {err}"),
     }
     hiprtc::clear_specialization_cache();
     let _first_specialized = device.compile_hip_source_specialized(
@@ -652,8 +659,11 @@ fn run_rocprim_smoke() -> Result<()> {
     Ok(())
 }
 
-fn run_hipblaslt_smoke() -> Result<i32> {
+fn run_hipblaslt_smoke() -> Result<(i32, HipBlasLtHeuristicSummary)> {
     let lt = HipBlasLt::open()?;
     let handle = lt.create_handle()?;
-    handle.version()
+    let version = handle.version()?;
+    let problem = HipBlasLtMatmulProblem::sgemm_nn(64, 64, 64, 4 * 1024 * 1024)?;
+    let heuristics = handle.sgemm_nn_heuristics(problem, 8)?;
+    Ok((version, heuristics))
 }

@@ -43,6 +43,8 @@ Primary upstream reference:
       radix sort, flagged select, and transform-add over `DeviceBuffer`.
 - [x] Matrix integration candidate reporting for hipBLASLt, Composable Kernel,
       and rocWMMA, plus hipBLASLt handle/version loading.
+- [x] Checked hipBLASLt FP32 column-major SGEMM descriptor and heuristic query
+      wrapper.
 - [x] HIPRTC specialization cache keyed by backend, architecture, source,
       options, and launch metadata.
 - [x] COMGR HIP source compile/link backend with a persistent code-object cache
@@ -217,7 +219,7 @@ Primary upstream reference:
 - [ ] TMA-style async tensor copies should map to stream-ordered HIP copies,
       explicit LDS staging, and pipeline tokens only after synchronization
       semantics are validated on AMD hardware.
-- [ ] WGMMA-style matrix operations should map to rocWMMA, hipBLASLt,
+- [x] WGMMA-style matrix operations should map to rocWMMA, hipBLASLt,
       Composable Kernel, rocBLAS, or tiled Rust kernels.
 - [ ] DSMEM and CUDA cluster launch should map to HIP cooperative launch where
       available, otherwise graph/stream-scheduled tiling plus global-memory

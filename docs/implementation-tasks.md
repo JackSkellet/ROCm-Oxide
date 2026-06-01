@@ -71,7 +71,7 @@ features on top of stronger contracts.
           AMD LLVM IR, code objects, HIP modules, and ROCm libraries
     - [x] extend rocPRIM/hipCUB wrappers to sort, select, transform, and more
           scalar types
-    - [ ] promote hipBLASLt or Composable Kernel from availability probes to a
+    - [x] promote hipBLASLt or Composable Kernel from availability probes to a
           checked matmul descriptor and heuristic API
     - [ ] keep TMA, WGMMA, DSMEM clusters, and CUDA cluster launch as
           source-level rewrite targets, not ABI promises

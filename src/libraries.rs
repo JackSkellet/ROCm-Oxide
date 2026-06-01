@@ -9,6 +9,12 @@ const ROCBLAS_STATUS_SUCCESS: c_int = 0;
 const ROCBLAS_OPERATION_NONE: c_int = 111;
 const ROCFFT_STATUS_SUCCESS: c_int = 0;
 const HIPBLAS_STATUS_SUCCESS: c_int = 0;
+const HIPBLAS_OP_N: c_int = 111;
+const HIPBLAS_COMPUTE_32F: c_int = 2;
+const HIP_R_32F: c_int = 0;
+const HIPBLASLT_MATMUL_DESC_TRANSA: c_int = 0;
+const HIPBLASLT_MATMUL_DESC_TRANSB: c_int = 1;
+const HIPBLASLT_MATMUL_PREF_MAX_WORKSPACE_BYTES: c_int = 1;
 const AMD_COMGR_STATUS_SUCCESS: c_int = 0;
 const AMD_COMGR_LANGUAGE_HIP: c_int = 0x3;
 const AMD_COMGR_DATA_KIND_SOURCE: c_int = 0x1;
@@ -73,9 +79,60 @@ type RocFftExecutionInfoSetStream =
 
 type HipBlasLtStatus = c_int;
 type HipBlasLtHandleRaw = *mut c_void;
+type HipBlasLtMatmulDescRaw = *mut c_void;
+type HipBlasLtMatrixLayoutRaw = *mut c_void;
+type HipBlasLtMatmulPreferenceRaw = *mut c_void;
 type HipBlasLtCreate = unsafe extern "C" fn(*mut HipBlasLtHandleRaw) -> HipBlasLtStatus;
 type HipBlasLtDestroy = unsafe extern "C" fn(HipBlasLtHandleRaw) -> HipBlasLtStatus;
 type HipBlasLtGetVersion = unsafe extern "C" fn(HipBlasLtHandleRaw, *mut c_int) -> HipBlasLtStatus;
+type HipBlasLtMatmulDescCreate =
+    unsafe extern "C" fn(*mut HipBlasLtMatmulDescRaw, c_int, c_int) -> HipBlasLtStatus;
+type HipBlasLtMatmulDescDestroy = unsafe extern "C" fn(HipBlasLtMatmulDescRaw) -> HipBlasLtStatus;
+type HipBlasLtMatmulDescSetAttribute =
+    unsafe extern "C" fn(HipBlasLtMatmulDescRaw, c_int, *const c_void, usize) -> HipBlasLtStatus;
+type HipBlasLtMatrixLayoutCreate =
+    unsafe extern "C" fn(*mut HipBlasLtMatrixLayoutRaw, c_int, u64, u64, i64) -> HipBlasLtStatus;
+type HipBlasLtMatrixLayoutDestroy =
+    unsafe extern "C" fn(HipBlasLtMatrixLayoutRaw) -> HipBlasLtStatus;
+type HipBlasLtMatmulPreferenceCreate =
+    unsafe extern "C" fn(*mut HipBlasLtMatmulPreferenceRaw) -> HipBlasLtStatus;
+type HipBlasLtMatmulPreferenceDestroy =
+    unsafe extern "C" fn(HipBlasLtMatmulPreferenceRaw) -> HipBlasLtStatus;
+type HipBlasLtMatmulPreferenceSetAttribute = unsafe extern "C" fn(
+    HipBlasLtMatmulPreferenceRaw,
+    c_int,
+    *const c_void,
+    usize,
+) -> HipBlasLtStatus;
+type HipBlasLtMatmulAlgoGetHeuristic = unsafe extern "C" fn(
+    HipBlasLtHandleRaw,
+    HipBlasLtMatmulDescRaw,
+    HipBlasLtMatrixLayoutRaw,
+    HipBlasLtMatrixLayoutRaw,
+    HipBlasLtMatrixLayoutRaw,
+    HipBlasLtMatrixLayoutRaw,
+    HipBlasLtMatmulPreferenceRaw,
+    c_int,
+    *mut HipBlasLtMatmulHeuristicResultRaw,
+    *mut c_int,
+) -> HipBlasLtStatus;
+
+#[repr(C)]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+struct HipBlasLtMatmulAlgoRaw {
+    data: [u8; 16],
+    max_workspace_bytes: usize,
+}
+
+#[repr(C)]
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+struct HipBlasLtMatmulHeuristicResultRaw {
+    algo: HipBlasLtMatmulAlgoRaw,
+    workspace_size: usize,
+    state: c_int,
+    waves_count: f32,
+    reserved: [c_int; 4],
+}
 
 type AmdComgrStatus = c_int;
 type AmdComgrLanguage = c_int;
@@ -303,6 +360,35 @@ pub struct SgemmLayout {
     pub ldc: u32,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct HipBlasLtMatrixLayout {
+    pub rows: u64,
+    pub cols: u64,
+    pub leading_dim: i64,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct HipBlasLtMatmulProblem {
+    pub m: u64,
+    pub n: u64,
+    pub k: u64,
+    pub a: HipBlasLtMatrixLayout,
+    pub b: HipBlasLtMatrixLayout,
+    pub c: HipBlasLtMatrixLayout,
+    pub d: HipBlasLtMatrixLayout,
+    pub max_workspace_bytes: u64,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct HipBlasLtHeuristicSummary {
+    pub requested_algo_count: i32,
+    pub returned_algo_count: i32,
+    pub best_workspace_bytes: Option<usize>,
+    pub best_state: Option<i32>,
+    pub best_waves_count: Option<f32>,
+    pub workspace_limit_bytes: u64,
+}
+
 #[repr(i32)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum RocFftComplexDirection {
@@ -347,6 +433,21 @@ pub struct HipBlasLtHandle {
     funcs: Arc<HipBlasLtFunctions>,
 }
 
+struct HipBlasLtMatmulDesc {
+    raw: HipBlasLtMatmulDescRaw,
+    funcs: Arc<HipBlasLtFunctions>,
+}
+
+struct HipBlasLtMatrixLayoutDesc {
+    raw: HipBlasLtMatrixLayoutRaw,
+    funcs: Arc<HipBlasLtFunctions>,
+}
+
+struct HipBlasLtMatmulPreference {
+    raw: HipBlasLtMatmulPreferenceRaw,
+    funcs: Arc<HipBlasLtFunctions>,
+}
+
 pub struct Comgr {
     funcs: Arc<ComgrFunctions>,
 }
@@ -382,6 +483,15 @@ struct HipBlasLtFunctions {
     create: HipBlasLtCreate,
     destroy: HipBlasLtDestroy,
     get_version: HipBlasLtGetVersion,
+    matmul_desc_create: HipBlasLtMatmulDescCreate,
+    matmul_desc_destroy: HipBlasLtMatmulDescDestroy,
+    matmul_desc_set_attribute: HipBlasLtMatmulDescSetAttribute,
+    matrix_layout_create: HipBlasLtMatrixLayoutCreate,
+    matrix_layout_destroy: HipBlasLtMatrixLayoutDestroy,
+    matmul_preference_create: HipBlasLtMatmulPreferenceCreate,
+    matmul_preference_destroy: HipBlasLtMatmulPreferenceDestroy,
+    matmul_preference_set_attribute: HipBlasLtMatmulPreferenceSetAttribute,
+    matmul_algo_get_heuristic: HipBlasLtMatmulAlgoGetHeuristic,
 }
 
 struct ComgrFunctions {
@@ -549,6 +659,66 @@ impl SgemmLayout {
     }
 }
 
+impl HipBlasLtMatrixLayout {
+    fn fp32_column_major(label: &str, rows: u64, cols: u64, leading_dim: u64) -> Result<Self> {
+        if rows == 0 || cols == 0 {
+            return Err(Error::Library(format!(
+                "hipBLASLt {label} matrix dimensions must be nonzero, got rows={rows}, cols={cols}"
+            )));
+        }
+        if leading_dim < rows {
+            return Err(Error::Library(format!(
+                "hipBLASLt {label} leading dimension {leading_dim} is smaller than rows {rows}"
+            )));
+        }
+        Ok(Self {
+            rows,
+            cols,
+            leading_dim: positive_i64_from_u64(
+                &format!("hipBLASLt {label} leading dimension"),
+                leading_dim,
+            )?,
+        })
+    }
+}
+
+impl HipBlasLtMatmulProblem {
+    pub fn sgemm_nn(m: u64, n: u64, k: u64, max_workspace_bytes: u64) -> Result<Self> {
+        Self::sgemm_nn_with_leading_dimensions(m, n, k, m, k, m, m, max_workspace_bytes)
+    }
+
+    pub fn sgemm_nn_with_leading_dimensions(
+        m: u64,
+        n: u64,
+        k: u64,
+        lda: u64,
+        ldb: u64,
+        ldc: u64,
+        ldd: u64,
+        max_workspace_bytes: u64,
+    ) -> Result<Self> {
+        if m == 0 || n == 0 || k == 0 {
+            return Err(Error::Library(format!(
+                "hipBLASLt SGEMM dimensions m, n, and k must be nonzero, got m={m}, n={n}, k={k}"
+            )));
+        }
+        let a = HipBlasLtMatrixLayout::fp32_column_major("A", m, k, lda)?;
+        let b = HipBlasLtMatrixLayout::fp32_column_major("B", k, n, ldb)?;
+        let c = HipBlasLtMatrixLayout::fp32_column_major("C", m, n, ldc)?;
+        let d = HipBlasLtMatrixLayout::fp32_column_major("D", m, n, ldd)?;
+        Ok(Self {
+            m,
+            n,
+            k,
+            a,
+            b,
+            c,
+            d,
+            max_workspace_bytes,
+        })
+    }
+}
+
 impl RocBlas {
     pub fn open() -> Result<Self> {
         let lib = Arc::new(DynamicLibrary::open(&library_candidates(&[
@@ -702,6 +872,58 @@ impl HipBlasLtHandle {
         }
         Ok(version)
     }
+
+    pub fn sgemm_nn_heuristics(
+        &self,
+        problem: HipBlasLtMatmulProblem,
+        requested_algo_count: i32,
+    ) -> Result<HipBlasLtHeuristicSummary> {
+        if requested_algo_count <= 0 {
+            return Err(Error::Library(format!(
+                "hipBLASLt requested algorithm count must be positive, got {requested_algo_count}"
+            )));
+        }
+
+        let matmul_desc = HipBlasLtMatmulDesc::sgemm_nn(Arc::clone(&self.funcs))?;
+        let a = HipBlasLtMatrixLayoutDesc::fp32_column_major(Arc::clone(&self.funcs), problem.a)?;
+        let b = HipBlasLtMatrixLayoutDesc::fp32_column_major(Arc::clone(&self.funcs), problem.b)?;
+        let c = HipBlasLtMatrixLayoutDesc::fp32_column_major(Arc::clone(&self.funcs), problem.c)?;
+        let d = HipBlasLtMatrixLayoutDesc::fp32_column_major(Arc::clone(&self.funcs), problem.d)?;
+        let preference = HipBlasLtMatmulPreference::with_max_workspace(
+            Arc::clone(&self.funcs),
+            problem.max_workspace_bytes,
+        )?;
+        let mut results =
+            vec![HipBlasLtMatmulHeuristicResultRaw::default(); requested_algo_count as usize];
+        let mut returned_algo_count = 0;
+        unsafe {
+            check_hipblaslt(
+                (self.funcs.matmul_algo_get_heuristic)(
+                    self.raw,
+                    matmul_desc.raw,
+                    a.raw,
+                    b.raw,
+                    c.raw,
+                    d.raw,
+                    preference.raw,
+                    requested_algo_count,
+                    results.as_mut_ptr(),
+                    &mut returned_algo_count,
+                ),
+                "hipblasLtMatmulAlgoGetHeuristic",
+            )?;
+        }
+
+        let best = (returned_algo_count > 0).then_some(results[0]);
+        Ok(HipBlasLtHeuristicSummary {
+            requested_algo_count,
+            returned_algo_count,
+            best_workspace_bytes: best.map(|result| result.workspace_size),
+            best_state: best.map(|result| result.state),
+            best_waves_count: best.map(|result| result.waves_count),
+            workspace_limit_bytes: problem.max_workspace_bytes,
+        })
+    }
 }
 
 impl Drop for HipBlasLtHandle {
@@ -709,6 +931,123 @@ impl Drop for HipBlasLtHandle {
         if !self.raw.is_null() {
             unsafe {
                 let _ = (self.funcs.destroy)(self.raw);
+            }
+            self.raw = ptr::null_mut();
+        }
+    }
+}
+
+impl HipBlasLtMatmulDesc {
+    fn sgemm_nn(funcs: Arc<HipBlasLtFunctions>) -> Result<Self> {
+        let mut raw = ptr::null_mut();
+        unsafe {
+            check_hipblaslt(
+                (funcs.matmul_desc_create)(&mut raw, HIPBLAS_COMPUTE_32F, HIP_R_32F),
+                "hipblasLtMatmulDescCreate",
+            )?;
+        }
+        let desc = Self { raw, funcs };
+        desc.set_operation(HIPBLASLT_MATMUL_DESC_TRANSA, HIPBLAS_OP_N)?;
+        desc.set_operation(HIPBLASLT_MATMUL_DESC_TRANSB, HIPBLAS_OP_N)?;
+        Ok(desc)
+    }
+
+    fn set_operation(&self, attribute: c_int, value: c_int) -> Result<()> {
+        unsafe {
+            check_hipblaslt(
+                (self.funcs.matmul_desc_set_attribute)(
+                    self.raw,
+                    attribute,
+                    (&value as *const c_int).cast(),
+                    std::mem::size_of_val(&value),
+                ),
+                "hipblasLtMatmulDescSetAttribute",
+            )
+        }
+    }
+}
+
+impl Drop for HipBlasLtMatmulDesc {
+    fn drop(&mut self) {
+        if !self.raw.is_null() {
+            unsafe {
+                let _ = (self.funcs.matmul_desc_destroy)(self.raw);
+            }
+            self.raw = ptr::null_mut();
+        }
+    }
+}
+
+impl HipBlasLtMatrixLayoutDesc {
+    fn fp32_column_major(
+        funcs: Arc<HipBlasLtFunctions>,
+        layout: HipBlasLtMatrixLayout,
+    ) -> Result<Self> {
+        let mut raw = ptr::null_mut();
+        unsafe {
+            check_hipblaslt(
+                (funcs.matrix_layout_create)(
+                    &mut raw,
+                    HIP_R_32F,
+                    layout.rows,
+                    layout.cols,
+                    layout.leading_dim,
+                ),
+                "hipblasLtMatrixLayoutCreate",
+            )?;
+        }
+        Ok(Self { raw, funcs })
+    }
+}
+
+impl Drop for HipBlasLtMatrixLayoutDesc {
+    fn drop(&mut self) {
+        if !self.raw.is_null() {
+            unsafe {
+                let _ = (self.funcs.matrix_layout_destroy)(self.raw);
+            }
+            self.raw = ptr::null_mut();
+        }
+    }
+}
+
+impl HipBlasLtMatmulPreference {
+    fn with_max_workspace(
+        funcs: Arc<HipBlasLtFunctions>,
+        max_workspace_bytes: u64,
+    ) -> Result<Self> {
+        let mut raw = ptr::null_mut();
+        unsafe {
+            check_hipblaslt(
+                (funcs.matmul_preference_create)(&mut raw),
+                "hipblasLtMatmulPreferenceCreate",
+            )?;
+        }
+        let preference = Self { raw, funcs };
+        preference.set_max_workspace(max_workspace_bytes)?;
+        Ok(preference)
+    }
+
+    fn set_max_workspace(&self, max_workspace_bytes: u64) -> Result<()> {
+        unsafe {
+            check_hipblaslt(
+                (self.funcs.matmul_preference_set_attribute)(
+                    self.raw,
+                    HIPBLASLT_MATMUL_PREF_MAX_WORKSPACE_BYTES,
+                    (&max_workspace_bytes as *const u64).cast(),
+                    std::mem::size_of_val(&max_workspace_bytes),
+                ),
+                "hipblasLtMatmulPreferenceSetAttribute",
+            )
+        }
+    }
+}
+
+impl Drop for HipBlasLtMatmulPreference {
+    fn drop(&mut self) {
+        if !self.raw.is_null() {
+            unsafe {
+                let _ = (self.funcs.matmul_preference_destroy)(self.raw);
             }
             self.raw = ptr::null_mut();
         }
@@ -1660,6 +1999,17 @@ impl HipBlasLtFunctions {
             create: unsafe { lib.symbol(c"hipblasLtCreate")? },
             destroy: unsafe { lib.symbol(c"hipblasLtDestroy")? },
             get_version: unsafe { lib.symbol(c"hipblasLtGetVersion")? },
+            matmul_desc_create: unsafe { lib.symbol(c"hipblasLtMatmulDescCreate")? },
+            matmul_desc_destroy: unsafe { lib.symbol(c"hipblasLtMatmulDescDestroy")? },
+            matmul_desc_set_attribute: unsafe { lib.symbol(c"hipblasLtMatmulDescSetAttribute")? },
+            matrix_layout_create: unsafe { lib.symbol(c"hipblasLtMatrixLayoutCreate")? },
+            matrix_layout_destroy: unsafe { lib.symbol(c"hipblasLtMatrixLayoutDestroy")? },
+            matmul_preference_create: unsafe { lib.symbol(c"hipblasLtMatmulPreferenceCreate")? },
+            matmul_preference_destroy: unsafe { lib.symbol(c"hipblasLtMatmulPreferenceDestroy")? },
+            matmul_preference_set_attribute: unsafe {
+                lib.symbol(c"hipblasLtMatmulPreferenceSetAttribute")?
+            },
+            matmul_algo_get_heuristic: unsafe { lib.symbol(c"hipblasLtMatmulAlgoGetHeuristic")? },
             _lib: lib,
         })
     }
@@ -2183,6 +2533,11 @@ fn c_int_from_u32(label: &str, value: u32) -> Result<c_int> {
         .map_err(|_| Error::Library(format!("{label} value {value} exceeds rocBLAS int range")))
 }
 
+fn positive_i64_from_u64(label: &str, value: u64) -> Result<i64> {
+    i64::try_from(value)
+        .map_err(|_| Error::Library(format!("{label} value {value} exceeds i64 range")))
+}
+
 fn dl_error_string() -> String {
     let ptr = unsafe { dlerror() };
     if ptr.is_null() {
@@ -2229,6 +2584,25 @@ mod tests {
     }
 
     #[test]
+    fn hipblaslt_sgemm_problem_validates_dimensions() {
+        assert!(HipBlasLtMatmulProblem::sgemm_nn(0, 16, 16, 0).is_err());
+        assert!(
+            HipBlasLtMatmulProblem::sgemm_nn_with_leading_dimensions(
+                16, 16, 16, 15, 16, 16, 16, 0,
+            )
+            .is_err()
+        );
+
+        let problem = HipBlasLtMatmulProblem::sgemm_nn(16, 32, 64, 1024)
+            .expect("valid SGEMM descriptor should be accepted");
+        assert_eq!(problem.a.rows, 16);
+        assert_eq!(problem.a.cols, 64);
+        assert_eq!(problem.b.rows, 64);
+        assert_eq!(problem.b.cols, 32);
+        assert_eq!(problem.max_workspace_bytes, 1024);
+    }
+
+    #[test]
     fn rocblas_handle_smoke_if_library_is_available() {
         let Ok(blas) = RocBlas::open() else {
             return;
@@ -2257,6 +2631,26 @@ mod tests {
             .create_handle()
             .expect("available hipBLASLt library should create a handle");
         assert!(handle.version().expect("hipBLASLt version should query") > 0);
+    }
+
+    #[test]
+    fn hipblaslt_sgemm_heuristic_smoke_if_library_is_available() {
+        let Ok(lt) = HipBlasLt::open() else {
+            return;
+        };
+        let Ok(handle) = lt.create_handle() else {
+            return;
+        };
+        let problem = HipBlasLtMatmulProblem::sgemm_nn(32, 32, 32, 4 * 1024 * 1024)
+            .expect("valid SGEMM descriptor should be accepted");
+        let summary = handle
+            .sgemm_nn_heuristics(problem, 8)
+            .expect("available hipBLASLt library should query SGEMM heuristics");
+        assert_eq!(summary.requested_algo_count, 8);
+        assert!(summary.returned_algo_count >= 0);
+        if let Some(workspace) = summary.best_workspace_bytes {
+            assert!(workspace <= summary.workspace_limit_bytes as usize);
+        }
     }
 
     #[test]

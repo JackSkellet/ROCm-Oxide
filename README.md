@@ -253,7 +253,8 @@ execution ergonomics on ROCm:
   and prefix scans, plus `u32` radix sort, flagged select, and transform-add
   over `DeviceBuffer`
 - matrix integration candidate reporting for hipBLASLt, Composable Kernel, and
-  rocWMMA, plus hipBLASLt handle/version loading
+  rocWMMA, plus hipBLASLt handle/version loading and checked SGEMM descriptor
+  heuristic queries
 - HIPRTC runtime compilation through a process-wide specialization cache, plus
   an explicit COMGR HIP source compile/link backend with a persistent
   code-object cache keyed by backend, architecture, source, options, and launch
@@ -554,8 +555,9 @@ This roadmap is grounded in the validated probe targets:
   ROCm library/device-object interop where HIPRTC is too narrow.
 - Library parity: rocPRIM/hipCUB now covers `u32`/`i32`/`f32` sum
   reduce/scans, `u32` radix sort, flagged select, and transform-add over
-  `DeviceBuffer`. Promote hipBLASLt or Composable Kernel from availability
-  checks into first checked matmul descriptors and heuristics.
+  `DeviceBuffer`. hipBLASLt now has a checked FP32 column-major SGEMM descriptor
+  and heuristic API; full execution, epilogues, grouped GEMM, and Composable
+  Kernel integration remain later expansion points.
 - CUDA-only advanced hardware mapping: keep TMA, WGMMA, DSMEM clusters, and
   nvJitLink/LTOIR as source-level rewrite targets. Use stream-ordered copies
   plus LDS staging for TMA-like flows, rocWMMA/hipBLASLt/Composable Kernel for

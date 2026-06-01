@@ -48,20 +48,26 @@ availability independently while the rest of ROCm-Oxide continues to run.
 ## COMGR
 
 `Comgr::open()` loads `libamd_comgr.so` or `libamd_comgr.so.3` and resolves
-`amd_comgr_get_version`. ROCm-Oxide does not yet compile through COMGR, but the
-HIPRTC specialization cache keys code objects by compiler backend so a future
-COMGR path can coexist with HIPRTC output without cache collisions.
+the compiler-driver entry points needed to create data sets, action metadata,
+logs, relocatable objects, and executable code objects.
+`Comgr::compile_hip_source_to_code_object()` compiles HIP source to a
+relocatable, links it to an executable HSACO payload, and feeds the same
+persistent code-object cache shape as the HIPRTC backend.
 
 ## Matrix Candidates
 
 `HipBlasLt::open()` loads `libhipblaslt.so` or `libhipblaslt.so.1`, resolves
-handle create/destroy plus version lookup, and exposes `HipBlasLtHandle` as the
-first low-risk handle for future matmul descriptors and heuristic selection.
+handle create/destroy, version lookup, matmul descriptor/layout/preference
+creation, and `hipblasLtMatmulAlgoGetHeuristic`.
+`HipBlasLtMatmulProblem::sgemm_nn()` validates a checked FP32 column-major
+matmul shape before `HipBlasLtHandle::sgemm_nn_heuristics()` asks hipBLASLt for
+candidate algorithms and summarizes the best workspace/state/wave estimate.
 
 `MatrixIntegrationReport::query()` reports three CUDA-like matrix replacement
 candidates independently:
 
-- hipBLASLt: dynamic library availability plus handle/version smoke coverage.
+- hipBLASLt: dynamic library availability plus handle/version and SGEMM
+  descriptor/heuristic smoke coverage.
 - Composable Kernel: installed headers, device GEMM archive, and CMake package.
 - rocWMMA: header availability. This local ROCm install does not include
   `rocwmma/rocwmma.hpp`, so ROCm-Oxide must not assume a rocWMMA path exists.

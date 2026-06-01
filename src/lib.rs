@@ -13,9 +13,9 @@ pub use hip::{
 };
 pub use libraries::{
     Comgr, ComgrVersion, DeviceAlgorithmTemporaryStorage, HipBlasLt, HipBlasLtHandle,
-    LibraryAvailability, MatrixIntegrationReport, RocBlas, RocBlasHandle, RocFft,
-    RocFftComplexDirection, RocFftExecutionInfo, RocFftPlan, RocFftSession, RocPrim,
-    RocmLibraryReport, SgemmLayout,
+    HipBlasLtHeuristicSummary, HipBlasLtMatmulProblem, HipBlasLtMatrixLayout, LibraryAvailability,
+    MatrixIntegrationReport, RocBlas, RocBlasHandle, RocFft, RocFftComplexDirection,
+    RocFftExecutionInfo, RocFftPlan, RocFftSession, RocPrim, RocmLibraryReport, SgemmLayout,
 };
 pub use operation::{
     CapturedGraph, DeviceFuture, DeviceOperation, ExecutionContext, KernelLaunchCompletion,
