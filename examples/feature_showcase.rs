@@ -1,8 +1,8 @@
 use rocm_oxide::{
     AtomicMemoryKind, Comgr, Device, DeviceBuffer, DeviceOperation, Dim3, ExecutionContext,
     HipBlasLt, LaunchConfig, ManagedBuffer, ManagedMemoryKind, MatrixIntegrationReport,
-    PinnedHostBuffer, Result, RocBlas, RocPrim, RocmLibraryReport, SgemmLayout, StreamPool, hiprtc,
-    rocm_feature_parity_for_device,
+    PinnedHostBuffer, Result, RocBlas, RocPrim, RocTx, RocmLibraryReport, SgemmLayout, StreamPool,
+    hiprtc, rocm_feature_parity_for_device,
 };
 use std::sync::{Arc, mpsc};
 use std::time::Duration;
@@ -138,6 +138,10 @@ fn main() -> Result<()> {
     println!("ok: HIP occupancy wrappers reported launch guidance");
     println!("ok: generated launch recommendation produced a 1D vector_add shape");
     let device_properties = device.properties()?;
+    println!(
+        "ok: HIP clock metadata: instruction={} kHz wall={} kHz",
+        device_properties.clock_instruction_rate_khz, device_properties.wall_clock_rate_khz
+    );
     let parity = rocm_feature_parity_for_device(device_properties);
     assert!(
         parity.cluster_launch.replacement.contains("HIP") || !device_properties.cooperative_launch
@@ -162,6 +166,22 @@ fn main() -> Result<()> {
             );
         }
         Err(err) => println!("skip: COMGR compiler backend library smoke: {err}"),
+    }
+    match RocTx::open() {
+        Ok(roctx) => {
+            let version = roctx.version();
+            roctx.mark("rocm-oxide feature showcase")?;
+            {
+                let _range = roctx.scoped_range("rocm-oxide feature showcase setup")?;
+            }
+            let id = roctx.range_start("rocm-oxide feature showcase process range")?;
+            roctx.range_stop(id);
+            println!(
+                "ok: rocTX profiler markers emitted: version={}.{}",
+                version.major, version.minor
+            );
+        }
+        Err(err) => println!("skip: rocTX profiler marker smoke: {err}"),
     }
     match run_rocblas_sgemm_smoke() {
         Ok(()) => println!("ok: optional rocBLAS SGEMM interop completed on device buffers"),

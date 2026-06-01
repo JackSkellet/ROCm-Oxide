@@ -3,6 +3,7 @@ pub mod hiprtc;
 pub mod libraries;
 pub mod operation;
 pub mod parity;
+pub mod profiling;
 mod runtime;
 
 pub use hip::{
@@ -24,6 +25,7 @@ pub use parity::{
     CudaPortingConcept, MatrixMathBackend, RocmFeaturePlan, RocmFeatureSet, RocmMatrixMathPlan,
     RocmTileTransferPlan, RocmWorkgroupClusterPlan, rocm_feature_parity_for_device,
 };
+pub use profiling::{RocTx, RocTxScopedRange, RocTxVersion};
 pub use runtime::{
     AtomicMemoryKind, Device, DeviceLimits, DeviceProperties, DeviceSlice, DeviceSliceMut, Dim3,
     Error, Kernel, KernelMetadata, KernelResource, LaunchConfig, LaunchRecommendation, Module,

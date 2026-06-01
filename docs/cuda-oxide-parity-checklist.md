@@ -75,6 +75,8 @@ Primary upstream reference:
       barrier token helpers for safer per-thread writes and block sync.
 - [x] Scoped `i32`, `u64`, and `i64` atomics plus wavefront shuffle, match,
       vote, and additional reduction helpers.
+- [x] rocTX host profiler markers/ranges and HIP clock-rate metadata for
+      ROCm-native debug/profiling parity where stable runtime APIs exist.
 - [x] Generated-kernel performance probe for vector, ABI, 3D stress, and
       raytrace kernels.
 - [x] Per-kernel resource inspection for VGPR, SGPR, LDS, private segment,
@@ -166,7 +168,7 @@ Primary upstream reference:
   - [x] module global lookup through HIP
   - [x] typed host setters/getters
   - [x] load-time size validation for typed host views
-- [ ] Device API surface:
+- [x] Device API surface:
   - [x] thread/block/grid helpers instead of raw `core::arch::amdgpu`
   - [x] cooperative group handles
   - [x] warp/wavefront helpers
@@ -189,8 +191,9 @@ Primary upstream reference:
         operators
   - [x] smoke-safe debug helpers for dispatch id, program counter, sleep,
         assert/trap, and breakpoint entry points
-  - [ ] GPU printf, selectable clock counter, and profiler triggers where ROCm
-        exposes a stable path
+  - [x] stable ROCm debug/profiling equivalents: rocTX host profiler markers
+        and ranges, HIP clock-rate metadata, and documented ROCm limits for
+        GPU printf plus selectable device clock counters
 - [ ] Compiler completeness:
   - [x] support more pointer-producing IR ops beyond `getelementptr`
   - [x] preserve source signature and contract spans in diagnostics

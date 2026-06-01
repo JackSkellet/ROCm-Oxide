@@ -16,6 +16,7 @@ pub type HipMemPool = *mut c_void;
 pub type HipMemGenericAllocationHandle = *mut c_void;
 
 pub const HIP_SUCCESS: HipError = 0;
+pub const HIP_ERROR_INVALID_VALUE: HipError = 1;
 pub const HIP_ERROR_NOT_SUPPORTED: HipError = 801;
 pub const HIP_MEMCPY_HOST_TO_DEVICE: c_int = 1;
 pub const HIP_MEMCPY_DEVICE_TO_HOST: c_int = 2;
@@ -51,6 +52,8 @@ pub const HIP_DEVICE_ATTRIBUTE_UNIFIED_ADDRESSING: c_int = 85;
 pub const HIP_DEVICE_ATTRIBUTE_WARP_SIZE: c_int = 87;
 pub const HIP_DEVICE_ATTRIBUTE_MEMORY_POOLS_SUPPORTED: c_int = 88;
 pub const HIP_DEVICE_ATTRIBUTE_HOST_REGISTER_SUPPORTED: c_int = 90;
+pub const HIP_DEVICE_ATTRIBUTE_CLOCK_INSTRUCTION_RATE: c_int = 10000;
+pub const HIP_DEVICE_ATTRIBUTE_WALL_CLOCK_RATE: c_int = 10017;
 pub const HIP_STREAM_CAPTURE_MODE_GLOBAL: c_int = 0;
 pub const HIP_STREAM_CAPTURE_MODE_THREAD_LOCAL: c_int = 1;
 pub const HIP_STREAM_CAPTURE_MODE_RELAXED: c_int = 2;

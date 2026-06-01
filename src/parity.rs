@@ -194,6 +194,8 @@ mod tests {
             async_engine_count: 2,
             multiprocessor_count: 32,
             warp_size: 32,
+            clock_instruction_rate_khz: 100_000,
+            wall_clock_rate_khz: 100_000,
         }
     }
 

@@ -239,6 +239,8 @@ pub struct DeviceProperties {
     pub async_engine_count: u32,
     pub multiprocessor_count: u32,
     pub warp_size: u32,
+    pub clock_instruction_rate_khz: u32,
+    pub wall_clock_rate_khz: u32,
 }
 
 impl DeviceProperties {
@@ -306,7 +308,19 @@ impl DeviceProperties {
                 hip::HIP_DEVICE_ATTRIBUTE_MULTIPROCESSOR_COUNT,
             )?,
             warp_size: hip::device_attribute(ordinal, hip::HIP_DEVICE_ATTRIBUTE_WARP_SIZE)?,
+            clock_instruction_rate_khz: optional_device_attribute(
+                ordinal,
+                hip::HIP_DEVICE_ATTRIBUTE_CLOCK_INSTRUCTION_RATE,
+            )?,
+            wall_clock_rate_khz: optional_device_attribute(
+                ordinal,
+                hip::HIP_DEVICE_ATTRIBUTE_WALL_CLOCK_RATE,
+            )?,
         })
+    }
+
+    pub const fn has_clock_rate_metadata(self) -> bool {
+        self.clock_instruction_rate_khz != 0 || self.wall_clock_rate_khz != 0
     }
 
     pub const fn mapped_host_memory_kind(self) -> Option<AtomicMemoryKind> {
@@ -334,6 +348,21 @@ impl DeviceProperties {
                 Some(AtomicMemoryKind::ManagedCoarseGrain)
             }
         }
+    }
+}
+
+fn optional_device_attribute(ordinal: i32, attribute: std::ffi::c_int) -> Result<u32> {
+    match hip::device_attribute(ordinal, attribute) {
+        Ok(value) => Ok(value),
+        Err(err)
+            if matches!(
+                err.code(),
+                Some(hip::HIP_ERROR_NOT_SUPPORTED | hip::HIP_ERROR_INVALID_VALUE)
+            ) =>
+        {
+            Ok(0)
+        }
+        Err(err) => Err(err.into()),
     }
 }
 
@@ -1189,7 +1218,10 @@ mod tests {
             async_engine_count: 2,
             multiprocessor_count: 64,
             warp_size: 32,
+            clock_instruction_rate_khz: 100_000,
+            wall_clock_rate_khz: 100_000,
         };
+        assert!(props.has_clock_rate_metadata());
         assert_eq!(
             props.managed_memory_kind(ManagedMemoryKind::FineGrain),
             Some(AtomicMemoryKind::ManagedFineGrain)
@@ -1224,7 +1256,10 @@ mod tests {
             async_engine_count: 0,
             multiprocessor_count: 1,
             warp_size: 32,
+            clock_instruction_rate_khz: 0,
+            wall_clock_rate_khz: 0,
         };
+        assert!(!props.has_clock_rate_metadata());
         assert_eq!(
             props.managed_memory_kind(ManagedMemoryKind::FineGrain),
             Some(AtomicMemoryKind::ManagedCoarseGrain)
@@ -1252,6 +1287,8 @@ mod tests {
             async_engine_count: 2,
             multiprocessor_count: 64,
             warp_size: 32,
+            clock_instruction_rate_khz: 100_000,
+            wall_clock_rate_khz: 100_000,
         };
         assert_eq!(props.mapped_host_memory_kind(), None);
     }
@@ -1276,6 +1313,8 @@ mod tests {
             async_engine_count: 2,
             multiprocessor_count: 64,
             warp_size: 32,
+            clock_instruction_rate_khz: 100_000,
+            wall_clock_rate_khz: 100_000,
         };
         assert_eq!(
             props.managed_memory_kind(ManagedMemoryKind::FineGrain),

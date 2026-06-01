@@ -9,7 +9,7 @@ features on top of stronger contracts.
 
 - [ ] ASAP cuda-oxide feature parity sequence from
       [NVIDIA's supported features matrix](https://nvlabs.github.io/cuda-oxide/appendix/supported-features.html):
-  - [ ] Compiler type/control-flow parity:
+  - [x] Compiler type/control-flow parity:
     - [x] add a GPU smoke kernel and generated-binding assertions for enums,
           `Option`, `Result`, and custom discriminants
     - [x] add GPU smoke coverage for integer and enum `match` lowering plus an
@@ -38,14 +38,14 @@ features on top of stronger contracts.
     - [x] add host-to-device closure argument examples and tests, including
           metadata-driven indirect closure environment buffers
     - [x] add device-internal closure creation and device-function call tests
-  - [ ] Runtime safety parity:
+  - [x] Runtime safety parity:
     - [x] add a `DisjointSlice`-style output wrapper for bounds-checked
           per-thread writes
     - [x] add a thread-index witness type so safe indexed writes can be tied to
           trusted GPU index helpers
     - [x] add a managed barrier typestate API for LDS/block synchronization
           lifetimes where AMD hardware semantics allow it
-  - [ ] Device API parity:
+  - [x] Device API parity:
     - [x] expand scoped atomics beyond `u32` to signed integer and 64-bit integer
           operations by memory scope
     - [x] add supported float atomic add/load/store operations by memory scope
@@ -61,8 +61,9 @@ features on top of stronger contracts.
           operators
     - [x] add smoke-safe debug helpers for dispatch id, program counter, sleep,
           assert/trap, and breakpoint entry points
-    - [ ] add GPU printf, selectable clock counter, and profiler trigger
-          equivalents where ROCm exposes a stable path
+    - [x] add stable ROCm debug/profiling equivalents: rocTX host profiler
+          markers and ranges, HIP clock-rate metadata, and documented ROCm
+          limits for GPU printf plus selectable device clock counters
   - [ ] ROCm-native interop/backends:
     - [ ] turn COMGR probing into a real compile/link backend and persistent
           code-object cache path

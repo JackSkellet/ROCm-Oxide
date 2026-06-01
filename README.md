@@ -543,8 +543,9 @@ This roadmap is grounded in the validated probe targets:
   wavefront reductions, scratch-backed block add/min/max/bitwise reductions,
   block add/min/max/bitwise scans, 64-bit block collective coverage, and
   smoke-safe debug helpers for dispatch id, program counter, sleep, assert/trap,
-  and breakpoint entry points are live. Remaining work is GPU printf, selectable
-  clock counters, and profiler trigger equivalents where ROCm exposes them.
+  and breakpoint entry points are live. rocTX host profiler markers/ranges and
+  HIP clock-rate metadata are live; GPU printf and selectable device clock
+  counters remain documented ROCm/Rust-backend gaps until a stable path exists.
 - COMGR/code-object backend: turn the current COMGR availability probe into a
   real compile/link path, then use it for persistent code-object caching and
   ROCm library/device-object interop where HIPRTC is too narrow.
@@ -570,7 +571,8 @@ This roadmap is grounded in the validated probe targets:
   and falls back to `rocprofv3 --pmc Wavefronts` from `PATH`, `/opt/rocm/bin`,
   or `target/rocm-packages/root/opt/rocm/bin`. `--trace` uses
   `rocprofv3 --sys-trace --stats` for HIP/HSA dispatch, memory, and runtime
-  traces.
+  traces. The runtime also exposes `RocTx` host markers, nested scoped ranges,
+  and process ranges for profiler timelines.
 
 Roadmap source docs:
 [HIP runtime API](https://rocm.docs.amd.com/projects/HIP/en/latest/reference/hip_runtime_api_reference.html),
@@ -586,6 +588,7 @@ Roadmap source docs:
 [AMDGPU LLVM backend](https://rocm.docs.amd.com/projects/llvm-project/en/latest/LLVM/llvm/html/AMDGPUUsage.html),
 [rocBLAS](https://rocm.docs.amd.com/projects/rocBLAS/en/latest/),
 [rocFFT](https://rocm.docs.amd.com/projects/rocFFT/en/latest/),
+[ROCm rocTX](https://rocm.docs.amd.com/projects/rocprofiler-sdk/en/latest/how-to/using-roctx.html),
 [ROCm Compute Profiler](https://rocm.docs.amd.com/projects/rocprofiler-compute/en/develop/how-to/use.html),
 and
 [rocprofv3](https://rocm.docs.amd.com/projects/rocprofiler-sdk/en/docs-7.0.1/how-to/using-rocprofv3.html).
