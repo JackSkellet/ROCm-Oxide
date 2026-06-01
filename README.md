@@ -16,14 +16,14 @@ The design documents describe the larger compiler path needed to make this feel
 like CUDA Oxide: Rust kernel syntax, MIR/lowering, AMDGPU LLVM IR/code objects,
 and a safe Rust runtime facade.
 
-## Local Machine
+## Validated Machine Profiles
 
-This workspace was checked against:
+This workspace has been checked against these ROCm machines:
 
-- HIP: `7.2.53211-364a905`
-- AMD clang: `22.0.0git`
-- GPU target: `gfx1201`
-- GPU: `AMD Radeon RX 9070 XT`
+- Local workstation, 2026-06-01: `gfx1100`, AMD Radeon RX 7900 XT, HIP
+  `7.2.53211-364a905`, AMD clang `22.0.0git`.
+- Home workstation, 2026-05-31: `gfx1201`, AMD Radeon RX 9070 XT, HIP
+  `7.2.53211-364a905`, AMD clang `22.0.0git`.
 
 ## Run
 
@@ -35,6 +35,7 @@ Override the GPU architecture if needed:
 
 ```bash
 ROCM_OXIDE_ARCH=gfx1100 cargo run
+ROCM_OXIDE_ARCH=gfx1201 cargo run
 ```
 
 The binary will otherwise try to detect the first `gfx*` target from
@@ -75,8 +76,13 @@ library availability, runtime FPS-limit and resolution controls up to 4K, and a
 headless `--frames` path for CI/preview PNGs. The `--gpu-work` CLI flag and
 matching GUI slider increase per-pixel ALU work inside the Rust-authored kernel,
 while the overlay reports GPU event time separately from the host readback path.
+The live GUI currently presents through a CPU framebuffer, so high-resolution
+interactive FPS can be limited by full-frame VRAM-to-host readback and the
+windowing copy rather than by kernel throughput. The local `gfx1100` workstation
+is especially sensitive to this because the RX 7900 XT path negotiates an
+upstream `8GT/s x4` PCIe link.
 
-The root [build.rs](/home/jack/Documents/GitKraken_Projects/ROCm-Oxide/build.rs)
+The root [build.rs](/home/kjwtil/Documents/ROCm-Oxide/build.rs)
 generates device artifacts before the host crate compiles. It exposes these
 compile-time environment variables to host code:
 
@@ -91,7 +97,7 @@ The manual compatibility script still exists:
 ```
 
 It delegates to the Rust build tool in
-[tools/rocm-oxide-build](/home/jack/Documents/GitKraken_Projects/ROCm-Oxide/tools/rocm-oxide-build/src/main.rs).
+[tools/rocm-oxide-build](/home/kjwtil/Documents/ROCm-Oxide/tools/rocm-oxide-build/src/main.rs).
 That tool handles architecture detection, nightly Rust device compilation, LLVM
 IR rewriting, ROCm object generation, `.hsaco` linking, and kernel descriptor
 validation.
@@ -167,7 +173,7 @@ rustup toolchain install nightly --component rust-src
 The script:
 
 1. builds `core` for `amdgcn-amd-amdhsa` with `-Z build-std=core`
-2. emits LLVM IR for [device-spike/src/lib.rs](/home/jack/Documents/GitKraken_Projects/ROCm-Oxide/device-spike/src/lib.rs)
+2. emits LLVM IR for [device-spike/src/lib.rs](/home/kjwtil/Documents/ROCm-Oxide/device-spike/src/lib.rs)
 3. discovers functions marked with `#[kernel]`
 4. rewrites those Rust functions into launchable AMDGPU kernels
 5. lowers it with ROCm `llc`
@@ -212,7 +218,7 @@ pub unsafe extern "C" fn temporal_reconstruct_upscale(/* ... */) {}
 ```
 
 Those contracts are also written into the generated metadata JSON. More detail
-is in [docs/kernel-contracts.md](/home/jack/Documents/GitKraken_Projects/ROCm-Oxide/docs/kernel-contracts.md).
+is in [docs/kernel-contracts.md](/home/kjwtil/Documents/ROCm-Oxide/docs/kernel-contracts.md).
 
 The runtime also has the first host-side pieces needed for cuda-oxide-style
 execution ergonomics on ROCm:
@@ -282,12 +288,12 @@ cargo run --manifest-path tools/rocm-oxide-build/Cargo.toml -- \
 ```
 
 The parity checklist against official `NVlabs/cuda-oxide` is tracked in
-[docs/cuda-oxide-parity-checklist.md](/home/jack/Documents/GitKraken_Projects/ROCm-Oxide/docs/cuda-oxide-parity-checklist.md).
+[docs/cuda-oxide-parity-checklist.md](/home/kjwtil/Documents/ROCm-Oxide/docs/cuda-oxide-parity-checklist.md).
 Book-derived AMD adaptations are tracked in
-[docs/cuda-oxide-book-rocm-adaptation.md](/home/jack/Documents/GitKraken_Projects/ROCm-Oxide/docs/cuda-oxide-book-rocm-adaptation.md).
+[docs/cuda-oxide-book-rocm-adaptation.md](/home/kjwtil/Documents/ROCm-Oxide/docs/cuda-oxide-book-rocm-adaptation.md).
 
 There is also a cargo subcommand wrapper in
-[tools/cargo-rocm-oxide](/home/jack/Documents/GitKraken_Projects/ROCm-Oxide/tools/cargo-rocm-oxide/src/main.rs):
+[tools/cargo-rocm-oxide](/home/kjwtil/Documents/ROCm-Oxide/tools/cargo-rocm-oxide/src/main.rs):
 
 ```bash
 cargo run --manifest-path tools/cargo-rocm-oxide/Cargo.toml -- rocm-oxide doctor
@@ -302,7 +308,7 @@ When installed as `cargo-rocm-oxide`, those become `cargo rocm-oxide ...`.
 ## Device Kernel Shape
 
 Device kernels now use an explicit marker from
-[crates/rocm-oxide-kernel](/home/jack/Documents/GitKraken_Projects/ROCm-Oxide/crates/rocm-oxide-kernel/src/lib.rs):
+[crates/rocm-oxide-kernel](/home/kjwtil/Documents/ROCm-Oxide/crates/rocm-oxide-kernel/src/lib.rs):
 
 ```rust
 use rocm_oxide_device as gpu;
@@ -346,7 +352,7 @@ pub unsafe extern "C" fn generic_copy<T: Copy>(
 The macro emits the concrete exported entry point, and `rocm-oxide-build`
 generates the typed host binding for that monomorphized kernel.
 
-[crates/rocm-oxide-device](/home/jack/Documents/GitKraken_Projects/ROCm-Oxide/crates/rocm-oxide-device/src/lib.rs)
+[crates/rocm-oxide-device](/home/kjwtil/Documents/ROCm-Oxide/crates/rocm-oxide-device/src/lib.rs)
 now wraps the raw AMDGPU intrinsics used by kernels. It provides thread/block
 IDs, dispatch-packet-derived block/grid dimensions, global IDs, wavefront
 metadata, barriers, dynamic launch-sized LDS pointers, workgroup
@@ -356,45 +362,58 @@ min/max, scoped `u32` atomics for workgroup/device/system intent, and the basic
 relaxed `u32` atomic compatibility helpers so device code does not need to call
 `core::arch::amdgpu` directly.
 Atomic memory visibility rules are documented in
-[docs/atomic-scopes.md](/home/jack/Documents/GitKraken_Projects/ROCm-Oxide/docs/atomic-scopes.md).
+[docs/atomic-scopes.md](/home/kjwtil/Documents/ROCm-Oxide/docs/atomic-scopes.md).
 Host-memory coherence rules are documented in
-[docs/host-memory-coherence.md](/home/jack/Documents/GitKraken_Projects/ROCm-Oxide/docs/host-memory-coherence.md).
+[docs/host-memory-coherence.md](/home/kjwtil/Documents/ROCm-Oxide/docs/host-memory-coherence.md).
 Code-object linking rules are documented in
-[docs/code-object-linking.md](/home/jack/Documents/GitKraken_Projects/ROCm-Oxide/docs/code-object-linking.md).
+[docs/code-object-linking.md](/home/kjwtil/Documents/ROCm-Oxide/docs/code-object-linking.md).
 Toolchain discovery and doctor-report rules are documented in
-[docs/toolchain-discovery.md](/home/jack/Documents/GitKraken_Projects/ROCm-Oxide/docs/toolchain-discovery.md).
+[docs/toolchain-discovery.md](/home/kjwtil/Documents/ROCm-Oxide/docs/toolchain-discovery.md).
 Stream-ordered allocation rules are documented in
-[docs/stream-ordered-allocation.md](/home/jack/Documents/GitKraken_Projects/ROCm-Oxide/docs/stream-ordered-allocation.md).
+[docs/stream-ordered-allocation.md](/home/kjwtil/Documents/ROCm-Oxide/docs/stream-ordered-allocation.md).
 
 ## Roadmap
 
-This roadmap is grounded in the current local probe target:
+This roadmap is grounded in the validated probe targets:
 
-- GPU: `gfx1201`, AMD Radeon RX 9070 XT.
-- HIP/runtime: `7.2.53211-364a905`.
-- AMD LLVM/clang: `22.0.0git`.
-- Device limits seen through `rocminfo`: wavefront size 32, max workgroup size
-  1024, max waves per CU 32, and 64 KB group/LDS segment.
-- HIP host-memory probe: one device, managed memory, concurrent managed access,
-  host-native atomics, host mapped memory, host registration, and memory pools
-  are reported available; direct host access to device-resident managed memory,
-  pageable-memory access, and registered host-pointer reuse are not reported on
-  this dGPU.
-- Current generated artifact: 21 kernels, 33 buffer contracts, one linked
-  object input, max VGPR 33, max SGPR 28, max kernarg 368 bytes, max static LDS
-  1024 bytes, max private segment 260 bytes, two dynamic-LDS kernels, and no
-  dynamic stack users.
+- `gfx1201`, AMD Radeon RX 9070 XT: one device, managed memory, concurrent
+  managed access, host-native atomics, host mapped memory, host registration,
+  and memory pools were reported available. Current generated artifact on that
+  probe: 21 kernels, 33 buffer contracts, one linked object input, max VGPR 33,
+  max SGPR 28, max kernarg 368 bytes, max static LDS 1024 bytes, max private
+  segment 260 bytes, two dynamic-LDS kernels, and no dynamic stack users.
+- `gfx1100`, AMD Radeon RX 7900 XT: one device, managed memory, concurrent
+  managed access, host mapped memory, host registration, and memory pools are
+  reported available; direct host access to device-resident managed memory,
+  pageable-memory access, registered host-pointer reuse, and host-native PCIe
+  atomics are not reported on this topology. The upstream path for the RX 7900
+  XT negotiates `8GT/s x4`, so full-frame CPU readback/present workloads such as
+  the current `spectral_lattice` GUI can become PCIe/display-copy bound at high
+  resolutions. Current generated artifact on this probe: 21 kernels, 33 buffer
+  contracts, one linked object input, max VGPR 34, max SGPR 34, max kernarg 368
+  bytes, max static LDS 1024 bytes, max private segment 260 bytes, two
+  dynamic-LDS kernels, and no dynamic stack users.
+- Both probes used HIP/runtime `7.2.53211-364a905`, AMD LLVM/clang
+  `22.0.0git`, wavefront size 32, max workgroup size 1024, max waves per CU
+  32, and 64 KB group/LDS segment.
 - Current scoped atomic IR reaches global-memory `atomicrmw` with explicit
   `syncscope("workgroup")` or `syncscope("agent")` where requested. System scope
   uses the AMDGPU backend default because this LLVM build rejects explicit
-  non-inclusive `syncscope("system")`.
+  non-inclusive `syncscope("system")`. The `gfx1201` probe printed expected
+  `scope:SCOPE_*` labels; this `gfx1100` probe prints the expected global
+  atomic instructions but omits scope labels. The build validates transformed
+  IR plus atomic ISA and checks printed scope labels when the disassembler
+  provides them.
 
 ### P0: Backend Correctness
 
 - Scope-specific atomic verification: implemented workgroup/device
   `syncscope` lowering, keep the system-scope backend default documented, verify
   the transformed IR plus disassembled ISA, and keep runtime coverage across
-  default/coarse device, fine-grained device, and mapped host-visible memory.
+  default/coarse device and fine-grained device memory. Host-visible mapped and
+  managed atomic smoke tests require host-native PCIe atomics; they run on the
+  `gfx1201` profile that reports that capability and skip on this `gfx1100`
+  machine.
 - LDS/shared-memory follow-up: static `#[shared]` lowering now emits
   addrspace(3) LDS storage, verifies dynamic and static LDS IR plus DS
   load/store ISA, and feeds static/dynamic LDS pressure into launch validation

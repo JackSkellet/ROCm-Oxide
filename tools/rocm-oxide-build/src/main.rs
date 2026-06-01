@@ -243,7 +243,7 @@ impl Args {
 
 fn print_help() {
     println!(
-        "Usage: rocm-oxide-build [--crate device-spike] [--arch gfx1201] [--output-stem name]\n       rocm-oxide-build --doctor\n       rocm-oxide-build --inspect-metadata path/to/metadata.json"
+        "Usage: rocm-oxide-build [--crate device-spike] [--arch <gfx arch>] [--output-stem name]\n       rocm-oxide-build --doctor\n       rocm-oxide-build --inspect-metadata path/to/metadata.json"
     );
 }
 
@@ -2529,18 +2529,27 @@ fn assigned_value(line: &str) -> Option<String> {
 }
 
 fn rewrite_kernel_attributes(line: &str) -> String {
-    let line = strip_target_memory_effects(&line.replace(" nocreateundeforpoison", ""));
+    let mut line = strip_target_memory_effects(&line.replace(" nocreateundeforpoison", ""));
     if !line.starts_with("attributes #")
         || !line.contains("\"target-cpu\"=")
-        || line.contains("\"amdgpu-flat-work-group-size\"=")
     {
         return line;
     }
-    line.replacen(
-        "\"target-cpu\"=",
-        "\"amdgpu-flat-work-group-size\"=\"1,1024\" \"target-cpu\"=",
-        1,
-    )
+    if !line.contains("\"amdgpu-flat-work-group-size\"=") {
+        line = line.replacen(
+            "\"target-cpu\"=",
+            "\"amdgpu-flat-work-group-size\"=\"1,1024\" \"target-cpu\"=",
+            1,
+        );
+    }
+    if !line.contains("\"amdgpu-no-hostcall-ptr\"") {
+        line = line.replacen(
+            "\"target-cpu\"=",
+            "\"amdgpu-no-hostcall-ptr\" \"target-cpu\"=",
+            1,
+        );
+    }
+    line
 }
 
 fn strip_target_memory_effects(line: &str) -> String {
@@ -2853,26 +2862,43 @@ fn verify_scoped_atomic_ir(ir: &str) -> Result<(), String> {
 fn verify_scoped_atomic_isa(disassembly: &str) -> Result<(), String> {
     let body = disassembly_symbol_body(disassembly, "scoped_atomics")
         .ok_or_else(|| "scoped_atomics symbol missing from object disassembly".to_string())?;
-    let has_global_atomic = body.contains("global_atomic_add_u32")
-        || body.contains("flat_atomic_add_u32")
-        || body.contains("buffer_atomic_add_u32");
-    let has_workgroup_scope = body.contains("scope:SCOPE_SE");
-    let has_device_scope = body.contains("scope:SCOPE_DEV");
-    let has_system_scope = body.contains("scope:SCOPE_SYS");
+    let atomic_lines = body
+        .lines()
+        .filter(|line| is_global_atomic_add_isa_line(line))
+        .map(str::trim)
+        .collect::<Vec<_>>();
+    let has_global_atomic = !atomic_lines.is_empty();
+    let has_expected_atomic_count = atomic_lines.len() >= 3;
+    let has_scope_annotations = atomic_lines.iter().any(|line| line.contains("scope:"));
+    let has_workgroup_scope = atomic_lines
+        .iter()
+        .any(|line| line.contains("scope:SCOPE_SE"));
+    let has_device_scope = atomic_lines
+        .iter()
+        .any(|line| line.contains("scope:SCOPE_DEV"));
+    let has_system_scope = atomic_lines
+        .iter()
+        .any(|line| line.contains("scope:SCOPE_SYS"));
 
-    if !has_global_atomic || !has_workgroup_scope || !has_device_scope || !has_system_scope {
-        let atomic_lines = body
-            .lines()
-            .filter(|line| line.contains("_atomic_"))
-            .map(str::trim)
-            .collect::<Vec<_>>();
+    if !has_global_atomic
+        || !has_expected_atomic_count
+        || (has_scope_annotations
+            && (!has_workgroup_scope || !has_device_scope || !has_system_scope))
+    {
         return Err(format!(
-            "scoped_atomics ISA did not contain expected AMDGPU atomic scopes\n  global/flat/buffer atomic add: {has_global_atomic}\n  workgroup/SCOPE_SE: {has_workgroup_scope}\n  device/SCOPE_DEV: {has_device_scope}\n  system/SCOPE_SYS: {has_system_scope}\n  atomic lines:\n{}",
+            "scoped_atomics ISA did not contain expected AMDGPU atomic scopes\n  global/flat/buffer atomic add: {has_global_atomic}\n  atomic add count: {}\n  scope annotations present: {has_scope_annotations}\n  workgroup/SCOPE_SE: {has_workgroup_scope}\n  device/SCOPE_DEV: {has_device_scope}\n  system/SCOPE_SYS: {has_system_scope}\n  atomic lines:\n{}",
+            atomic_lines.len(),
             atomic_lines.join("\n")
         ));
     }
 
     Ok(())
+}
+
+fn is_global_atomic_add_isa_line(line: &str) -> bool {
+    line.contains("global_atomic_add_u32")
+        || line.contains("flat_atomic_add_u32")
+        || line.contains("buffer_atomic_add_u32")
 }
 
 fn llvm_function_body(text: &str, name: &str) -> Option<String> {
@@ -4028,6 +4054,7 @@ pub unsafe extern "C" fn vector_add(out: *mut f32, input: *const f32, n: usize) 
         assert!(output.contains("load float, ptr addrspace(1) %src"));
         assert!(output.contains("store float %value, ptr addrspace(1) %dst"));
         assert!(output.contains("\"amdgpu-flat-work-group-size\"=\"1,1024\""));
+        assert!(output.contains("\"amdgpu-no-hostcall-ptr\""));
         assert!(!output.contains("target_mem"));
     }
 
@@ -4503,6 +4530,22 @@ start:
 "#;
 
         verify_scoped_atomic_isa(disassembly).expect("scoped atomic ISA should verify");
+    }
+
+    #[test]
+    fn verifies_scoped_atomic_isa_when_objdump_omits_scope_annotations() {
+        let disassembly = r#"
+0000000000009f00 <scoped_atomics>:
+  global_atomic_add_u32 v2, v3, s[0:1]
+  global_atomic_add_u32 v2, v3, s[0:1] offset:4
+  global_atomic_add_u32 v2, v3, s[0:1] offset:8
+
+000000000000a100 <other>:
+  s_endpgm
+"#;
+
+        verify_scoped_atomic_isa(disassembly)
+            .expect("unannotated scoped atomic ISA should still verify");
     }
 
     #[test]

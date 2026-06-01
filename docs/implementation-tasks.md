@@ -33,25 +33,37 @@ features on top of stronger contracts.
 
 ## Roadmap Inputs
 
-Local probes on 2026-05-31:
+Local probes:
 
-- GPU target: `gfx1201`, AMD Radeon RX 9070 XT.
-- HIP/runtime: `7.2.53211-364a905`; AMD LLVM/clang: `22.0.0git`.
-- Device limits from `rocminfo`: wavefront size 32, max workgroup size 1024,
-  max waves per CU 32, 64 KB group/LDS segment.
-- HIP host-memory properties: one device; managed memory, concurrent managed
-  access, host-native atomics, host mapped memory, host registration, and memory
-  pools are available; direct host access to device-resident managed memory,
-  pageable-memory access, and registered host-pointer reuse are not reported on
-  this dGPU.
-- Current generated artifact: 21 kernels, 33 buffer contracts, one linked
-  object input, max VGPR 33, max SGPR 28, max kernarg 368 bytes, max static LDS
-  1024 bytes, max private segment 260 bytes, two dynamic-LDS kernels, and no
-  dynamic stack users.
+- 2026-05-31 home workstation: `gfx1201`, AMD Radeon RX 9070 XT.
+  HIP/runtime `7.2.53211-364a905`; AMD LLVM/clang `22.0.0git`. HIP reported
+  managed memory, concurrent managed access, host-native atomics, host mapped
+  memory, host registration, and memory pools. Current generated artifact on
+  that probe: 21 kernels, 33 buffer contracts, one linked object input, max VGPR
+  33, max SGPR 28, max kernarg 368 bytes, max static LDS 1024 bytes, max
+  private segment 260 bytes, two dynamic-LDS kernels, and no dynamic stack
+  users.
+- 2026-06-01 local workstation: `gfx1100`, AMD Radeon RX 7900 XT. HIP/runtime
+  `7.2.53211-364a905`; AMD LLVM/clang `22.0.0git`. HIP reported managed memory,
+  concurrent managed access, host mapped memory, host registration, and memory
+  pools; direct host access to device-resident managed memory, pageable-memory
+  access, registered host-pointer reuse, and host-native PCIe atomics are not
+  reported on this topology. The RX 7900 XT path negotiates an upstream
+  `8GT/s x4` PCIe link, which makes full-frame CPU readback/present paths
+  bandwidth-sensitive at 1440p and 4K. Current generated artifact on this probe:
+  21 kernels, 33 buffer contracts, one linked object input, max VGPR 34, max
+  SGPR 34, max kernarg 368 bytes, max static LDS 1024 bytes, max private
+  segment 260 bytes, two dynamic-LDS kernels, and no dynamic stack users.
+- Both probes report wavefront size 32, max workgroup size 1024, max waves per
+  CU 32, and 64 KB group/LDS segment.
 - Current scoped atomic IR emits global-memory `atomicrmw` with explicit
   `syncscope("workgroup")` or `syncscope("agent")` where requested. System scope
   intentionally uses the AMDGPU backend default because the local LLVM backend
-  rejects explicit non-inclusive `syncscope("system")`.
+  rejects explicit non-inclusive `syncscope("system")`. The `gfx1201`
+  disassembler output printed expected `scope:SCOPE_*` labels, while this
+  `gfx1100` disassembler output can omit them, so the build verifies IR scope
+  mapping plus atomic ISA and treats printed scope labels as optional extra
+  evidence.
 
 ## Next Roadmap
 
@@ -63,7 +75,9 @@ Local probes on 2026-05-31:
         scope on the backend default
   - [x] verify transformed IR and disassembled ISA for the scoped atomic kernel
   - [x] smoke-test scoped atomics on device-memory counters at runtime
-  - [x] extend runtime coverage across default/coarse device, fine-grained device, and mapped host-visible pools
+  - [x] extend runtime coverage across default/coarse device and fine-grained device pools
+  - [x] gate mapped/managed host-visible atomic smoke tests on host-native PCIe atomics
+        so the `gfx1201` path can run them and the `gfx1100` PCIe-switch path can skip them
   - [x] add negative docs/tests for system-scope atomics that downgrade on coarse memory
 - [x] LDS/shared-memory dynamic path:
   - [x] add a real tiled/reduction kernel that uses dynamic LDS
@@ -124,3 +138,7 @@ Local probes on 2026-05-31:
   - [x] expose a checked rocBLAS SGEMM wrapper for `DeviceBuffer<f32>`
   - [x] expose first rocFFT setup/plan/execute wrappers for in-place complex `f32` buffers
 - [ ] ROCm Compute Profiler integration for achieved occupancy and memory behavior.
+- [ ] GPU-native presentation path for `spectral_lattice`:
+  - [ ] replace the live `minifb` CPU framebuffer path with Vulkan/OpenGL texture presentation or ROCm graphics interop
+  - [ ] avoid full-frame VRAM-to-host readback every frame for 1440p and 4K interactive runs
+  - [ ] keep the existing CPU readback path for headless PNG export and simple compatibility smoke tests

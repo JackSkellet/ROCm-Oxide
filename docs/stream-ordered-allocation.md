@@ -4,6 +4,14 @@ ROCm-Oxide exposes HIP's stream-ordered allocation path through
 `DeviceBuffer::new_async`, `DeviceBuffer::new_from_pool_async`, and
 `DeviceBuffer::free_async`.
 
+Local `gfx1100` note: on the RX 7900 XT behind this machine's chipset PCIe
+switch, `hipMallocFromPoolAsync` can return a pointer that faults during an
+immediate async device-to-host copy even though the allocation call succeeds.
+The showcase therefore exercises current-pool controls and trimming, but avoids
+the hard-faulting explicit-pool allocation path until that HIP/runtime behavior
+is revalidated. Prefer `DeviceBuffer::new_async` for smoke coverage on this
+machine.
+
 Rules for using it safely:
 
 - Allocate, use, copy, and free a stream-ordered buffer on the same stream unless

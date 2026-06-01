@@ -24,9 +24,13 @@ Coherence rules:
 - Device memory and fine-grained device allocations are device-visible only for
   host concurrency purposes. A system-scope atomic does not make ordinary device
   memory host-pollable while a kernel is running.
-- Mapped coherent host memory is modeled as host-visible during a kernel.
+- Mapped coherent host memory is modeled as host-visible during a kernel only
+  when `DeviceProperties::host_native_atomic_supported` is also true. On PCIe
+  paths without native atomics, system-scope atomic smoke tests skip this memory
+  kind instead of advertising host-concurrent visibility.
 - Fine-grain managed memory is modeled as host-visible during a kernel only when
-  `DeviceProperties::concurrent_managed_access` is true. Otherwise it is
+  both `DeviceProperties::concurrent_managed_access` and
+  `DeviceProperties::host_native_atomic_supported` are true. Otherwise it is
   downgraded to synchronization-boundary visibility.
 - Coarse-grain managed memory is host-visible after synchronization.
 - Peer access is explicit. Query it first with `Device::can_access_peer`; enable

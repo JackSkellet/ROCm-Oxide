@@ -271,7 +271,7 @@ impl DeviceProperties {
     }
 
     pub const fn mapped_host_memory_kind(self) -> Option<AtomicMemoryKind> {
-        if self.can_map_host_memory {
+        if self.can_map_host_memory && self.host_native_atomic_supported {
             Some(AtomicMemoryKind::MappedCoherentHost)
         } else {
             None
@@ -286,7 +286,9 @@ impl DeviceProperties {
             return None;
         }
         match requested {
-            hip::ManagedMemoryKind::FineGrain if self.concurrent_managed_access => {
+            hip::ManagedMemoryKind::FineGrain
+                if self.concurrent_managed_access && self.host_native_atomic_supported =>
+            {
                 Some(AtomicMemoryKind::ManagedFineGrain)
             }
             hip::ManagedMemoryKind::FineGrain | hip::ManagedMemoryKind::CoarseGrain => {
@@ -1101,6 +1103,57 @@ mod tests {
             Some(AtomicMemoryKind::ManagedCoarseGrain)
         );
         assert_eq!(props.mapped_host_memory_kind(), None);
+    }
+
+    #[test]
+    fn mapped_host_memory_needs_host_native_atomics_for_concurrent_system_scope() {
+        let props = DeviceProperties {
+            ordinal: 0,
+            managed_memory: true,
+            concurrent_managed_access: true,
+            cooperative_launch: true,
+            cooperative_multi_device_launch: false,
+            direct_managed_mem_access_from_host: false,
+            can_map_host_memory: true,
+            can_use_host_pointer_for_registered_mem: false,
+            host_native_atomic_supported: false,
+            pageable_memory_access: false,
+            pageable_memory_access_uses_host_page_tables: false,
+            memory_pools_supported: true,
+            unified_addressing: true,
+            host_register_supported: true,
+            async_engine_count: 2,
+            multiprocessor_count: 64,
+            warp_size: 32,
+        };
+        assert_eq!(props.mapped_host_memory_kind(), None);
+    }
+
+    #[test]
+    fn fine_grain_managed_memory_needs_host_native_atomics_for_concurrent_system_scope() {
+        let props = DeviceProperties {
+            ordinal: 0,
+            managed_memory: true,
+            concurrent_managed_access: true,
+            cooperative_launch: true,
+            cooperative_multi_device_launch: false,
+            direct_managed_mem_access_from_host: false,
+            can_map_host_memory: true,
+            can_use_host_pointer_for_registered_mem: false,
+            host_native_atomic_supported: false,
+            pageable_memory_access: false,
+            pageable_memory_access_uses_host_page_tables: false,
+            memory_pools_supported: true,
+            unified_addressing: true,
+            host_register_supported: true,
+            async_engine_count: 2,
+            multiprocessor_count: 64,
+            warp_size: 32,
+        };
+        assert_eq!(
+            props.managed_memory_kind(ManagedMemoryKind::FineGrain),
+            Some(AtomicMemoryKind::ManagedCoarseGrain)
+        );
     }
 
     #[test]

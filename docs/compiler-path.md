@@ -5,7 +5,8 @@
 - `rustc --print target-list` includes `amdgcn-amd-amdhsa`.
 - `/opt/rocm/lib/llvm/bin/llc --version` includes the `amdgcn` target.
 - `hipcc --help` supports `--offload-arch=<gfx...>` and `-fgpu-rdc`.
-- The installed GPU target is `gfx1201`.
+- Validated GPU targets include `gfx1201` on an RX 9070 XT and `gfx1100` on an
+  RX 7900 XT. The currently attached GPU on this machine is `gfx1100`.
 
 ## Stable Rust Device Compilation Probe
 
@@ -68,7 +69,8 @@ cargo run --example rust_device_add_one
 cargo run --example rust_device_generated_bindings
 ```
 
-This successfully launches two Rust-authored kernels on `gfx1201`:
+This successfully launches two Rust-authored kernels on the current `gfx1100`
+machine and was previously validated on the `gfx1201` RX 9070 XT profile:
 
 - `add_one`, using `workitem_id_x`
 - `vector_add`, using `workgroup_id_x` and `workitem_id_x`

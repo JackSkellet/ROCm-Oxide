@@ -42,7 +42,7 @@ fn print_help() {
     println!(
         "Usage:
     cargo rocm-oxide doctor
-    cargo rocm-oxide build [-- --arch gfx1201]
+    cargo rocm-oxide build [-- --arch <gfx arch>]
     cargo rocm-oxide run [cargo-run-args]
     cargo rocm-oxide inspect [metadata.json]
     cargo rocm-oxide pipeline [--build]

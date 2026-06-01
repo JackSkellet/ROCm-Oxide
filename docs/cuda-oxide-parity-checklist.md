@@ -54,7 +54,7 @@ not the product.
 ## High-Priority Remaining Work
 
 - [ ] Implementation task sequence is tracked in
-      [implementation-tasks.md](/home/jack/Documents/GitKraken_Projects/ROCm-Oxide/docs/implementation-tasks.md).
+      [implementation-tasks.md](/home/kjwtil/Documents/ROCm-Oxide/docs/implementation-tasks.md).
 - [x] Cargo subcommand equivalent to `cargo oxide`:
   - [x] `cargo rocm-oxide build`
   - [x] `cargo rocm-oxide run`

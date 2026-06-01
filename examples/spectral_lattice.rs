@@ -2,8 +2,8 @@ use font8x8::{BASIC_FONTS, UnicodeFonts};
 use image::{Rgb, RgbImage};
 use minifb::{Key, KeyRepeat, MouseButton, MouseMode, Scale, Window, WindowOptions};
 use rocm_oxide::{
-    Device, DeviceBuffer, Event, LaunchConfig, RocBlas, RocmLibraryReport, SgemmLayout, Stream,
-    rocm_feature_parity_for_device,
+    Device, DeviceBuffer, Event, LaunchConfig, PinnedHostBuffer, RocBlas, RocmLibraryReport,
+    SgemmLayout, Stream, rocm_feature_parity_for_device,
 };
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
@@ -56,6 +56,9 @@ struct DemoState {
     fps: f64,
     gpu_ms: f32,
     copy_ms: f64,
+    draw_ms: f64,
+    present_ms: f64,
+    frame_ms: f64,
     fps_limit: usize,
     gpu_work: usize,
     render_size: RenderSize,
@@ -144,7 +147,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let device = Device::first()?;
     let kernels = generated::DeviceKernels::load_embedded(&device)?;
     let mut buffers = DemoBuffers::new(args.size)?;
-    let mut host_frame = vec![0u32; buffers.size.pixel_count()];
+    let mut host_frame = PinnedHostBuffer::<u32>::new_zeroed(buffers.size.pixel_count())?;
     let mut resources = ResourceSnapshot::new(&device, &kernels, buffers.size.pixel_count())?;
     let palette = derive_palette(0);
     let mut state = DemoState {
@@ -162,6 +165,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         fps: 0.0,
         gpu_ms: 0.0,
         copy_ms: 0.0,
+        draw_ms: 0.0,
+        present_ms: 0.0,
+        frame_ms: 0.0,
         fps_limit: args.fps_limit,
         gpu_work: args.gpu_work,
         render_size: args.size,
@@ -186,8 +192,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         let copy_start = Instant::now();
         copy_display_frame(&buffers, use_post, &mut host_frame)?;
         state.copy_ms = copy_start.elapsed().as_secs_f64() * 1000.0;
-        draw_overlay(&mut host_frame, buffers.size, &state, &resources);
-        save_png(&args.output, &host_frame, buffers.size)?;
+        let draw_start = Instant::now();
+        draw_overlay(host_frame.as_mut_slice(), buffers.size, &state, &resources);
+        state.draw_ms = draw_start.elapsed().as_secs_f64() * 1000.0;
+        save_png(&args.output, host_frame.as_slice(), buffers.size)?;
         println!(
             "saved Spectral Lattice GUI preview after {frames} frame(s): {}",
             args.output.display()
@@ -201,9 +209,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let mut last_fps = Instant::now();
     let mut frames_since_fps = 0u32;
     let mut mouse_was_down = false;
-    let mut saved_once = false;
     let mut applied_fps_limit = state.fps_limit;
     while window.is_open() && !window.is_key_down(Key::Escape) {
+        let frame_start = Instant::now();
         handle_keyboard(&window, &mut state, &kernels, &buffers.short);
         handle_mouse(
             &window,
@@ -215,11 +223,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
         if state.render_size != buffers.size {
             buffers = DemoBuffers::new(state.render_size)?;
-            host_frame.resize(buffers.size.pixel_count(), 0);
+            host_frame = PinnedHostBuffer::<u32>::new_zeroed(buffers.size.pixel_count())?;
             resources = ResourceSnapshot::new(&device, &kernels, buffers.size.pixel_count())?;
             window = create_window(buffers.size, state.fps_limit)?;
             applied_fps_limit = state.fps_limit;
-            saved_once = false;
             state.status = format!("resolution set to {}", buffers.size.label());
         } else if state.fps_limit != applied_fps_limit {
             window.set_target_fps(state.fps_limit);
@@ -239,25 +246,34 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         let copy_start = Instant::now();
         copy_display_frame(&buffers, use_post, &mut host_frame)?;
         state.copy_ms = copy_start.elapsed().as_secs_f64() * 1000.0;
-        draw_overlay(&mut host_frame, buffers.size, &state, &resources);
+        let draw_start = Instant::now();
+        draw_overlay(host_frame.as_mut_slice(), buffers.size, &state, &resources);
+        state.draw_ms = draw_start.elapsed().as_secs_f64() * 1000.0;
 
-        if !saved_once || state.save_requested {
-            save_png(&args.output, &host_frame, buffers.size)?;
+        if state.save_requested {
+            save_png(&args.output, host_frame.as_slice(), buffers.size)?;
             state.status = format!("saved {}", args.output.display());
             state.save_requested = false;
-            saved_once = true;
         }
 
-        window.update_with_buffer(&host_frame, buffers.size.width, buffers.size.height)?;
+        let present_start = Instant::now();
+        window.update_with_buffer(
+            host_frame.as_slice(),
+            buffers.size.width,
+            buffers.size.height,
+        )?;
+        state.present_ms = present_start.elapsed().as_secs_f64() * 1000.0;
+        state.frame_ms = frame_start.elapsed().as_secs_f64() * 1000.0;
         frames_since_fps = frames_since_fps.saturating_add(1);
         if last_fps.elapsed() >= Duration::from_millis(500) {
             state.fps = frames_since_fps as f64 / last_fps.elapsed().as_secs_f64();
             frames_since_fps = 0;
             last_fps = Instant::now();
             window.set_title(&format!(
-                "ROCm-Oxide Spectral Lattice | {} | {:.1} FPS | limit {} | {}",
+                "ROCm-Oxide Spectral Lattice | {} | {:.1} FPS | {:.1} ms frame | limit {} | {}",
                 buffers.size.label(),
                 state.fps,
+                state.frame_ms,
                 fps_label(state.fps_limit),
                 MODES[state.mode],
             ));
@@ -285,12 +301,12 @@ fn create_window(size: RenderSize, fps_limit: usize) -> Result<Window, Box<dyn s
 fn copy_display_frame(
     buffers: &DemoBuffers,
     use_post: bool,
-    host_frame: &mut [u32],
+    host_frame: &mut PinnedHostBuffer<u32>,
 ) -> Result<(), Box<dyn std::error::Error>> {
     if use_post {
-        buffers.post.copy_to_host(host_frame)?;
+        buffers.post.copy_to_pinned_host(host_frame)?;
     } else {
-        buffers.base.copy_to_host(host_frame)?;
+        buffers.base.copy_to_pinned_host(host_frame)?;
     }
     Ok(())
 }
@@ -1012,8 +1028,8 @@ fn draw_overlay(
         24 * scale,
         540 * scale,
         &format!(
-            "gpu{:.2} copy{:.2} work{}x",
-            state.gpu_ms, state.copy_ms, state.gpu_work
+            "gpu{:.2} copy{:.2} draw{:.2}",
+            state.gpu_ms, state.copy_ms, state.draw_ms
         ),
         0x9adfb1,
         (PANEL_W - 42) * scale,
@@ -1025,6 +1041,19 @@ fn draw_overlay(
             scale,
             24 * scale,
             558 * scale,
+            &format!(
+                "present{:.2} frame{:.2} work{}x",
+                state.present_ms, state.frame_ms, state.gpu_work
+            ),
+            0x9adfb1,
+            (PANEL_W - 42) * scale,
+        );
+        draw_text_clipped(
+            frame,
+            size,
+            scale,
+            24 * scale,
+            576 * scale,
             &resources.parity_line,
             0xc7d4e0,
             (PANEL_W - 42) * scale,
@@ -1034,21 +1063,23 @@ fn draw_overlay(
             size,
             scale,
             24 * scale,
-            576 * scale,
+            594 * scale,
             &format!("palette: {}", state.palette_source),
             0x9adfb1,
             (PANEL_W - 42) * scale,
         );
-        draw_text_clipped(
-            frame,
-            size,
-            scale,
-            24 * scale,
-            594 * scale,
-            &state.status,
-            0xffcc8a,
-            (PANEL_W - 42) * scale,
-        );
+        if size.height >= 614 * scale {
+            draw_text_clipped(
+                frame,
+                size,
+                scale,
+                24 * scale,
+                612 * scale,
+                &state.status,
+                0xffcc8a,
+                (PANEL_W - 42) * scale,
+            );
+        }
     } else {
         draw_text_clipped(
             frame,

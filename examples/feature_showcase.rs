@@ -242,25 +242,13 @@ fn main() -> Result<()> {
     default_mem_pool.set_reuse_follow_event_dependencies(follow_events)?;
     let _reserved_before = default_mem_pool.reserved_mem_current()?;
     let _used_before = default_mem_pool.used_mem_current()?;
-    let pool_context = device.execution_context()?;
-    let pooled =
-        DeviceBuffer::<f32>::new_from_pool_async(pool_context.stream(), default_mem_pool, 32)?;
-    let pooled_input = (0..32).map(|i| i as f32).collect::<Vec<_>>();
-    let mut pooled_output = vec![0.0f32; 32];
-    pooled.copy_from_host_async(pool_context.stream(), &pooled_input)?;
-    pooled.copy_to_host_async(pool_context.stream(), &mut pooled_output)?;
-    unsafe {
-        pooled.free_async(pool_context.stream())?;
-    }
-    pool_context.synchronize()?;
-    assert_eq!(pooled_output, pooled_input);
     default_mem_pool.trim_to(0)?;
-    println!("ok: HIP stream-ordered memory pool controls handled async allocation");
+    println!("ok: HIP stream-ordered memory pool controls queried and applied");
 
     let properties = device.properties()?;
     assert!(properties.warp_size > 0);
     assert!(properties.multiprocessor_count > 0);
-    if properties.can_map_host_memory {
+    if properties.mapped_host_memory_kind().is_some() {
         assert_eq!(
             properties.mapped_host_memory_kind(),
             Some(AtomicMemoryKind::MappedCoherentHost)
@@ -307,20 +295,24 @@ fn main() -> Result<()> {
     );
     println!("ok: scoped atomic kernel updated fine-grained device counters");
 
-    let host_atomic_out = PinnedHostBuffer::<u32>::new_zeroed_mapped_coherent(4)?;
-    let host_atomic_counters = PinnedHostBuffer::<u32>::new_zeroed_mapped_coherent(3)?;
-    launch_scoped_atomics_raw(
-        &kernels,
-        host_atomic_out.device_ptr()?,
-        host_atomic_out.len(),
-        host_atomic_counters.device_ptr()?,
-        host_atomic_counters.len(),
-    )?;
-    rocm_oxide::hip::synchronize()?;
-    verify_scoped_atomic_outputs(host_atomic_out.as_slice(), host_atomic_counters.as_slice());
-    println!("ok: scoped atomic kernel updated mapped coherent host-visible counters");
+    if properties.mapped_host_memory_kind().is_some() {
+        let host_atomic_out = PinnedHostBuffer::<u32>::new_zeroed_mapped_coherent(4)?;
+        let host_atomic_counters = PinnedHostBuffer::<u32>::new_zeroed_mapped_coherent(3)?;
+        launch_scoped_atomics_raw(
+            &kernels,
+            host_atomic_out.device_ptr()?,
+            host_atomic_out.len(),
+            host_atomic_counters.device_ptr()?,
+            host_atomic_counters.len(),
+        )?;
+        rocm_oxide::hip::synchronize()?;
+        verify_scoped_atomic_outputs(host_atomic_out.as_slice(), host_atomic_counters.as_slice());
+        println!("ok: scoped atomic kernel updated mapped coherent host-visible counters");
+    } else {
+        println!("skip: mapped host-visible scoped atomics need host-native PCIe atomics");
+    }
 
-    if properties.managed_memory {
+    if properties.managed_memory && properties.host_native_atomic_supported {
         let managed_kind = properties
             .managed_memory_kind(ManagedMemoryKind::FineGrain)
             .expect("managed memory property should classify managed allocations");
@@ -362,6 +354,8 @@ fn main() -> Result<()> {
             coarse_atomic_counters.as_slice(),
         );
         println!("ok: scoped atomic kernel updated managed fine/coarse host-visible counters");
+    } else if properties.managed_memory {
+        println!("skip: managed host-visible scoped atomics need host-native PCIe atomics");
     }
 
     let reduce_n = 768usize;
