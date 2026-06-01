@@ -400,9 +400,10 @@ IDs, dispatch-packet-derived block/grid dimensions, global IDs, wavefront
 metadata, barriers, dynamic launch-sized LDS pointers, workgroup
 synchronization for static `#[shared]` LDS kernels, ballot/reduction helpers,
 typed device slices, math helpers for `sqrt`, `rsqrt`, `sin`, `cos`, `atan`,
-min/max, scoped `u32` atomics for workgroup/device/system intent, and the basic
-relaxed `u32` atomic compatibility helpers so device code does not need to call
-`core::arch::amdgpu` directly.
+min/max, scoped `u32`/`i32`/`u64`/`i64` atomics for
+workgroup/device/system intent, wavefront shuffle/match/vote helpers,
+`DisjointSliceMut`, a thread-index witness, and a managed workgroup barrier
+token so device code does not need to call `core::arch::amdgpu` directly.
 Atomic memory visibility rules are documented in
 [docs/atomic-scopes.md](/home/kjwtil/Documents/ROCm-Oxide/docs/atomic-scopes.md).
 Host-memory coherence rules are documented in
@@ -429,10 +430,11 @@ This roadmap is grounded in the validated probe targets:
 
 - `gfx1201`, AMD Radeon RX 9070 XT: one device, managed memory, concurrent
   managed access, host-native atomics, host mapped memory, host registration,
-  and memory pools were reported available. Current generated artifact on that
-  probe: 22 kernels, 34 buffer contracts, one linked object input, max VGPR 33,
-  max SGPR 28, max kernarg 368 bytes, max static LDS 1024 bytes, max private
-  segment 260 bytes, two dynamic-LDS kernels, and no dynamic stack users.
+  and memory pools were reported available. Current generated artifact after
+  the first sprint slice on that probe: 24 kernels, 41 buffer contracts, one
+  linked object input, max VGPR 33, max SGPR 54, max kernarg 368 bytes, max
+  static LDS 32768 bytes, max private segment 260 bytes, two dynamic-LDS
+  kernels, and no dynamic stack users.
 - `gfx1100`, AMD Radeon RX 7900 XT: one device, managed memory, concurrent
   managed access, host mapped memory, host registration, and memory pools are
   reported available; direct host access to device-resident managed memory,
@@ -459,9 +461,13 @@ This roadmap is grounded in the validated probe targets:
 ### P0: Backend Correctness
 
 - ASAP cuda-oxide parity sprint: make the current prototype comparable category
-  by category against NVIDIA's matrix. The first work is compiler and type
-  coverage, then safety abstractions, then device API breadth, then ROCm-native
-  interop/backends.
+  by category against NVIDIA's matrix. The first compiler/type, runtime-safety,
+  and device-API breadth slice is live: `compiler_parity_matrix` now smokes
+  enums, `Option`, `Result`, custom discriminants, match, arrays, loops, casts,
+  by-value `repr(C)` struct ABI scalarization, `DisjointSliceMut`,
+  thread-index witnesses, barrier tokens, typed integer atomics, wavefront
+  shuffle/match/vote helpers, and wavefront reductions through generated
+  bindings.
 - Scope-specific atomic verification: implemented workgroup/device
   `syncscope` lowering, keep the system-scope backend default documented, verify
   the transformed IR plus disassembled ISA, and keep runtime coverage across
@@ -517,14 +523,16 @@ This roadmap is grounded in the validated probe targets:
 
 ### P2: ROCm-Specific Feature Parity
 
-- Runtime safety layer: add ROCm-native equivalents to cuda-oxide's
-  `DisjointSlice`, thread-index witness, and managed barrier typestate APIs.
-  These should become compile-time or generated-binding checks where possible,
-  and runtime validation where the information only exists at launch.
-- Device API breadth: expand from the current `u32` scoped atomics and basic
-  wavefront helpers to a broader typed atomic matrix, wavefront shuffle/vote
-  variants, block reductions/scans, and debug helpers such as printf/assert,
-  clock, trap, and breakpoint equivalents where ROCm exposes them.
+- Runtime safety layer: `DisjointSliceMut`, thread-index witness, and managed
+  barrier token helpers now exist in the device crate and are exercised by the
+  generated-binding smoke path. Next is tightening them into compile-time or
+  generated-binding checks where possible, and runtime validation where the
+  information only exists at launch.
+- Device API breadth: the first broader typed atomic matrix, wavefront
+  shuffle/vote/match helpers, and wavefront reductions are live. Remaining work
+  is supported float atomics, block reductions/scans, more scalar types, and
+  debug helpers such as printf/assert, clock, trap, and breakpoint equivalents
+  where ROCm exposes them.
 - COMGR/code-object backend: turn the current COMGR availability probe into a
   real compile/link path, then use it for persistent code-object caching and
   ROCm library/device-object interop where HIPRTC is too narrow.

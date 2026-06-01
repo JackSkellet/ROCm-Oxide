@@ -10,23 +10,25 @@ features on top of stronger contracts.
 - [ ] ASAP cuda-oxide feature parity sequence from
       [NVIDIA's supported features matrix](https://nvlabs.github.io/cuda-oxide/appendix/supported-features.html):
   - [ ] Compiler type/control-flow parity:
-    - [ ] add kernels and compiler tests for enums, `Option`, `Result`, and
-          custom discriminants
-    - [ ] add kernels and compiler tests for integer and enum `match`
-          lowering, including nested branches and early exits
-    - [ ] add array construction, constant-index, runtime-index, and mutable
-          array promotion tests
-    - [ ] add integer, float, pointer, and bitcast conversion coverage with
-          metadata diagnostics for unsupported casts
-    - [ ] add loop coverage for ranges, nested loops, `break`, `continue`, and
-          iterator-like slice traversal where the Rust-to-AMDGPU path can prove
-          the ABI
+    - [x] add a GPU smoke kernel and generated-binding assertions for enums,
+          `Option`, `Result`, and custom discriminants
+    - [x] add GPU smoke coverage for integer and enum `match` lowering plus an
+          early bounds exit
+    - [x] add array construction, constant-index, runtime-index, and mutable
+          array promotion coverage
+    - [x] add integer, float, and bitcast conversion coverage in the parity
+          smoke kernel
+    - [x] add loop coverage for `while`, `loop`, `break`, and `continue`
+    - [ ] add nested-branch, range-loop, iterator-like slice traversal, pointer
+          cast, and unsupported-cast diagnostic coverage
   - [ ] ABI/layout parity:
     - [ ] query rustc layout facts for host/device structs and record field
           offsets, padding, and ABI width in metadata
     - [ ] support default `repr(Rust)` structs where the generated metadata can
           prove layout compatibility
     - [ ] keep `repr(C)` as the compatibility fallback for unproven layouts
+    - [x] scalarize known `repr(C)` by-value struct arguments in generated host
+          bindings and keep a unit test for that ABI shape
     - [ ] extend generated bindings to reject unsupported layout and by-value
           argument cases before launch
   - [ ] Closure parity:
@@ -36,19 +38,21 @@ features on top of stronger contracts.
     - [ ] add host-to-device closure argument examples and tests
     - [ ] add device-internal closure creation and device-function call tests
   - [ ] Runtime safety parity:
-    - [ ] add a `DisjointSlice`-style output wrapper for bounds-checked
+    - [x] add a `DisjointSlice`-style output wrapper for bounds-checked
           per-thread writes
-    - [ ] add a thread-index witness type so safe indexed writes can be tied to
+    - [x] add a thread-index witness type so safe indexed writes can be tied to
           trusted GPU index helpers
-    - [ ] add a managed barrier typestate API for LDS/block synchronization
+    - [x] add a managed barrier typestate API for LDS/block synchronization
           lifetimes where AMD hardware semantics allow it
   - [ ] Device API parity:
-    - [ ] expand scoped atomics beyond `u32` to signed integer, 64-bit integer,
-          and supported float operations by memory scope
-    - [ ] add wavefront shuffle up/down/xor and typed `i32`/`f32` variants
-    - [ ] add vote and match helpers beyond the current ballot/any/all surface
-    - [ ] add wavefront and block reductions/scans for sum/min/max and bitwise
-          operations over the supported scalar types
+    - [x] expand scoped atomics beyond `u32` to signed integer and 64-bit integer
+          operations by memory scope
+    - [ ] add supported float atomic operations by memory scope
+    - [x] add wavefront shuffle up/down/xor and typed `i32`/`f32` variants
+    - [x] add vote and match helpers beyond the current ballot/any/all surface
+    - [x] add wavefront reductions for sum/min/max and bitwise operations over
+          `u32`/`i32`
+    - [ ] add block reductions/scans and broaden scalar-type coverage
     - [ ] add debug helpers for GPU printf/assert, clock, trap, breakpoint, and
           profiler trigger equivalents where ROCm exposes a stable path
   - [ ] ROCm-native interop/backends:
@@ -115,10 +119,10 @@ Local probes:
   HIP/runtime `7.2.53211-364a905`; AMD LLVM/clang `22.0.0git`. HIP reported
   managed memory, concurrent managed access, host-native atomics, host mapped
   memory, host registration, and memory pools. Current generated artifact on
-  that probe: 22 kernels, 34 buffer contracts, one linked object input, max VGPR
-  33, max SGPR 28, max kernarg 368 bytes, max static LDS 1024 bytes, max
-  private segment 260 bytes, two dynamic-LDS kernels, and no dynamic stack
-  users.
+  that probe after the first sprint slice: 24 kernels, 41 buffer contracts,
+  one linked object input, max VGPR 33, max SGPR 54, max kernarg 368 bytes,
+  max static LDS 32768 bytes, max private segment 260 bytes, two dynamic-LDS
+  kernels, and no dynamic stack users.
 - 2026-06-01 local workstation: `gfx1100`, AMD Radeon RX 7900 XT. HIP/runtime
   `7.2.53211-364a905`; AMD LLVM/clang `22.0.0git`. HIP reported managed memory,
   concurrent managed access, host mapped memory, host registration, and memory

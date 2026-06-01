@@ -3445,6 +3445,7 @@ fn write_bindings(
     for kernel in kernels.values() {
         out.push_str(&generate_kernel_binding(
             kernel,
+            device_structs,
             code_object_metadata.kernels.get(&kernel.name),
         )?);
         out.push('\n');
@@ -3534,6 +3535,7 @@ fn to_snake_case(name: &str) -> String {
 
 fn generate_kernel_binding(
     kernel: &KernelDecl,
+    device_structs: &BTreeMap<String, DeviceStruct>,
     _metadata: Option<&KernelObjectMetadata>,
 ) -> Result<String, String> {
     let mut params = vec!["config: rocm_oxide::LaunchConfig".to_string()];
@@ -3609,7 +3611,13 @@ fn generate_kernel_binding(
             ArgKind::Scalar => {
                 params.push(format!("{}: {}", arg.name, arg.ty));
                 operation_params.push(format!("{}: {}", arg.name, arg.ty));
-                launch_args.push(arg.name.clone());
+                if let Some(device_struct) = device_structs.get(&arg.ty) {
+                    for field in &device_struct.fields {
+                        launch_args.push(format!("{}.{}", arg.name, field.name));
+                    }
+                } else {
+                    launch_args.push(arg.name.clone());
+                }
             }
         }
     }
@@ -4227,7 +4235,8 @@ pub unsafe extern "C" fn vector_add(
         );
         assert_eq!(kernels[0].args[2].kind, ArgKind::Scalar);
 
-        let binding = generate_kernel_binding(&kernels[0], None).expect("binding should generate");
+        let binding = generate_kernel_binding(&kernels[0], &BTreeMap::new(), None)
+            .expect("binding should generate");
         assert!(binding.contains("out: &rocm_oxide::DeviceBuffer<f32>"));
         assert!(binding.contains("a: &rocm_oxide::DeviceBuffer<f32>"));
         assert!(binding.contains("n: usize"));
@@ -4280,7 +4289,8 @@ pub unsafe extern "C" fn vector_add(
             ArgKind::ConstSlice("f32".to_string())
         );
 
-        let binding = generate_kernel_binding(&kernels[0], None).expect("binding should generate");
+        let binding = generate_kernel_binding(&kernels[0], &BTreeMap::new(), None)
+            .expect("binding should generate");
         assert!(binding.contains("out: &rocm_oxide::DeviceBuffer<f32>"));
         assert!(binding.contains("a: &rocm_oxide::DeviceBuffer<f32>"));
         assert!(binding.contains("b: &rocm_oxide::DeviceBuffer<f32>"));
@@ -4449,7 +4459,8 @@ pub unsafe extern "C" fn temporal(
         )
         .expect("source should parse");
 
-        let binding = generate_kernel_binding(&kernels[0], None).expect("binding should generate");
+        let binding = generate_kernel_binding(&kernels[0], &BTreeMap::new(), None)
+            .expect("binding should generate");
         assert!(binding.contains("validate_buffer_len(\"frame\", frame.len(), pixel_count)?"));
         assert!(binding.contains("validate_buffer_len(\"color\", color.len(), pixel_count/4)?"));
         assert!(binding.contains("validate_buffer_len(\"aux\", aux.len(), pixel_count/4*3)?"));
@@ -4774,6 +4785,39 @@ pub struct AffineParams {
         assert!(binding.contains("pub struct AffineParams"));
         assert!(binding.contains("pub scale: f32"));
         assert!(binding.contains("pub bias: f32"));
+    }
+
+    #[test]
+    fn scalarizes_known_repr_c_struct_launch_args() {
+        let source = r#"
+#[repr(C)]
+#[derive(Clone, Copy)]
+pub struct ControlParams {
+    pub seed: u32,
+    pub scale: i32,
+}
+
+#[kernel]
+pub unsafe extern "C" fn probe(
+    out: gpu::DeviceSliceMut<u32>,
+    params: ControlParams,
+    n: usize,
+) {}
+"#;
+        let kernels = discover_kernels_in_source(source).expect("source should parse");
+        let device_structs = discover_device_structs_in_source(source)
+            .expect("repr C struct should parse")
+            .into_iter()
+            .map(|device_struct| (device_struct.name.clone(), device_struct))
+            .collect::<BTreeMap<_, _>>();
+
+        let binding = generate_kernel_binding(&kernels[0], &device_structs, None)
+            .expect("binding should generate");
+        assert!(binding.contains("params: ControlParams"));
+        assert!(binding.contains("let mut __arg2 = params.seed;"));
+        assert!(binding.contains("let mut __arg3 = params.scale;"));
+        assert!(binding.contains("let mut __arg4 = n;"));
+        assert!(!binding.contains("let mut __arg2 = params;"));
     }
 
     #[test]

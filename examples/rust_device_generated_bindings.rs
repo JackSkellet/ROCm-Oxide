@@ -98,6 +98,93 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         ]
     );
 
+    let api_out = DeviceBuffer::<u32>::new(24)?;
+    let api_i32_counter = DeviceBuffer::from_slice(&[0i32])?;
+    let api_u64_counter = DeviceBuffer::from_slice(&[0u64])?;
+    let api_i64_counter = DeviceBuffer::from_slice(&[0i64])?;
+    unsafe {
+        kernels.device_api_breadth_probe(
+            LaunchConfig::new(Dim3::x(1), Dim3::x(32)),
+            &api_out,
+            &api_i32_counter,
+            &api_u64_counter,
+            &api_i64_counter,
+        )?;
+    }
+    rocm_oxide::hip::synchronize()?;
+    let api = api_out.copy_to_vec()?;
+    let active_lanes = 32u32.min(wavefront_size);
+    let expected_sum = active_lanes * (active_lanes + 1) / 2;
+    let expected_or = (0..active_lanes).fold(0u32, |acc, lane| acc | (1u32 << (lane & 31)));
+    let expected_xor = (0..active_lanes).fold(0u32, |acc, lane| acc ^ (1u32 << (lane & 31)));
+    let expected_match_mask = (0..active_lanes).fold(0u64, |acc, lane| {
+        if (lane & 3) == 0 {
+            acc | (1u64 << lane)
+        } else {
+            acc
+        }
+    }) as u32;
+    assert_eq!(api[0], 6, "shuffle lane 5 should read lane 5's value");
+    assert_eq!(api[1], 2, "shuffle_down lane 0 should read lane 1");
+    assert_eq!(api[2], 1, "shuffle_up lane 1 should read lane 0");
+    assert_eq!(api[3], 2, "shuffle_xor lane 0 should read lane 1");
+    assert_eq!(api[4], expected_sum);
+    assert_eq!(api[5], -((active_lanes - 1) as i32) as u32);
+    assert_eq!(api[6], 0);
+    assert_eq!(api[7], expected_or);
+    assert_eq!(api[8], expected_xor);
+    assert_eq!(api[9], expected_match_mask);
+    assert_eq!(api[10], 1);
+    assert_eq!(api[11], 1);
+    assert_eq!(api[12], 1);
+    assert_eq!(api[13], 1);
+    assert_eq!(api[14], 10);
+    assert_eq!(api[15], -(active_lanes as i32) as u32);
+    assert_eq!(api[16], active_lanes);
+    assert_eq!(api[17], active_lanes * 2);
+    assert_eq!(api[18], 100);
+    assert_eq!(api[19], 1);
+    assert_eq!(api[20], 1);
+    assert_eq!(api[21], 1);
+    assert_eq!(api_i32_counter.copy_to_vec()?, vec![-(active_lanes as i32)]);
+    assert_eq!(api_u64_counter.copy_to_vec()?, vec![active_lanes as u64]);
+    assert_eq!(
+        api_i64_counter.copy_to_vec()?,
+        vec![-((active_lanes * 2) as i64)]
+    );
+
+    let control_input = vec![0u32, 1, 2, 3, 7, 12, 15, 31];
+    let control_values = DeviceBuffer::from_slice(&control_input)?;
+    let control_out = DeviceBuffer::<u32>::new(control_input.len())?;
+    let control_pairs = DeviceBuffer::<generated::ControlPair>::new(control_input.len())?;
+    let control_params = generated::ControlParams { seed: 11, scale: 6 };
+    unsafe {
+        kernels.compiler_parity_matrix(
+            LaunchConfig::for_num_elems_with_block_size(control_input.len(), 32),
+            &control_out,
+            &control_pairs,
+            &control_values,
+            control_params,
+            control_input.len(),
+        )?;
+    }
+    rocm_oxide::hip::synchronize()?;
+    let control_scores = control_out.copy_to_vec()?;
+    let control_pairs = control_pairs.copy_to_vec()?;
+    for (index, value) in control_input.iter().copied().enumerate() {
+        let expected_pair = control_pair_host(value, control_params);
+        let expected_score = control_score_host(value, control_params, expected_pair);
+        assert_eq!(
+            (control_pairs[index].left, control_pairs[index].right),
+            (expected_pair.left, expected_pair.right),
+            "compiler_parity_matrix pair mismatch at {index}"
+        );
+        assert_eq!(
+            control_scores[index], expected_score,
+            "compiler_parity_matrix score mismatch at {index}"
+        );
+    }
+
     let reduce_n = 1_000usize;
     let reduce_block_x = 128u32;
     let partial_count = reduce_n.div_ceil(reduce_block_x as usize);
@@ -315,4 +402,107 @@ fn assert_close(
     } else {
         Ok(())
     }
+}
+
+fn classify_control_host(value: u32) -> u32 {
+    match value & 3 {
+        0 => 2,
+        1 => 5,
+        2 => 9,
+        _ => 13,
+    }
+}
+
+fn control_option_host(value: u32) -> Option<u32> {
+    if (value & 1) == 0 {
+        Some(value / 2 + 3)
+    } else {
+        None
+    }
+}
+
+fn control_result_host(value: u32) -> Result<u32, u32> {
+    if value < 12 {
+        Ok(value.wrapping_mul(3).wrapping_add(1))
+    } else {
+        Err(value - 12)
+    }
+}
+
+fn control_pair_host(value: u32, params: generated::ControlParams) -> generated::ControlPair {
+    generated::ControlPair {
+        left: value.wrapping_add(params.seed),
+        right: classify_control_host(value).wrapping_add(params.scale.unsigned_abs()),
+    }
+}
+
+fn control_score_host(
+    value: u32,
+    params: generated::ControlParams,
+    pair: generated::ControlPair,
+) -> u32 {
+    let scale = params.scale.unsigned_abs();
+    let kind_score = match value & 3 {
+        0 => 17u32,
+        1 => 31u32,
+        2 => 47u32,
+        _ => 61u32,
+    };
+    let option_score = match control_option_host(value) {
+        Some(inner) => inner.wrapping_mul(5),
+        None => 23,
+    };
+    let result_score = match control_result_host(value) {
+        Ok(ok) => ok,
+        Err(err) => err.wrapping_add(101),
+    };
+    let fixed = [value, value.wrapping_add(1), params.seed, scale];
+    let runtime_index = (value as usize) & 3;
+    let mut mutable = [0u32; 4];
+    mutable[0] = fixed[runtime_index];
+    mutable[1] = fixed[0].wrapping_add(fixed[1]);
+    mutable[2] = pair.left;
+    mutable[3] = pair.right;
+
+    let array_score = fixed
+        .iter()
+        .fold(0u32, |acc, item| acc.wrapping_add(item & 15))
+        .wrapping_add((0..4).fold(0u32, |acc, index| {
+            if index == runtime_index {
+                acc
+            } else {
+                acc.wrapping_add(mutable[index])
+            }
+        }));
+
+    let mut loop_score = 0u32;
+    let mut countdown = value & 3;
+    while countdown > 0 {
+        loop_score = loop_score.wrapping_add(countdown);
+        countdown -= 1;
+    }
+    let mut step = 0u32;
+    loop {
+        if step >= 3 {
+            break;
+        }
+        step = step.wrapping_add(1);
+        if step == 2 {
+            continue;
+        }
+        loop_score = loop_score.wrapping_add(step);
+    }
+
+    let signed = params.scale.wrapping_add(value as i32);
+    let float_score = ((signed as f32) * 0.5 + 2.0) as u32;
+    let bitcast_score = ((float_score as f32).to_bits() >> 20) & 31;
+
+    kind_score
+        .wrapping_add(option_score)
+        .wrapping_add(result_score)
+        .wrapping_add(array_score)
+        .wrapping_add(loop_score)
+        .wrapping_add(float_score)
+        .wrapping_add(bitcast_score)
+        .wrapping_add((pair.left ^ pair.right) & 31)
 }

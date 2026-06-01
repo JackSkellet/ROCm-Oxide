@@ -150,7 +150,7 @@ pub mod math {
 
 pub mod atomic {
     use core::marker::PhantomData;
-    use core::sync::atomic::{AtomicU32, Ordering};
+    use core::sync::atomic::{AtomicI32, AtomicI64, AtomicU32, AtomicU64, Ordering};
 
     #[repr(u8)]
     #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -209,7 +209,7 @@ pub mod atomic {
     pub trait Scope {
         const SCOPE: AtomicScope;
 
-        unsafe fn mark_atomic_u32(ptr: *const u32);
+        unsafe fn mark_atomic_ptr<T>(ptr: *const T);
     }
 
     pub enum Workgroup {}
@@ -220,8 +220,8 @@ pub mod atomic {
         const SCOPE: AtomicScope = AtomicScope::Workgroup;
 
         #[inline(always)]
-        unsafe fn mark_atomic_u32(ptr: *const u32) {
-            unsafe { mark_atomic_scope_workgroup(ptr) };
+        unsafe fn mark_atomic_ptr<T>(ptr: *const T) {
+            unsafe { mark_atomic_scope_workgroup(ptr.cast::<u32>()) };
         }
     }
 
@@ -229,8 +229,8 @@ pub mod atomic {
         const SCOPE: AtomicScope = AtomicScope::Device;
 
         #[inline(always)]
-        unsafe fn mark_atomic_u32(ptr: *const u32) {
-            unsafe { mark_atomic_scope_device(ptr) };
+        unsafe fn mark_atomic_ptr<T>(ptr: *const T) {
+            unsafe { mark_atomic_scope_device(ptr.cast::<u32>()) };
         }
     }
 
@@ -238,8 +238,8 @@ pub mod atomic {
         const SCOPE: AtomicScope = AtomicScope::System;
 
         #[inline(always)]
-        unsafe fn mark_atomic_u32(ptr: *const u32) {
-            unsafe { mark_atomic_scope_system(ptr) };
+        unsafe fn mark_atomic_ptr<T>(ptr: *const T) {
+            unsafe { mark_atomic_scope_system(ptr.cast::<u32>()) };
         }
     }
 
@@ -267,19 +267,19 @@ pub mod atomic {
 
         #[inline(always)]
         pub fn load(&self, ordering: AtomicOrdering) -> u32 {
-            unsafe { S::mark_atomic_u32(self as *const Self as *const u32) };
+            unsafe { S::mark_atomic_ptr(self as *const Self as *const u32) };
             self.inner.load(ordering.as_core())
         }
 
         #[inline(always)]
         pub fn store(&self, value: u32, ordering: AtomicOrdering) {
-            unsafe { S::mark_atomic_u32(self as *const Self as *const u32) };
+            unsafe { S::mark_atomic_ptr(self as *const Self as *const u32) };
             self.inner.store(value, ordering.as_core());
         }
 
         #[inline(always)]
         pub fn fetch_add(&self, value: u32, ordering: AtomicOrdering) -> u32 {
-            unsafe { S::mark_atomic_u32(self as *const Self as *const u32) };
+            unsafe { S::mark_atomic_ptr(self as *const Self as *const u32) };
             self.inner.fetch_add(value, ordering.as_core())
         }
     }
@@ -287,6 +287,141 @@ pub mod atomic {
     pub type WorkgroupAtomicU32 = AtomicU32Ref<Workgroup>;
     pub type DeviceAtomicU32 = AtomicU32Ref<Device>;
     pub type SystemAtomicU32 = AtomicU32Ref<System>;
+
+    #[repr(transparent)]
+    pub struct AtomicI32Ref<S: Scope> {
+        inner: AtomicI32,
+        _scope: PhantomData<S>,
+    }
+
+    impl<S: Scope> AtomicI32Ref<S> {
+        #[inline(always)]
+        pub unsafe fn from_ptr<'a>(ptr: *mut i32) -> &'a Self {
+            unsafe { &*ptr.cast::<Self>() }
+        }
+
+        #[inline(always)]
+        pub unsafe fn from_const_ptr<'a>(ptr: *const i32) -> &'a Self {
+            unsafe { &*ptr.cast::<Self>() }
+        }
+
+        #[inline(always)]
+        pub const fn scope() -> AtomicScope {
+            S::SCOPE
+        }
+
+        #[inline(always)]
+        pub fn load(&self, ordering: AtomicOrdering) -> i32 {
+            unsafe { S::mark_atomic_ptr(self as *const Self as *const i32) };
+            self.inner.load(ordering.as_core())
+        }
+
+        #[inline(always)]
+        pub fn store(&self, value: i32, ordering: AtomicOrdering) {
+            unsafe { S::mark_atomic_ptr(self as *const Self as *const i32) };
+            self.inner.store(value, ordering.as_core());
+        }
+
+        #[inline(always)]
+        pub fn fetch_add(&self, value: i32, ordering: AtomicOrdering) -> i32 {
+            unsafe { S::mark_atomic_ptr(self as *const Self as *const i32) };
+            self.inner.fetch_add(value, ordering.as_core())
+        }
+    }
+
+    pub type WorkgroupAtomicI32 = AtomicI32Ref<Workgroup>;
+    pub type DeviceAtomicI32 = AtomicI32Ref<Device>;
+    pub type SystemAtomicI32 = AtomicI32Ref<System>;
+
+    #[repr(transparent)]
+    pub struct AtomicU64Ref<S: Scope> {
+        inner: AtomicU64,
+        _scope: PhantomData<S>,
+    }
+
+    impl<S: Scope> AtomicU64Ref<S> {
+        #[inline(always)]
+        pub unsafe fn from_ptr<'a>(ptr: *mut u64) -> &'a Self {
+            unsafe { &*ptr.cast::<Self>() }
+        }
+
+        #[inline(always)]
+        pub unsafe fn from_const_ptr<'a>(ptr: *const u64) -> &'a Self {
+            unsafe { &*ptr.cast::<Self>() }
+        }
+
+        #[inline(always)]
+        pub const fn scope() -> AtomicScope {
+            S::SCOPE
+        }
+
+        #[inline(always)]
+        pub fn load(&self, ordering: AtomicOrdering) -> u64 {
+            unsafe { S::mark_atomic_ptr(self as *const Self as *const u64) };
+            self.inner.load(ordering.as_core())
+        }
+
+        #[inline(always)]
+        pub fn store(&self, value: u64, ordering: AtomicOrdering) {
+            unsafe { S::mark_atomic_ptr(self as *const Self as *const u64) };
+            self.inner.store(value, ordering.as_core());
+        }
+
+        #[inline(always)]
+        pub fn fetch_add(&self, value: u64, ordering: AtomicOrdering) -> u64 {
+            unsafe { S::mark_atomic_ptr(self as *const Self as *const u64) };
+            self.inner.fetch_add(value, ordering.as_core())
+        }
+    }
+
+    pub type WorkgroupAtomicU64 = AtomicU64Ref<Workgroup>;
+    pub type DeviceAtomicU64 = AtomicU64Ref<Device>;
+    pub type SystemAtomicU64 = AtomicU64Ref<System>;
+
+    #[repr(transparent)]
+    pub struct AtomicI64Ref<S: Scope> {
+        inner: AtomicI64,
+        _scope: PhantomData<S>,
+    }
+
+    impl<S: Scope> AtomicI64Ref<S> {
+        #[inline(always)]
+        pub unsafe fn from_ptr<'a>(ptr: *mut i64) -> &'a Self {
+            unsafe { &*ptr.cast::<Self>() }
+        }
+
+        #[inline(always)]
+        pub unsafe fn from_const_ptr<'a>(ptr: *const i64) -> &'a Self {
+            unsafe { &*ptr.cast::<Self>() }
+        }
+
+        #[inline(always)]
+        pub const fn scope() -> AtomicScope {
+            S::SCOPE
+        }
+
+        #[inline(always)]
+        pub fn load(&self, ordering: AtomicOrdering) -> i64 {
+            unsafe { S::mark_atomic_ptr(self as *const Self as *const i64) };
+            self.inner.load(ordering.as_core())
+        }
+
+        #[inline(always)]
+        pub fn store(&self, value: i64, ordering: AtomicOrdering) {
+            unsafe { S::mark_atomic_ptr(self as *const Self as *const i64) };
+            self.inner.store(value, ordering.as_core());
+        }
+
+        #[inline(always)]
+        pub fn fetch_add(&self, value: i64, ordering: AtomicOrdering) -> i64 {
+            unsafe { S::mark_atomic_ptr(self as *const Self as *const i64) };
+            self.inner.fetch_add(value, ordering.as_core())
+        }
+    }
+
+    pub type WorkgroupAtomicI64 = AtomicI64Ref<Workgroup>;
+    pub type DeviceAtomicI64 = AtomicI64Ref<Device>;
+    pub type SystemAtomicI64 = AtomicI64Ref<System>;
 
     #[inline(always)]
     pub unsafe fn atomic_add_u32_scoped(
@@ -339,18 +474,179 @@ pub mod atomic {
                 .load(ordering),
         }
     }
+
+    #[inline(always)]
+    pub unsafe fn atomic_add_i32_scoped(
+        ptr: *mut i32,
+        value: i32,
+        scope: AtomicScope,
+        ordering: AtomicOrdering,
+    ) -> i32 {
+        match scope {
+            AtomicScope::Workgroup => {
+                unsafe { WorkgroupAtomicI32::from_ptr(ptr) }.fetch_add(value, ordering)
+            }
+            AtomicScope::Device => unsafe { DeviceAtomicI32::from_ptr(ptr) }
+                .fetch_add(value, ordering),
+            AtomicScope::System => unsafe { SystemAtomicI32::from_ptr(ptr) }
+                .fetch_add(value, ordering),
+        }
+    }
+
+    #[inline(always)]
+    pub unsafe fn atomic_store_i32_scoped(
+        ptr: *mut i32,
+        value: i32,
+        scope: AtomicScope,
+        ordering: AtomicOrdering,
+    ) {
+        match scope {
+            AtomicScope::Workgroup => {
+                unsafe { WorkgroupAtomicI32::from_ptr(ptr) }.store(value, ordering)
+            }
+            AtomicScope::Device => unsafe { DeviceAtomicI32::from_ptr(ptr) }
+                .store(value, ordering),
+            AtomicScope::System => unsafe { SystemAtomicI32::from_ptr(ptr) }
+                .store(value, ordering),
+        }
+    }
+
+    #[inline(always)]
+    pub unsafe fn atomic_load_i32_scoped(
+        ptr: *const i32,
+        scope: AtomicScope,
+        ordering: AtomicOrdering,
+    ) -> i32 {
+        match scope {
+            AtomicScope::Workgroup => unsafe { WorkgroupAtomicI32::from_const_ptr(ptr) }
+                .load(ordering),
+            AtomicScope::Device => unsafe { DeviceAtomicI32::from_const_ptr(ptr) }
+                .load(ordering),
+            AtomicScope::System => unsafe { SystemAtomicI32::from_const_ptr(ptr) }
+                .load(ordering),
+        }
+    }
+
+    #[inline(always)]
+    pub unsafe fn atomic_add_u64_scoped(
+        ptr: *mut u64,
+        value: u64,
+        scope: AtomicScope,
+        ordering: AtomicOrdering,
+    ) -> u64 {
+        match scope {
+            AtomicScope::Workgroup => {
+                unsafe { WorkgroupAtomicU64::from_ptr(ptr) }.fetch_add(value, ordering)
+            }
+            AtomicScope::Device => unsafe { DeviceAtomicU64::from_ptr(ptr) }
+                .fetch_add(value, ordering),
+            AtomicScope::System => unsafe { SystemAtomicU64::from_ptr(ptr) }
+                .fetch_add(value, ordering),
+        }
+    }
+
+    #[inline(always)]
+    pub unsafe fn atomic_store_u64_scoped(
+        ptr: *mut u64,
+        value: u64,
+        scope: AtomicScope,
+        ordering: AtomicOrdering,
+    ) {
+        match scope {
+            AtomicScope::Workgroup => {
+                unsafe { WorkgroupAtomicU64::from_ptr(ptr) }.store(value, ordering)
+            }
+            AtomicScope::Device => unsafe { DeviceAtomicU64::from_ptr(ptr) }
+                .store(value, ordering),
+            AtomicScope::System => unsafe { SystemAtomicU64::from_ptr(ptr) }
+                .store(value, ordering),
+        }
+    }
+
+    #[inline(always)]
+    pub unsafe fn atomic_load_u64_scoped(
+        ptr: *const u64,
+        scope: AtomicScope,
+        ordering: AtomicOrdering,
+    ) -> u64 {
+        match scope {
+            AtomicScope::Workgroup => unsafe { WorkgroupAtomicU64::from_const_ptr(ptr) }
+                .load(ordering),
+            AtomicScope::Device => unsafe { DeviceAtomicU64::from_const_ptr(ptr) }
+                .load(ordering),
+            AtomicScope::System => unsafe { SystemAtomicU64::from_const_ptr(ptr) }
+                .load(ordering),
+        }
+    }
+
+    #[inline(always)]
+    pub unsafe fn atomic_add_i64_scoped(
+        ptr: *mut i64,
+        value: i64,
+        scope: AtomicScope,
+        ordering: AtomicOrdering,
+    ) -> i64 {
+        match scope {
+            AtomicScope::Workgroup => {
+                unsafe { WorkgroupAtomicI64::from_ptr(ptr) }.fetch_add(value, ordering)
+            }
+            AtomicScope::Device => unsafe { DeviceAtomicI64::from_ptr(ptr) }
+                .fetch_add(value, ordering),
+            AtomicScope::System => unsafe { SystemAtomicI64::from_ptr(ptr) }
+                .fetch_add(value, ordering),
+        }
+    }
+
+    #[inline(always)]
+    pub unsafe fn atomic_store_i64_scoped(
+        ptr: *mut i64,
+        value: i64,
+        scope: AtomicScope,
+        ordering: AtomicOrdering,
+    ) {
+        match scope {
+            AtomicScope::Workgroup => {
+                unsafe { WorkgroupAtomicI64::from_ptr(ptr) }.store(value, ordering)
+            }
+            AtomicScope::Device => unsafe { DeviceAtomicI64::from_ptr(ptr) }
+                .store(value, ordering),
+            AtomicScope::System => unsafe { SystemAtomicI64::from_ptr(ptr) }
+                .store(value, ordering),
+        }
+    }
+
+    #[inline(always)]
+    pub unsafe fn atomic_load_i64_scoped(
+        ptr: *const i64,
+        scope: AtomicScope,
+        ordering: AtomicOrdering,
+    ) -> i64 {
+        match scope {
+            AtomicScope::Workgroup => unsafe { WorkgroupAtomicI64::from_const_ptr(ptr) }
+                .load(ordering),
+            AtomicScope::Device => unsafe { DeviceAtomicI64::from_const_ptr(ptr) }
+                .load(ordering),
+            AtomicScope::System => unsafe { SystemAtomicI64::from_const_ptr(ptr) }
+                .load(ordering),
+        }
+    }
 }
 
 pub use atomic::{
-    AtomicOrdering, AtomicScope, DeviceAtomicU32, SystemAtomicU32, WorkgroupAtomicU32,
+    AtomicOrdering, AtomicScope, DeviceAtomicI32, DeviceAtomicI64, DeviceAtomicU32,
+    DeviceAtomicU64, SystemAtomicI32, SystemAtomicI64, SystemAtomicU32, SystemAtomicU64,
+    WorkgroupAtomicI32, WorkgroupAtomicI64, WorkgroupAtomicU32, WorkgroupAtomicU64,
 };
 
 pub mod cooperative {
     use super::{
         ballot, block_dim_x, block_dim_y, block_dim_z, block_idx_x, block_idx_y, block_idx_z,
-        lane_id, read_first_lane_u32, thread_idx_x, thread_idx_y, thread_idx_z, wave_barrier,
-        wave_id_in_workgroup, wave_reduce_add_u32, wave_reduce_max_u32, wave_reduce_min_u32,
-        wavefront_size, workgroup_barrier,
+        inverse_ballot, lane_id, read_first_lane_u32, thread_idx_x, thread_idx_y, thread_idx_z,
+        wave_barrier, wave_id_in_workgroup, wave_match_any_u32, wave_reduce_add_i32,
+        wave_reduce_add_u32, wave_reduce_and_u32, wave_reduce_max_i32, wave_reduce_max_u32,
+        wave_reduce_min_i32, wave_reduce_min_u32, wave_reduce_or_u32, wave_reduce_xor_u32,
+        wave_shuffle_down_u32, wave_shuffle_f32, wave_shuffle_i32, wave_shuffle_u32,
+        wave_shuffle_up_u32, wave_shuffle_xor_u32, wavefront_size, workgroup_barrier,
     };
 
     #[derive(Clone, Copy)]
@@ -468,8 +764,48 @@ pub mod cooperative {
         }
 
         #[inline(always)]
+        pub fn none(self, predicate: bool) -> bool {
+            self.ballot(predicate) == 0
+        }
+
+        #[inline(always)]
+        pub fn elected(self) -> bool {
+            inverse_ballot(self.active_mask())
+        }
+
+        #[inline(always)]
         pub fn read_first_u32(self, value: u32) -> u32 {
             read_first_lane_u32(value)
+        }
+
+        #[inline(always)]
+        pub fn shuffle_u32(self, value: u32, lane: u32) -> u32 {
+            wave_shuffle_u32(value, lane)
+        }
+
+        #[inline(always)]
+        pub fn shuffle_i32(self, value: i32, lane: u32) -> i32 {
+            wave_shuffle_i32(value, lane)
+        }
+
+        #[inline(always)]
+        pub fn shuffle_f32(self, value: f32, lane: u32) -> f32 {
+            wave_shuffle_f32(value, lane)
+        }
+
+        #[inline(always)]
+        pub fn shuffle_up_u32(self, value: u32, delta: u32) -> u32 {
+            wave_shuffle_up_u32(value, delta)
+        }
+
+        #[inline(always)]
+        pub fn shuffle_down_u32(self, value: u32, delta: u32) -> u32 {
+            wave_shuffle_down_u32(value, delta)
+        }
+
+        #[inline(always)]
+        pub fn shuffle_xor_u32(self, value: u32, mask: u32) -> u32 {
+            wave_shuffle_xor_u32(value, mask)
         }
 
         #[inline(always)]
@@ -478,13 +814,48 @@ pub mod cooperative {
         }
 
         #[inline(always)]
+        pub fn reduce_add_i32(self, value: i32) -> i32 {
+            wave_reduce_add_i32(value)
+        }
+
+        #[inline(always)]
         pub fn reduce_min_u32(self, value: u32) -> u32 {
             wave_reduce_min_u32(value)
         }
 
         #[inline(always)]
+        pub fn reduce_min_i32(self, value: i32) -> i32 {
+            wave_reduce_min_i32(value)
+        }
+
+        #[inline(always)]
         pub fn reduce_max_u32(self, value: u32) -> u32 {
             wave_reduce_max_u32(value)
+        }
+
+        #[inline(always)]
+        pub fn reduce_max_i32(self, value: i32) -> i32 {
+            wave_reduce_max_i32(value)
+        }
+
+        #[inline(always)]
+        pub fn reduce_and_u32(self, value: u32) -> u32 {
+            wave_reduce_and_u32(value)
+        }
+
+        #[inline(always)]
+        pub fn reduce_or_u32(self, value: u32) -> u32 {
+            wave_reduce_or_u32(value)
+        }
+
+        #[inline(always)]
+        pub fn reduce_xor_u32(self, value: u32) -> u32 {
+            wave_reduce_xor_u32(value)
+        }
+
+        #[inline(always)]
+        pub fn match_any_u32(self, value: u32) -> u64 {
+            wave_match_any_u32(value)
         }
     }
 
@@ -658,8 +1029,61 @@ pub fn ballot(predicate: bool) -> u64 {
 }
 
 #[inline(always)]
+pub fn inverse_ballot(mask: u64) -> bool {
+    amdgpu::inverse_ballot(mask)
+}
+
+#[inline(always)]
 pub fn read_first_lane_u32(value: u32) -> u32 {
     amdgpu::readfirstlane_u32(value)
+}
+
+#[inline(always)]
+pub fn read_first_lane_u64(value: u64) -> u64 {
+    amdgpu::readfirstlane_u64(value)
+}
+
+#[inline(always)]
+pub fn wave_shuffle_u32(value: u32, lane: u32) -> u32 {
+    unsafe { amdgpu::ds_bpermute(lane.wrapping_mul(4), value) }
+}
+
+#[inline(always)]
+pub fn wave_shuffle_i32(value: i32, lane: u32) -> i32 {
+    wave_shuffle_u32(value as u32, lane) as i32
+}
+
+#[inline(always)]
+pub fn wave_shuffle_f32(value: f32, lane: u32) -> f32 {
+    f32::from_bits(wave_shuffle_u32(value.to_bits(), lane))
+}
+
+#[inline(always)]
+pub fn wave_shuffle_up_u32(value: u32, delta: u32) -> u32 {
+    let lane = lane_id();
+    let target = if lane >= delta {
+        lane - delta
+    } else {
+        lane
+    };
+    wave_shuffle_u32(value, target)
+}
+
+#[inline(always)]
+pub fn wave_shuffle_down_u32(value: u32, delta: u32) -> u32 {
+    let lane = lane_id();
+    let next = lane.wrapping_add(delta);
+    let target = if next < wavefront_size() {
+        next
+    } else {
+        lane
+    };
+    wave_shuffle_u32(value, target)
+}
+
+#[inline(always)]
+pub fn wave_shuffle_xor_u32(value: u32, mask: u32) -> u32 {
+    wave_shuffle_u32(value, lane_id() ^ mask)
 }
 
 #[inline(always)]
@@ -668,13 +1092,57 @@ pub fn wave_reduce_add_u32(value: u32) -> u32 {
 }
 
 #[inline(always)]
+pub fn wave_reduce_add_i32(value: i32) -> i32 {
+    amdgpu::wave_reduce_add::<0>(value as u32) as i32
+}
+
+#[inline(always)]
 pub fn wave_reduce_min_u32(value: u32) -> u32 {
     amdgpu::wave_reduce_umin::<0>(value)
 }
 
 #[inline(always)]
+pub fn wave_reduce_min_i32(value: i32) -> i32 {
+    amdgpu::wave_reduce_min::<0>(value)
+}
+
+#[inline(always)]
 pub fn wave_reduce_max_u32(value: u32) -> u32 {
     amdgpu::wave_reduce_umax::<0>(value)
+}
+
+#[inline(always)]
+pub fn wave_reduce_max_i32(value: i32) -> i32 {
+    amdgpu::wave_reduce_max::<0>(value)
+}
+
+#[inline(always)]
+pub fn wave_reduce_and_u32(value: u32) -> u32 {
+    amdgpu::wave_reduce_and::<0>(value)
+}
+
+#[inline(always)]
+pub fn wave_reduce_or_u32(value: u32) -> u32 {
+    amdgpu::wave_reduce_or::<0>(value)
+}
+
+#[inline(always)]
+pub fn wave_reduce_xor_u32(value: u32) -> u32 {
+    amdgpu::wave_reduce_xor::<0>(value)
+}
+
+#[inline(always)]
+pub fn wave_match_any_u32(value: u32) -> u64 {
+    let mut mask = 0u64;
+    let mut lane = 0u32;
+    let size = wavefront_size();
+    while lane < size {
+        if wave_shuffle_u32(value, lane) == value {
+            mask |= 1u64 << lane;
+        }
+        lane = lane.wrapping_add(1);
+    }
+    mask
 }
 
 #[inline(always)]
@@ -697,6 +1165,30 @@ pub unsafe fn atomic_store_u32(ptr: *mut u32, value: u32, ordering: Ordering) {
 #[inline(always)]
 pub unsafe fn atomic_load_u32(ptr: *const u32, ordering: Ordering) -> u32 {
     unsafe { DeviceAtomicU32::from_const_ptr(ptr) }.load(ordering.into())
+}
+
+#[derive(Clone, Copy)]
+pub struct ThreadIndex {
+    index: usize,
+}
+
+impl ThreadIndex {
+    #[inline(always)]
+    pub fn global_x() -> Self {
+        Self {
+            index: global_id_x(),
+        }
+    }
+
+    #[inline(always)]
+    pub const fn get(self) -> usize {
+        self.index
+    }
+}
+
+#[inline(always)]
+pub fn thread_index_x_witness() -> ThreadIndex {
+    ThreadIndex::global_x()
 }
 
 #[repr(C)]
@@ -819,6 +1311,67 @@ impl<T> DeviceSliceMut<T> {
             ptr::write(self.get_unchecked(index), value);
         }
     }
+
+    #[inline(always)]
+    pub fn write_for_thread(self, index: ThreadIndex, value: T) -> bool {
+        let index = index.get();
+        if index < self.len {
+            unsafe { self.write_unchecked(index, value) };
+            true
+        } else {
+            false
+        }
+    }
+}
+
+#[derive(Clone, Copy)]
+pub struct DisjointSliceMut<T> {
+    slice: DeviceSliceMut<T>,
+}
+
+impl<T> DisjointSliceMut<T> {
+    #[inline(always)]
+    pub const unsafe fn new_unchecked(slice: DeviceSliceMut<T>) -> Self {
+        Self { slice }
+    }
+
+    #[inline(always)]
+    pub const fn len(self) -> usize {
+        self.slice.len()
+    }
+
+    #[inline(always)]
+    pub fn write_for_thread(self, index: ThreadIndex, value: T) -> bool {
+        self.slice.write_for_thread(index, value)
+    }
+
+    #[inline(always)]
+    pub unsafe fn write_unchecked(self, index: usize, value: T) {
+        unsafe { self.slice.write_unchecked(index, value) };
+    }
+
+    #[inline(always)]
+    pub const fn into_slice(self) -> DeviceSliceMut<T> {
+        self.slice
+    }
+}
+
+#[derive(Clone, Copy)]
+pub struct WorkgroupBarrierToken {
+    _private: (),
+}
+
+impl WorkgroupBarrierToken {
+    #[inline(always)]
+    pub fn arrive_and_wait(self) -> Self {
+        workgroup_barrier();
+        self
+    }
+}
+
+#[inline(always)]
+pub fn workgroup_barrier_token() -> WorkgroupBarrierToken {
+    WorkgroupBarrierToken { _private: () }
 }
 
 pub struct DynamicSharedMem<T> {

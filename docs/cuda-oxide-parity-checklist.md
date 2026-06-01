@@ -65,6 +65,14 @@ Primary upstream reference:
 - [x] Compiler IR pointer propagation beyond `getelementptr`.
 - [x] Cross-crate kernel discovery and bundling for local path dependencies.
 - [x] Captured-environment ABI path through mirrored `repr(C)` structs.
+- [x] Generated bindings scalarize known `repr(C)` by-value struct arguments to
+      match AMDGPU kernel ABI lowering.
+- [x] GPU-smoked compiler parity kernel for enums, custom discriminants,
+      `Option`, `Result`, match lowering, arrays, loops, and scalar casts.
+- [x] Device-side `DisjointSliceMut`, thread-index witness, and workgroup
+      barrier token helpers for safer per-thread writes and block sync.
+- [x] Scoped `i32`, `u64`, and `i64` atomics plus wavefront shuffle, match,
+      vote, and additional reduction helpers.
 - [x] Generated-kernel performance probe for vector, ABI, 3D stress, and
       raytrace kernels.
 - [x] Per-kernel resource inspection for VGPR, SGPR, LDS, private segment,
@@ -81,9 +89,10 @@ Primary upstream reference:
   - [ ] default `repr(Rust)` struct layout matching from rustc layout facts
   - [ ] dynamic field offset and padding metadata for generated bindings
 - [ ] Compiler type-system parity:
-  - [ ] enum, `Option`, `Result`, and custom discriminant support
-  - [ ] struct literals, field access, pass-by-value, and return-by-value tests
-  - [ ] array construction, constant indexing, runtime indexing, and mutable
+  - [x] enum, `Option`, `Result`, and custom discriminant GPU smoke coverage
+  - [x] struct literals, field access, and pass-by-value `repr(C)` binding tests
+  - [ ] return-by-value tests
+  - [x] array construction, constant indexing, runtime indexing, and mutable
         array lowering
   - [ ] SIMD/vector register helper type once a real AMDGPU use case is chosen
   - [x] slice scalarization at kernel boundaries for `DeviceSlice<T>` and
@@ -94,8 +103,9 @@ Primary upstream reference:
   - [ ] host-to-device closure arguments
   - [ ] device-internal closures passed to device functions
 - [ ] Control-flow, arithmetic, and casting parity:
-  - [ ] integer and enum `match` lowering
-  - [ ] loops, nested loops, `break`, `continue`, and iterator-like slice loops
+  - [x] integer and enum `match` lowering smoke coverage
+  - [x] `while`, `loop`, `break`, and `continue` smoke coverage
+  - [ ] nested loops, range loops, and iterator-like slice loops
   - [ ] 64-bit integer arithmetic audit across generated kernels
   - [ ] integer, float, pointer, and bitcast conversion test matrix
 - [ ] Interop and compilation pipeline parity:
@@ -107,10 +117,10 @@ Primary upstream reference:
         HIP modules, and ROCm libraries
   - [ ] debug-info and debugger workflow equivalent for ROCgdb or ROCm-native
         tooling
-- [ ] Runtime safety parity:
-  - [ ] `DisjointSlice`-style output wrapper
-  - [ ] thread-index witness type for safe per-thread writes
-  - [ ] managed barrier typestate API for block/LDS synchronization
+- [x] Runtime safety parity:
+  - [x] `DisjointSlice`-style output wrapper
+  - [x] thread-index witness type for safe per-thread writes
+  - [x] managed barrier typestate API for block/LDS synchronization
 - [x] Cargo subcommand equivalent to `cargo oxide`:
   - [x] `cargo rocm-oxide build`
   - [x] `cargo rocm-oxide run`
@@ -161,11 +171,13 @@ Primary upstream reference:
   - [x] basic `u32` atomics
   - [x] explicit memory-scope atomics
   - [x] math intrinsic lowering
-  - [ ] broader typed atomics for signed integer, 64-bit integer, and supported
-        float operations by memory scope
-  - [ ] wavefront shuffle up/down/xor and typed `i32`/`f32` variants
-  - [ ] match helpers and broader vote operations
-  - [ ] wavefront and block reductions/scans over sum/min/max and bitwise ops
+  - [x] broader typed atomics for signed integer and 64-bit integer operations by
+        memory scope
+  - [ ] supported float atomics by memory scope
+  - [x] wavefront shuffle up/down/xor and typed `i32`/`f32` variants
+  - [x] match helpers and broader vote operations
+  - [x] wavefront reductions over sum/min/max and bitwise ops
+  - [ ] block reductions/scans and broader scalar-type coverage
   - [ ] debug helpers for printf/assert, clock, trap, breakpoint, and profiler
         triggers where ROCm exposes a stable path
 - [ ] Compiler completeness:

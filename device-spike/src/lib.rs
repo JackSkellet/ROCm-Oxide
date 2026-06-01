@@ -18,6 +18,29 @@ pub struct AffineParams {
     pub bias: f32,
 }
 
+#[repr(C)]
+#[derive(Clone, Copy)]
+pub struct ControlParams {
+    pub seed: u32,
+    pub scale: i32,
+}
+
+#[repr(C)]
+#[derive(Clone, Copy)]
+pub struct ControlPair {
+    pub left: u32,
+    pub right: u32,
+}
+
+#[repr(u32)]
+#[derive(Clone, Copy)]
+enum ControlKind {
+    Zero = 2,
+    One = 5,
+    Many = 9,
+    Custom = 13,
+}
+
 #[kernel]
 pub unsafe extern "C" fn add_one(
     out: gpu::DeviceSliceMut<f32>,
@@ -273,6 +296,140 @@ pub unsafe extern "C" fn cooperative_groups_probe(out: gpu::DeviceSliceMut<u32>)
             out.write_unchecked(11, wave.meta_group_rank());
         }
     }
+}
+
+// rocm-oxide: len(out)=n
+// rocm-oxide: len(pairs)=n
+// rocm-oxide: len(input)=n
+#[kernel]
+pub unsafe extern "C" fn compiler_parity_matrix(
+    out: gpu::DeviceSliceMut<u32>,
+    pairs: gpu::DeviceSliceMut<ControlPair>,
+    input: gpu::DeviceSlice<u32>,
+    params: ControlParams,
+    n: usize,
+) {
+    let thread = gpu::thread_index_x_witness();
+    let i = thread.get();
+    if i >= n {
+        return;
+    }
+
+    let value = unsafe { input.read_unchecked(i) };
+    let pair = control_pair(value, params);
+    let result = control_score(value, params, pair);
+    let disjoint_out = unsafe { gpu::DisjointSliceMut::new_unchecked(out) };
+    let disjoint_pairs = unsafe { gpu::DisjointSliceMut::new_unchecked(pairs) };
+    disjoint_out.write_for_thread(thread, result);
+    disjoint_pairs.write_for_thread(thread, pair);
+}
+
+// rocm-oxide: len(out)=24
+// rocm-oxide: len(i32_counter)=1
+// rocm-oxide: len(u64_counter)=1
+// rocm-oxide: len(i64_counter)=1
+#[kernel]
+pub unsafe extern "C" fn device_api_breadth_probe(
+    out: gpu::DeviceSliceMut<u32>,
+    i32_counter: gpu::DeviceSliceMut<i32>,
+    u64_counter: gpu::DeviceSliceMut<u64>,
+    i64_counter: gpu::DeviceSliceMut<i64>,
+) {
+    let wave = gpu::this_wavefront();
+    let lane = wave.thread_rank();
+    let value = lane + 1;
+    let one_hot = 1u32 << (lane & 31);
+    let shuffle_lane5 = wave.shuffle_u32(value, 5);
+    let shuffle_down = wave.shuffle_down_u32(value, 1);
+    let shuffle_up = wave.shuffle_up_u32(value, 1);
+    let shuffle_xor = wave.shuffle_xor_u32(value, 1);
+    let first = wave.read_first_u32(value + 9);
+    let first64 = gpu::read_first_lane_u64(100 + lane as u64);
+    let sum = wave.reduce_add_u32(value);
+    let min_i32 = wave.reduce_min_i32(-(lane as i32));
+    let max_i32 = wave.reduce_max_i32(-(lane as i32));
+    let or_bits = wave.reduce_or_u32(one_hot);
+    let xor_bits = wave.reduce_xor_u32(one_hot);
+    let match_mask = wave.match_any_u32(lane & 3);
+    let any_lane_zero = wave.any(lane == 0);
+    let all_lanes_in_wave = wave.all(lane < wave.size());
+    let no_lane_out_of_wave = wave.none(lane >= wave.size());
+    let elected = wave.elected();
+
+    if lane < 32 {
+        unsafe {
+            gpu::atomic::atomic_add_i32_scoped(
+                i32_counter.as_mut_ptr(),
+                -1,
+                gpu::AtomicScope::Device,
+                gpu::AtomicOrdering::Relaxed,
+            );
+            gpu::atomic::atomic_add_u64_scoped(
+                u64_counter.as_mut_ptr(),
+                1,
+                gpu::AtomicScope::Device,
+                gpu::AtomicOrdering::Relaxed,
+            );
+            gpu::atomic::atomic_add_i64_scoped(
+                i64_counter.as_mut_ptr(),
+                -2,
+                gpu::AtomicScope::Device,
+                gpu::AtomicOrdering::Relaxed,
+            );
+        }
+    }
+
+    let barrier = gpu::workgroup_barrier_token().arrive_and_wait();
+
+    if lane == 0 {
+        unsafe {
+            out.write_unchecked(0, shuffle_lane5);
+            out.write_unchecked(1, shuffle_down);
+            out.write_unchecked(3, shuffle_xor);
+            out.write_unchecked(4, sum);
+            out.write_unchecked(5, min_i32 as u32);
+            out.write_unchecked(6, max_i32 as u32);
+            out.write_unchecked(7, or_bits);
+            out.write_unchecked(8, xor_bits);
+            out.write_unchecked(9, match_mask as u32);
+            out.write_unchecked(10, any_lane_zero as u32);
+            out.write_unchecked(11, all_lanes_in_wave as u32);
+            out.write_unchecked(12, no_lane_out_of_wave as u32);
+            out.write_unchecked(13, elected as u32);
+            out.write_unchecked(14, first);
+            out.write_unchecked(
+                15,
+                gpu::atomic::atomic_load_i32_scoped(
+                    i32_counter.as_ptr(),
+                    gpu::AtomicScope::Device,
+                    gpu::AtomicOrdering::Relaxed,
+                ) as u32,
+            );
+            out.write_unchecked(
+                16,
+                gpu::atomic::atomic_load_u64_scoped(
+                    u64_counter.as_ptr(),
+                    gpu::AtomicScope::Device,
+                    gpu::AtomicOrdering::Relaxed,
+                ) as u32,
+            );
+            let i64_total = gpu::atomic::atomic_load_i64_scoped(
+                i64_counter.as_ptr(),
+                gpu::AtomicScope::Device,
+                gpu::AtomicOrdering::Relaxed,
+            );
+            out.write_unchecked(17, (-i64_total) as u32);
+            out.write_unchecked(18, first64 as u32);
+            out.write_unchecked(19, gpu::DeviceAtomicI32::scope() as u32);
+            out.write_unchecked(20, gpu::DeviceAtomicU64::scope() as u32);
+            out.write_unchecked(21, gpu::DeviceAtomicI64::scope() as u32);
+        }
+    }
+    if lane == 1 {
+        unsafe { out.write_unchecked(2, shuffle_up) };
+    }
+
+    let _ = barrier.arrive_and_wait();
 }
 
 #[kernel]
@@ -1718,6 +1875,107 @@ fn box_hit(
     } else {
         (t_near, 0.0, 0.0, 1.0)
     }
+}
+
+fn classify_control(value: u32) -> ControlKind {
+    match value & 3 {
+        0 => ControlKind::Zero,
+        1 => ControlKind::One,
+        2 => ControlKind::Many,
+        _ => ControlKind::Custom,
+    }
+}
+
+fn control_option(value: u32) -> Option<u32> {
+    if (value & 1) == 0 {
+        Some(value / 2 + 3)
+    } else {
+        None
+    }
+}
+
+fn control_result(value: u32) -> Result<u32, u32> {
+    if value < 12 {
+        Ok(value.wrapping_mul(3).wrapping_add(1))
+    } else {
+        Err(value - 12)
+    }
+}
+
+fn control_pair(value: u32, params: ControlParams) -> ControlPair {
+    let scale = abs_i32(params.scale) as u32;
+    let kind = classify_control(value) as u32;
+    ControlPair {
+        left: value.wrapping_add(params.seed),
+        right: kind.wrapping_add(scale),
+    }
+}
+
+fn control_score(value: u32, params: ControlParams, pair: ControlPair) -> u32 {
+    let scale = abs_i32(params.scale) as u32;
+    let kind_score = match classify_control(value) {
+        ControlKind::Zero => 17u32,
+        ControlKind::One => 31u32,
+        ControlKind::Many => 47u32,
+        ControlKind::Custom => 61u32,
+    };
+    let option_score = match control_option(value) {
+        Some(inner) => inner.wrapping_mul(5),
+        None => 23,
+    };
+    let result_score = match control_result(value) {
+        Ok(ok) => ok,
+        Err(err) => err.wrapping_add(101),
+    };
+    let fixed = [value, value.wrapping_add(1), params.seed, scale];
+    let runtime_index = (value as usize) & 3;
+    let mut mutable = [0u32; 4];
+    mutable[0] = fixed[runtime_index];
+    mutable[1] = fixed[0].wrapping_add(fixed[1]);
+    mutable[2] = pair.left;
+    mutable[3] = pair.right;
+
+    let mut array_score = 0u32;
+    for item in fixed {
+        array_score = array_score.wrapping_add(item & 15);
+    }
+    for j in 0..4 {
+        if j == runtime_index {
+            continue;
+        }
+        array_score = array_score.wrapping_add(mutable[j]);
+    }
+
+    let mut loop_score = 0u32;
+    let mut countdown = value & 3;
+    while countdown > 0 {
+        loop_score = loop_score.wrapping_add(countdown);
+        countdown -= 1;
+    }
+    let mut step = 0u32;
+    loop {
+        if step >= 3 {
+            break;
+        }
+        step = step.wrapping_add(1);
+        if step == 2 {
+            continue;
+        }
+        loop_score = loop_score.wrapping_add(step);
+    }
+
+    let signed = params.scale.wrapping_add(value as i32);
+    let float_score = ((signed as f32) * 0.5 + 2.0) as u32;
+    let bitcast_score = ((float_score as f32).to_bits() >> 20) & 31;
+
+    kind_score
+        .wrapping_add(option_score)
+        .wrapping_add(result_score)
+        .wrapping_add(array_score)
+        .wrapping_add(loop_score)
+        .wrapping_add(float_score)
+        .wrapping_add(bitcast_score)
+        .wrapping_add((pair.left ^ pair.right) & 31)
 }
 
 fn abs_i32(value: i32) -> i32 {
