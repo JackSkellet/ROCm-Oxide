@@ -7,6 +7,61 @@ features on top of stronger contracts.
 
 ## Active Sequence
 
+- [ ] ASAP cuda-oxide feature parity sequence from
+      [NVIDIA's supported features matrix](https://nvlabs.github.io/cuda-oxide/appendix/supported-features.html):
+  - [ ] Compiler type/control-flow parity:
+    - [ ] add kernels and compiler tests for enums, `Option`, `Result`, and
+          custom discriminants
+    - [ ] add kernels and compiler tests for integer and enum `match`
+          lowering, including nested branches and early exits
+    - [ ] add array construction, constant-index, runtime-index, and mutable
+          array promotion tests
+    - [ ] add integer, float, pointer, and bitcast conversion coverage with
+          metadata diagnostics for unsupported casts
+    - [ ] add loop coverage for ranges, nested loops, `break`, `continue`, and
+          iterator-like slice traversal where the Rust-to-AMDGPU path can prove
+          the ABI
+  - [ ] ABI/layout parity:
+    - [ ] query rustc layout facts for host/device structs and record field
+          offsets, padding, and ABI width in metadata
+    - [ ] support default `repr(Rust)` structs where the generated metadata can
+          prove layout compatibility
+    - [ ] keep `repr(C)` as the compatibility fallback for unproven layouts
+    - [ ] extend generated bindings to reject unsupported layout and by-value
+          argument cases before launch
+  - [ ] Closure parity:
+    - [ ] support move closures captured by value for generic device kernels
+    - [ ] support reference captures only when the chosen ROCm memory kind can
+          safely back the host-visible access pattern
+    - [ ] add host-to-device closure argument examples and tests
+    - [ ] add device-internal closure creation and device-function call tests
+  - [ ] Runtime safety parity:
+    - [ ] add a `DisjointSlice`-style output wrapper for bounds-checked
+          per-thread writes
+    - [ ] add a thread-index witness type so safe indexed writes can be tied to
+          trusted GPU index helpers
+    - [ ] add a managed barrier typestate API for LDS/block synchronization
+          lifetimes where AMD hardware semantics allow it
+  - [ ] Device API parity:
+    - [ ] expand scoped atomics beyond `u32` to signed integer, 64-bit integer,
+          and supported float operations by memory scope
+    - [ ] add wavefront shuffle up/down/xor and typed `i32`/`f32` variants
+    - [ ] add vote and match helpers beyond the current ballot/any/all surface
+    - [ ] add wavefront and block reductions/scans for sum/min/max and bitwise
+          operations over the supported scalar types
+    - [ ] add debug helpers for GPU printf/assert, clock, trap, breakpoint, and
+          profiler trigger equivalents where ROCm exposes a stable path
+  - [ ] ROCm-native interop/backends:
+    - [ ] turn COMGR probing into a real compile/link backend and persistent
+          code-object cache path
+    - [ ] define the ROCm replacement for NVIDIA LTOIR/nvJitLink interop using
+          AMD LLVM IR, code objects, HIP modules, and ROCm libraries
+    - [ ] extend rocPRIM/hipCUB wrappers to sort, select, transform, and more
+          scalar types
+    - [ ] promote hipBLASLt or Composable Kernel from availability probes to a
+          checked matmul descriptor and heuristic API
+    - [ ] keep TMA, WGMMA, DSMEM clusters, and CUDA cluster launch as
+          source-level rewrite targets, not ABI promises
 - [x] CUDA-like feature follow-up sequence from
       [cuda-future-work.md](/home/kjwtil/Documents/ROCm-Oxide/docs/cuda-future-work.md):
   - [x] document CUDA features to track and their ROCm-Oxide rewrite targets

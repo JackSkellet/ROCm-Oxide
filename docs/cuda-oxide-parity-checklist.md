@@ -4,6 +4,9 @@ This checklist tracks the AMD/ROCm equivalents of the official
 `NVlabs/cuda-oxide` feature surface. Demos are treated as regression coverage,
 not the product.
 
+Primary upstream reference:
+[NVIDIA cuda-oxide Supported Features](https://nvlabs.github.io/cuda-oxide/appendix/supported-features.html).
+
 ## Implemented In This Prototype
 
 - [x] Rust-authored device crate compiled to AMDGPU LLVM IR.
@@ -70,8 +73,44 @@ not the product.
 
 ## High-Priority Remaining Work
 
-- [ ] Implementation task sequence is tracked in
+- [ ] ASAP feature parity sequence is tracked in
       [implementation-tasks.md](/home/kjwtil/Documents/ROCm-Oxide/docs/implementation-tasks.md).
+- [ ] Compiler memory model parity:
+  - [ ] HMM-style host-visible reference captures where ROCm memory properties
+        and host-native atomics make the access pattern valid
+  - [ ] default `repr(Rust)` struct layout matching from rustc layout facts
+  - [ ] dynamic field offset and padding metadata for generated bindings
+- [ ] Compiler type-system parity:
+  - [ ] enum, `Option`, `Result`, and custom discriminant support
+  - [ ] struct literals, field access, pass-by-value, and return-by-value tests
+  - [ ] array construction, constant indexing, runtime indexing, and mutable
+        array lowering
+  - [ ] SIMD/vector register helper type once a real AMDGPU use case is chosen
+  - [x] slice scalarization at kernel boundaries for `DeviceSlice<T>` and
+        `DeviceSliceMut<T>`
+- [ ] Closure parity:
+  - [ ] move closures captured by value
+  - [ ] reference closures gated by safe ROCm host-visible memory semantics
+  - [ ] host-to-device closure arguments
+  - [ ] device-internal closures passed to device functions
+- [ ] Control-flow, arithmetic, and casting parity:
+  - [ ] integer and enum `match` lowering
+  - [ ] loops, nested loops, `break`, `continue`, and iterator-like slice loops
+  - [ ] 64-bit integer arithmetic audit across generated kernels
+  - [ ] integer, float, pointer, and bitcast conversion test matrix
+- [ ] Interop and compilation pipeline parity:
+  - [x] cross-crate kernel discovery and bundling
+  - [x] cargo subcommand and pipeline inspection equivalents
+  - [x] AMDGPU LLVM IR to `.hsaco` code-object path
+  - [ ] COMGR compile/link backend for persistent code-object caching
+  - [ ] ROCm replacement for CUDA LTOIR/nvJitLink interop using AMD LLVM IR,
+        HIP modules, and ROCm libraries
+  - [ ] debug-info and debugger workflow equivalent for ROCgdb or ROCm-native
+        tooling
+- [ ] Runtime safety parity:
+  - [ ] `DisjointSlice`-style output wrapper
+  - [ ] thread-index witness type for safe per-thread writes
+  - [ ] managed barrier typestate API for block/LDS synchronization
 - [x] Cargo subcommand equivalent to `cargo oxide`:
   - [x] `cargo rocm-oxide build`
   - [x] `cargo rocm-oxide run`
@@ -122,6 +161,13 @@ not the product.
   - [x] basic `u32` atomics
   - [x] explicit memory-scope atomics
   - [x] math intrinsic lowering
+  - [ ] broader typed atomics for signed integer, 64-bit integer, and supported
+        float operations by memory scope
+  - [ ] wavefront shuffle up/down/xor and typed `i32`/`f32` variants
+  - [ ] match helpers and broader vote operations
+  - [ ] wavefront and block reductions/scans over sum/min/max and bitwise ops
+  - [ ] debug helpers for printf/assert, clock, trap, breakpoint, and profiler
+        triggers where ROCm exposes a stable path
 - [ ] Compiler completeness:
   - [x] support more pointer-producing IR ops beyond `getelementptr`
   - [x] preserve source signature and contract spans in diagnostics
@@ -139,6 +185,14 @@ not the product.
       direct ports.
 - [x] cuBLASDx/cuFFTDx interop maps to rocBLAS/rocFFT or HIP library FFI and
       should be a separate integration layer.
+- [ ] TMA-style async tensor copies should map to stream-ordered HIP copies,
+      explicit LDS staging, and pipeline tokens only after synchronization
+      semantics are validated on AMD hardware.
+- [ ] WGMMA-style matrix operations should map to rocWMMA, hipBLASLt,
+      Composable Kernel, rocBLAS, or tiled Rust kernels.
+- [ ] DSMEM and CUDA cluster launch should map to HIP cooperative launch where
+      available, otherwise graph/stream-scheduled tiling plus global-memory
+      rendezvous.
 - [ ] NVVM/LTOIR and nvJitLink concepts map only partially to ROCm code-object
       linking; implement after the basic artifact model is stable.
 - [ ] Fine-grained LLVM `syncscope` selection for ROCm atomics should follow the

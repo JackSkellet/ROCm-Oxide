@@ -321,6 +321,11 @@ Book-derived AMD adaptations are tracked in
 [docs/cuda-oxide-book-rocm-adaptation.md](/home/kjwtil/Documents/ROCm-Oxide/docs/cuda-oxide-book-rocm-adaptation.md).
 CUDA feature research and future ROCm-Oxide implementation order are tracked in
 [docs/cuda-future-work.md](/home/kjwtil/Documents/ROCm-Oxide/docs/cuda-future-work.md).
+The ASAP feature-parity sprint against NVIDIA's published cuda-oxide supported
+feature matrix is tracked in
+[docs/cuda-oxide-parity-checklist.md](/home/kjwtil/Documents/ROCm-Oxide/docs/cuda-oxide-parity-checklist.md)
+and
+[docs/implementation-tasks.md](/home/kjwtil/Documents/ROCm-Oxide/docs/implementation-tasks.md).
 
 There is also a cargo subcommand wrapper in
 [tools/cargo-rocm-oxide](/home/kjwtil/Documents/ROCm-Oxide/tools/cargo-rocm-oxide/src/main.rs):
@@ -411,6 +416,15 @@ Stream-ordered allocation rules are documented in
 
 ## Roadmap
 
+The next priority is practical feature parity with NVIDIA cuda-oxide's
+published supported-feature matrix:
+[Supported Features](https://nvlabs.github.io/cuda-oxide/appendix/supported-features.html).
+ROCm-Oxide should close the user-visible Rust GPU programming gaps quickly, but
+it must do that as a ROCm-native stack. That means no promise of CUDA binary
+compatibility, PTX compatibility, NVVM ABI compatibility, TMA, WGMMA, or DSMEM
+as NVIDIA hardware concepts. The target is source-level ergonomics and equivalent
+capability where AMD hardware and ROCm libraries provide a real path.
+
 This roadmap is grounded in the validated probe targets:
 
 - `gfx1201`, AMD Radeon RX 9070 XT: one device, managed memory, concurrent
@@ -444,6 +458,10 @@ This roadmap is grounded in the validated probe targets:
 
 ### P0: Backend Correctness
 
+- ASAP cuda-oxide parity sprint: make the current prototype comparable category
+  by category against NVIDIA's matrix. The first work is compiler and type
+  coverage, then safety abstractions, then device API breadth, then ROCm-native
+  interop/backends.
 - Scope-specific atomic verification: implemented workgroup/device
   `syncscope` lowering, keep the system-scope backend default documented, verify
   the transformed IR plus disassembled ISA, and keep runtime coverage across
@@ -474,6 +492,17 @@ This roadmap is grounded in the validated probe targets:
 
 ### P1: Compiler Completeness
 
+- Feature-parity compiler matrix: add targeted kernels and compiler tests for
+  enums and pattern matching, array construction/indexing, integer/float/pointer
+  casts, loops and iterator desugaring, struct construction/return/pass-by-value,
+  and default `repr(Rust)` host/device layout matching.
+- Closure coverage: move beyond the current mirrored `repr(C)` environment path
+  by validating move closures, reference captures when the selected memory kind
+  can safely support them, host-to-device closure arguments, and device-internal
+  closures.
+- ABI and layout parity: teach metadata and generated bindings enough layout
+  information to reject unsupported cases early and to remove unnecessary
+  `repr(C)` requirements where rustc layout facts are available.
 - Direct exported generic-kernel monomorphization without wrapper functions:
   `#[kernel(monomorphize(...))]` now emits concrete entry points and generated
   typed host bindings.
@@ -488,6 +517,26 @@ This roadmap is grounded in the validated probe targets:
 
 ### P2: ROCm-Specific Feature Parity
 
+- Runtime safety layer: add ROCm-native equivalents to cuda-oxide's
+  `DisjointSlice`, thread-index witness, and managed barrier typestate APIs.
+  These should become compile-time or generated-binding checks where possible,
+  and runtime validation where the information only exists at launch.
+- Device API breadth: expand from the current `u32` scoped atomics and basic
+  wavefront helpers to a broader typed atomic matrix, wavefront shuffle/vote
+  variants, block reductions/scans, and debug helpers such as printf/assert,
+  clock, trap, and breakpoint equivalents where ROCm exposes them.
+- COMGR/code-object backend: turn the current COMGR availability probe into a
+  real compile/link path, then use it for persistent code-object caching and
+  ROCm library/device-object interop where HIPRTC is too narrow.
+- Library parity: extend rocPRIM/hipCUB beyond `u32` reduce/scan into sort,
+  select, transform, and typed temporary-storage plans. Promote hipBLASLt or
+  Composable Kernel from availability checks into first checked matmul
+  descriptors and heuristics.
+- CUDA-only advanced hardware mapping: keep TMA, WGMMA, DSMEM clusters, and
+  nvJitLink/LTOIR as source-level rewrite targets. Use stream-ordered copies
+  plus LDS staging for TMA-like flows, rocWMMA/hipBLASLt/Composable Kernel for
+  matrix/tensor paths, and HIP cooperative launch or graph-scheduled tiling for
+  cluster-style work.
 - ROCm-specific replacements for CUDA cluster launch, TMA, and WGMMA concepts:
   cooperative module-launch wrappers, device capability flags, and a parity
   planner now map these CUDA-only concepts to HIP cooperative grids,
