@@ -376,7 +376,7 @@ fn inspect_metadata(path: &Path) -> Result<(), String> {
         println!();
         println!("per-kernel resources:");
         println!(
-            "{:<30} {:>5} {:>5} {:>5} {:>7} {:>6} {:>7} {:>8} {:>5} {:>5}",
+            "{:<48} {:>5} {:>5} {:>5} {:>7} {:>6} {:>7} {:>8} {:>5} {:>5}",
             "kernel",
             "vgpr",
             "sgpr",
@@ -390,7 +390,7 @@ fn inspect_metadata(path: &Path) -> Result<(), String> {
         );
         for row in resources {
             println!(
-                "{:<30} {:>5} {:>5} {:>5} {:>7} {:>6} {:>7} {:>8} {:>5} {:>5}",
+                "{:<48} {:>5} {:>5} {:>5} {:>7} {:>6} {:>7} {:>8} {:>5} {:>5}",
                 row.name,
                 display_opt(row.vgpr_count),
                 display_opt(row.sgpr_count),
@@ -2135,10 +2135,17 @@ fn parse_kernel_decls(
         .ok_or_else(|| format!("{}: malformed #[kernel] signature", span))?
         + 3;
     let name_start = fn_pos;
-    let name_end = signature[name_start..]
-        .find('(')
+    let name_ident_end = signature[name_start..]
+        .find(|ch: char| !(ch == '_' || ch.is_ascii_alphanumeric()))
         .ok_or_else(|| format!("{}: malformed #[kernel] signature", span))?
         + name_start;
+    let mut cursor = skip_ws(signature, name_ident_end);
+    let name_end = if signature[cursor..].starts_with('<') {
+        cursor = find_matching_delimiter(signature, cursor, '<', '>')? + 1;
+        skip_ws(signature, cursor)
+    } else {
+        cursor
+    };
     let raw_name = signature[name_start..name_end].trim();
     let (name, generic_params) = parse_kernel_name(raw_name, &span)?;
     if name.is_empty() {
@@ -2161,6 +2168,9 @@ fn parse_kernel_decls(
         ));
     }
 
+    if !signature[name_end..].starts_with('(') {
+        return Err(format!("{}: malformed #[kernel] argument list", span));
+    }
     let args_start = name_end + 1;
     let args_end = signature[args_start..]
         .find(')')
@@ -2488,6 +2498,17 @@ fn substitute_generic_types(
     output
 }
 
+fn skip_ws(source: &str, mut index: usize) -> usize {
+    while source[index..]
+        .chars()
+        .next()
+        .is_some_and(|ch| ch.is_whitespace())
+    {
+        index += source[index..].chars().next().unwrap().len_utf8();
+    }
+    index
+}
+
 fn find_matching_delimiter(
     source: &str,
     open_index: usize,
@@ -2500,6 +2521,9 @@ fn find_matching_delimiter(
         if ch == open {
             depth += 1;
         } else if ch == close {
+            if close == '>' && source[..absolute].ends_with('-') {
+                continue;
+            }
             depth = depth.saturating_sub(1);
             if depth == 0 {
                 return Ok(absolute);
@@ -4193,9 +4217,10 @@ fn generate_kernel_binding(
 
     let mut out = String::new();
     let field_name = kernel_field_name(&kernel.name);
+    let method_name = kernel_method_name(&kernel.name);
     out.push_str(&format!(
         "    pub unsafe fn {}(&self, {}) -> rocm_oxide::Result<()> {{\n",
-        kernel.name,
+        method_name,
         params.join(", ")
     ));
     out.push_str(&generate_kernel_validation_lines(
@@ -4218,7 +4243,7 @@ fn generate_kernel_binding(
     stream_params.extend(params.clone());
     out.push_str(&format!(
         "    pub unsafe fn {}_on_stream(&self, {}) -> rocm_oxide::Result<()> {{\n",
-        kernel.name,
+        method_name,
         stream_params.join(", ")
     ));
     out.push_str(&generate_kernel_validation_lines(
@@ -4244,7 +4269,7 @@ fn generate_kernel_binding(
     out.push_str("    /// argument ABI, and all pointer lifetimes for the launched work.\n");
     out.push_str(&format!(
         "    pub unsafe fn {}_unchecked(&self, {}) -> rocm_oxide::Result<()> {{\n",
-        kernel.name,
+        method_name,
         params.join(", ")
     ));
     out.push_str(&generate_kernel_param_setup(&launch_args, "        "));
@@ -4263,7 +4288,7 @@ fn generate_kernel_binding(
     out.push_str("    /// argument ABI, pointer lifetimes, and stream/device association.\n");
     out.push_str(&format!(
         "    pub unsafe fn {}_on_stream_unchecked(&self, {}) -> rocm_oxide::Result<()> {{\n",
-        kernel.name,
+        method_name,
         stream_params.join(", ")
     ));
     out.push_str(&generate_kernel_param_setup(&launch_args, "        "));
@@ -4287,7 +4312,7 @@ fn generate_kernel_binding(
     out.push_str("    /// alive until graph execution using the returned node has completed.\n");
     out.push_str(&format!(
         "    pub unsafe fn {}_graph_node(&self, {}) -> rocm_oxide::Result<rocm_oxide::hip::GraphNode> {{\n",
-        kernel.name,
+        method_name,
         graph_params.join(", ")
     ));
     out.push_str(&generate_kernel_validation_lines(
@@ -4308,7 +4333,7 @@ fn generate_kernel_binding(
     out.push('\n');
     out.push_str(&format!(
         "    pub unsafe fn {}_operation(&self, {}) -> rocm_oxide::Result<impl rocm_oxide::DeviceOperation<Output = rocm_oxide::KernelLaunchCompletion> + 'static> {{\n",
-        kernel.name,
+        method_name,
         operation_params.join(", ")
     ));
     out.push_str(&generate_kernel_validation_lines(
@@ -4347,6 +4372,10 @@ fn generate_kernel_binding(
 
 fn kernel_field_name(name: &str) -> String {
     format!("__kernel_{}", to_snake_case(name))
+}
+
+fn kernel_method_name(name: &str) -> String {
+    to_snake_case(name)
 }
 
 fn generate_kernel_param_setup(launch_args: &[String], indent: &str) -> String {
@@ -5349,6 +5378,26 @@ pub unsafe extern "C" fn copy_generic<T: Copy>(out: *mut T, input: *const T, n: 
     }
 
     #[test]
+    fn discovers_generic_kernels_with_closure_trait_bounds() {
+        let kernels = discover_kernels_in_source(
+            r#"
+#[kernel(monomorphize(ClosureEnv))]
+pub unsafe extern "C" fn apply_closure<F: FnOnce(u32) -> u32>(
+    out: *mut u32,
+    input: *const u32,
+    f: F,
+) {}
+"#,
+        )
+        .expect("generic closure-bound kernel should parse");
+
+        assert_eq!(kernels.len(), 1);
+        assert_eq!(kernels[0].name, "apply_closure_ClosureEnv");
+        assert_eq!(kernels[0].args[2].ty, "ClosureEnv");
+        assert_eq!(kernels[0].args[2].kind, ArgKind::Scalar);
+    }
+
+    #[test]
     fn generic_helpers_can_be_wrapped_by_monomorphic_kernels() {
         let kernels = discover_kernels_in_source(
             r#"
@@ -5486,6 +5535,35 @@ pub unsafe extern "C" fn probe(
         assert!(binding.contains("let mut __arg3 = params.scale;"));
         assert!(binding.contains("let mut __arg4 = n;"));
         assert!(!binding.contains("let mut __arg2 = params;"));
+    }
+
+    #[test]
+    fn monomorphized_struct_kernel_methods_are_snake_case() {
+        let source = r#"
+#[derive(Clone, Copy)]
+pub struct RustLayoutParams {
+    pub base: u32,
+    pub stride: u32,
+}
+
+#[kernel(monomorphize(RustLayoutParams))]
+pub unsafe extern "C" fn probe<P>(
+    out: gpu::DeviceSliceMut<u32>,
+    params: P,
+    n: usize,
+) {}
+"#;
+        let kernels = discover_kernels_in_source(source).expect("source should parse");
+        let device_structs = discover_device_structs_in_source(source)
+            .expect("device struct should parse")
+            .into_iter()
+            .map(|device_struct| (device_struct.name.clone(), device_struct))
+            .collect::<BTreeMap<_, _>>();
+
+        let binding = generate_kernel_binding(&kernels[0], &device_structs, None)
+            .expect("binding should generate");
+        assert!(binding.contains("pub unsafe fn probe_rust_layout_params"));
+        assert!(!binding.contains("probe_RustLayoutParams"));
     }
 
     #[test]

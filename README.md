@@ -507,9 +507,10 @@ This roadmap is grounded in the validated probe targets:
   casts, loops and iterator desugaring, struct construction/return/pass-by-value,
   and default `repr(Rust)` host/device layout matching.
 - Closure coverage: move beyond the current mirrored `repr(C)` environment path
-  by validating move closures, reference captures when the selected memory kind
-  can safely support them, host-to-device closure arguments, and device-internal
-  closures.
+- Closure coverage: `compiler_move_closure_probe_RustLayoutParams` now validates
+  a generic device kernel that builds a `move` closure from a by-value captured
+  environment and passes it through a device helper; reference captures and
+  host-to-device closure argument APIs remain open.
 - ABI and layout parity: generated metadata now records rustc AMDGPU struct
   layout facts, including field offsets, padding, ABI size, and alignment;
   generated host bindings assert matching host layout and reject unsupported

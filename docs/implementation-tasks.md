@@ -32,11 +32,11 @@ features on top of stronger contracts.
     - [x] extend generated bindings to reject unsupported layout and by-value
           argument cases before launch
   - [ ] Closure parity:
-    - [ ] support move closures captured by value for generic device kernels
+    - [x] support move closures captured by value for generic device kernels
     - [ ] support reference captures only when the chosen ROCm memory kind can
           safely back the host-visible access pattern
     - [ ] add host-to-device closure argument examples and tests
-    - [ ] add device-internal closure creation and device-function call tests
+    - [x] add device-internal closure creation and device-function call tests
   - [ ] Runtime safety parity:
     - [x] add a `DisjointSlice`-style output wrapper for bounds-checked
           per-thread writes

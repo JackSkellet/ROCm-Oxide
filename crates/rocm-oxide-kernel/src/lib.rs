@@ -340,6 +340,9 @@ fn find_matching(
         if ch == open {
             depth += 1;
         } else if ch == close {
+            if close == '>' && source[..absolute].ends_with('-') {
+                continue;
+            }
             depth = depth.saturating_sub(1);
             if depth == 0 {
                 return Ok(absolute);

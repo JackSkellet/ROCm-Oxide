@@ -209,6 +209,34 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             .collect::<Vec<_>>()
     );
 
+    let closure_input = vec![1u32, 4, 9, 16, 25, 36, 49, 64];
+    let closure_values = DeviceBuffer::from_slice(&closure_input)?;
+    let closure_out = DeviceBuffer::<u32>::new(closure_input.len())?;
+    let closure_params = generated::RustLayoutParams { base: 3, stride: 5 };
+    unsafe {
+        kernels.compiler_move_closure_probe_rust_layout_params(
+            LaunchConfig::for_num_elems_with_block_size(closure_input.len(), 32),
+            &closure_out,
+            &closure_values,
+            closure_params,
+            closure_input.len(),
+        )?;
+    }
+    rocm_oxide::hip::synchronize()?;
+    assert_eq!(
+        closure_out.copy_to_vec()?,
+        closure_input
+            .iter()
+            .enumerate()
+            .map(|(index, value)| {
+                value
+                    .wrapping_mul(closure_params.stride)
+                    .wrapping_add(closure_params.base)
+                    .wrapping_add((index as u32) & 1)
+            })
+            .collect::<Vec<_>>()
+    );
+
     let flow_input = vec![0u32, 1, 2, 3, 4, 7, 9, 12, 15, 31, 42, 63];
     let flow_values = DeviceBuffer::from_slice(&flow_input)?;
     let flow_out = DeviceBuffer::<u32>::new(flow_input.len())?;

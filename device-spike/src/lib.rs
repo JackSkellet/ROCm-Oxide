@@ -38,6 +38,16 @@ pub struct RustLayoutParams {
     pub stride: u32,
 }
 
+pub trait ClosureCaptureParams: Copy {
+    fn apply(self, value: u32) -> u32;
+}
+
+impl ClosureCaptureParams for RustLayoutParams {
+    fn apply(self, value: u32) -> u32 {
+        value.wrapping_mul(self.stride).wrapping_add(self.base)
+    }
+}
+
 #[repr(u32)]
 #[derive(Clone, Copy)]
 enum ControlKind {
@@ -347,6 +357,29 @@ pub unsafe extern "C" fn compiler_layout_probe(
 
     let value = unsafe { input.read_unchecked(i) };
     let result = value.wrapping_mul(params.stride).wrapping_add(params.base);
+    let disjoint_out = unsafe { gpu::DisjointSliceMut::new_unchecked(out) };
+    disjoint_out.write_for_thread(thread, result);
+}
+
+// rocm-oxide: len(out)=n
+// rocm-oxide: len(input)=n
+#[kernel(monomorphize(RustLayoutParams))]
+pub unsafe extern "C" fn compiler_move_closure_probe<P: ClosureCaptureParams>(
+    out: gpu::DeviceSliceMut<u32>,
+    input: gpu::DeviceSlice<u32>,
+    params: P,
+    n: usize,
+) {
+    let thread = gpu::thread_index_x_witness();
+    let i = thread.get();
+    if i >= n {
+        return;
+    }
+
+    let captured = params;
+    let transform = move |value: u32| captured.apply(value).wrapping_add((i as u32) & 1);
+    let value = unsafe { input.read_unchecked(i) };
+    let result = apply_device_closure(value, transform);
     let disjoint_out = unsafe { gpu::DisjointSliceMut::new_unchecked(out) };
     disjoint_out.write_for_thread(thread, result);
 }
@@ -1947,6 +1980,14 @@ fn control_result(value: u32) -> Result<u32, u32> {
     } else {
         Err(value - 12)
     }
+}
+
+#[inline(always)]
+fn apply_device_closure<F>(value: u32, f: F) -> u32
+where
+    F: FnOnce(u32) -> u32,
+{
+    f(value)
 }
 
 fn control_pair(value: u32, params: ControlParams) -> ControlPair {
