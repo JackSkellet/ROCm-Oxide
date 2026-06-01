@@ -231,7 +231,9 @@ fn main() -> Result<()> {
     }
     match run_rocprim_smoke() {
         Ok(()) => {
-            println!("ok: rocPRIM/hipCUB reduce and scan wrappers completed on device buffers")
+            println!(
+                "ok: rocPRIM/hipCUB reduce, scan, sort, select, and transform wrappers completed on device buffers"
+            )
         }
         Err(err) => println!("skip: rocPRIM/hipCUB reduce/scan smoke: {err}"),
     }
@@ -621,6 +623,32 @@ fn run_rocprim_smoke() -> Result<()> {
     let exclusive = DeviceBuffer::<u32>::new(input.len())?;
     rocprim.exclusive_sum_u32(&input, &exclusive, 0)?;
     assert_eq!(exclusive.copy_to_vec()?, [0, 1, 3, 6]);
+
+    let signed = DeviceBuffer::from_slice(&[-3i32, 4, 7, -2])?;
+    let signed_reduced = DeviceBuffer::<i32>::new(1)?;
+    rocprim.reduce_sum_i32(&signed, &signed_reduced)?;
+    assert_eq!(signed_reduced.copy_to_vec()?, [6]);
+
+    let floats = DeviceBuffer::from_slice(&[1.0f32, 2.5, -0.5])?;
+    let float_scan = DeviceBuffer::<f32>::new(floats.len())?;
+    rocprim.exclusive_sum_f32(&floats, &float_scan, 0.0)?;
+    assert_eq!(float_scan.copy_to_vec()?, [0.0, 1.0, 3.5]);
+
+    let sort_input = DeviceBuffer::from_slice(&[9u32, 2, 7, 2, 1])?;
+    let sort_output = DeviceBuffer::<u32>::new(sort_input.len())?;
+    rocprim.sort_keys_u32(&sort_input, &sort_output)?;
+    assert_eq!(sort_output.copy_to_vec()?, [1, 2, 2, 7, 9]);
+
+    let flags = DeviceBuffer::from_slice(&[1u8, 0, 1, 0])?;
+    let selected = DeviceBuffer::<u32>::new(input.len())?;
+    let selected_count = DeviceBuffer::<u32>::new(1)?;
+    rocprim.select_flagged_u32(&input, &flags, &selected, &selected_count)?;
+    assert_eq!(selected_count.copy_to_vec()?, [2]);
+    assert_eq!(&selected.copy_to_vec()?[..2], [1, 3]);
+
+    let transformed = DeviceBuffer::<u32>::new(input.len())?;
+    rocprim.transform_add_u32(&input, &transformed, 11)?;
+    assert_eq!(transformed.copy_to_vec()?, [12, 13, 14, 15]);
     Ok(())
 }
 

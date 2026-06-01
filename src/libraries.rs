@@ -135,11 +135,20 @@ type AmdComgrDoAction = unsafe extern "C" fn(
 ) -> AmdComgrStatus;
 
 type RocPrimStatus = c_int;
-type RocPrimReduceSumU32 = unsafe extern "C" fn(
+type RocPrimUnary<T> = unsafe extern "C" fn(
     *mut c_void,
     *mut usize,
-    *const u32,
-    *mut u32,
+    *const T,
+    *mut T,
+    usize,
+    *mut c_void,
+) -> RocPrimStatus;
+type RocPrimExclusive<T> = unsafe extern "C" fn(
+    *mut c_void,
+    *mut usize,
+    *const T,
+    *mut T,
+    T,
     usize,
     *mut c_void,
 ) -> RocPrimStatus;
@@ -162,11 +171,43 @@ unsafe extern "C" {
         size: usize,
         stream: *mut c_void,
     ) -> RocPrimStatus;
+    fn rocm_oxide_rocprim_reduce_sum_i32(
+        temporary_storage: *mut c_void,
+        storage_size: *mut usize,
+        input: *const i32,
+        output: *mut i32,
+        size: usize,
+        stream: *mut c_void,
+    ) -> RocPrimStatus;
+    fn rocm_oxide_rocprim_reduce_sum_f32(
+        temporary_storage: *mut c_void,
+        storage_size: *mut usize,
+        input: *const f32,
+        output: *mut f32,
+        size: usize,
+        stream: *mut c_void,
+    ) -> RocPrimStatus;
     fn rocm_oxide_rocprim_inclusive_sum_u32(
         temporary_storage: *mut c_void,
         storage_size: *mut usize,
         input: *const u32,
         output: *mut u32,
+        size: usize,
+        stream: *mut c_void,
+    ) -> RocPrimStatus;
+    fn rocm_oxide_rocprim_inclusive_sum_i32(
+        temporary_storage: *mut c_void,
+        storage_size: *mut usize,
+        input: *const i32,
+        output: *mut i32,
+        size: usize,
+        stream: *mut c_void,
+    ) -> RocPrimStatus;
+    fn rocm_oxide_rocprim_inclusive_sum_f32(
+        temporary_storage: *mut c_void,
+        storage_size: *mut usize,
+        input: *const f32,
+        output: *mut f32,
         size: usize,
         stream: *mut c_void,
     ) -> RocPrimStatus;
@@ -176,6 +217,49 @@ unsafe extern "C" {
         input: *const u32,
         output: *mut u32,
         initial_value: u32,
+        size: usize,
+        stream: *mut c_void,
+    ) -> RocPrimStatus;
+    fn rocm_oxide_rocprim_exclusive_sum_i32(
+        temporary_storage: *mut c_void,
+        storage_size: *mut usize,
+        input: *const i32,
+        output: *mut i32,
+        initial_value: i32,
+        size: usize,
+        stream: *mut c_void,
+    ) -> RocPrimStatus;
+    fn rocm_oxide_rocprim_exclusive_sum_f32(
+        temporary_storage: *mut c_void,
+        storage_size: *mut usize,
+        input: *const f32,
+        output: *mut f32,
+        initial_value: f32,
+        size: usize,
+        stream: *mut c_void,
+    ) -> RocPrimStatus;
+    fn rocm_oxide_rocprim_sort_keys_u32(
+        temporary_storage: *mut c_void,
+        storage_size: *mut usize,
+        input: *const u32,
+        output: *mut u32,
+        size: usize,
+        stream: *mut c_void,
+    ) -> RocPrimStatus;
+    fn rocm_oxide_rocprim_select_flagged_u32(
+        temporary_storage: *mut c_void,
+        storage_size: *mut usize,
+        input: *const u32,
+        flags: *const u8,
+        output: *mut u32,
+        selected_count: *mut u32,
+        size: usize,
+        stream: *mut c_void,
+    ) -> RocPrimStatus;
+    fn rocm_oxide_rocprim_transform_add_u32(
+        input: *const u32,
+        output: *mut u32,
+        addend: u32,
         size: usize,
         stream: *mut c_void,
     ) -> RocPrimStatus;
@@ -1302,6 +1386,224 @@ impl RocPrim {
         self.exclusive_sum_u32_on_stream(&stream, &storage, input, output, initial_value)?;
         Ok(stream.synchronize()?)
     }
+
+    pub fn reduce_sum_i32(
+        &self,
+        input: &DeviceBuffer<i32>,
+        output: &DeviceBuffer<i32>,
+    ) -> Result<()> {
+        validate_reduce(input, output)?;
+        let stream = Stream::new()?;
+        let storage_bytes = query_rocprim_unary_storage(
+            rocm_oxide_rocprim_reduce_sum_i32,
+            "rocPRIM reduce_sum_i32 storage query",
+            input,
+            output,
+        )?;
+        let storage = DeviceAlgorithmTemporaryStorage::new(storage_bytes)?;
+        call_rocprim_unary(
+            rocm_oxide_rocprim_reduce_sum_i32,
+            "rocPRIM reduce_sum_i32",
+            &stream,
+            &storage,
+            input,
+            output,
+        )?;
+        Ok(stream.synchronize()?)
+    }
+
+    pub fn reduce_sum_f32(
+        &self,
+        input: &DeviceBuffer<f32>,
+        output: &DeviceBuffer<f32>,
+    ) -> Result<()> {
+        validate_reduce(input, output)?;
+        let stream = Stream::new()?;
+        let storage_bytes = query_rocprim_unary_storage(
+            rocm_oxide_rocprim_reduce_sum_f32,
+            "rocPRIM reduce_sum_f32 storage query",
+            input,
+            output,
+        )?;
+        let storage = DeviceAlgorithmTemporaryStorage::new(storage_bytes)?;
+        call_rocprim_unary(
+            rocm_oxide_rocprim_reduce_sum_f32,
+            "rocPRIM reduce_sum_f32",
+            &stream,
+            &storage,
+            input,
+            output,
+        )?;
+        Ok(stream.synchronize()?)
+    }
+
+    pub fn inclusive_sum_i32(
+        &self,
+        input: &DeviceBuffer<i32>,
+        output: &DeviceBuffer<i32>,
+    ) -> Result<()> {
+        validate_scan("rocPRIM inclusive scan output", input, output)?;
+        let stream = Stream::new()?;
+        let storage_bytes = query_rocprim_unary_storage(
+            rocm_oxide_rocprim_inclusive_sum_i32,
+            "rocPRIM inclusive_sum_i32 storage query",
+            input,
+            output,
+        )?;
+        let storage = DeviceAlgorithmTemporaryStorage::new(storage_bytes)?;
+        call_rocprim_unary(
+            rocm_oxide_rocprim_inclusive_sum_i32,
+            "rocPRIM inclusive_sum_i32",
+            &stream,
+            &storage,
+            input,
+            output,
+        )?;
+        Ok(stream.synchronize()?)
+    }
+
+    pub fn inclusive_sum_f32(
+        &self,
+        input: &DeviceBuffer<f32>,
+        output: &DeviceBuffer<f32>,
+    ) -> Result<()> {
+        validate_scan("rocPRIM inclusive scan output", input, output)?;
+        let stream = Stream::new()?;
+        let storage_bytes = query_rocprim_unary_storage(
+            rocm_oxide_rocprim_inclusive_sum_f32,
+            "rocPRIM inclusive_sum_f32 storage query",
+            input,
+            output,
+        )?;
+        let storage = DeviceAlgorithmTemporaryStorage::new(storage_bytes)?;
+        call_rocprim_unary(
+            rocm_oxide_rocprim_inclusive_sum_f32,
+            "rocPRIM inclusive_sum_f32",
+            &stream,
+            &storage,
+            input,
+            output,
+        )?;
+        Ok(stream.synchronize()?)
+    }
+
+    pub fn exclusive_sum_i32(
+        &self,
+        input: &DeviceBuffer<i32>,
+        output: &DeviceBuffer<i32>,
+        initial_value: i32,
+    ) -> Result<()> {
+        let stream = Stream::new()?;
+        let storage_bytes = query_rocprim_exclusive_storage(
+            rocm_oxide_rocprim_exclusive_sum_i32,
+            "rocPRIM exclusive_sum_i32 storage query",
+            input,
+            output,
+            initial_value,
+        )?;
+        let storage = DeviceAlgorithmTemporaryStorage::new(storage_bytes)?;
+        call_rocprim_exclusive(
+            rocm_oxide_rocprim_exclusive_sum_i32,
+            "rocPRIM exclusive_sum_i32",
+            &stream,
+            &storage,
+            input,
+            output,
+            initial_value,
+        )?;
+        Ok(stream.synchronize()?)
+    }
+
+    pub fn exclusive_sum_f32(
+        &self,
+        input: &DeviceBuffer<f32>,
+        output: &DeviceBuffer<f32>,
+        initial_value: f32,
+    ) -> Result<()> {
+        let stream = Stream::new()?;
+        let storage_bytes = query_rocprim_exclusive_storage(
+            rocm_oxide_rocprim_exclusive_sum_f32,
+            "rocPRIM exclusive_sum_f32 storage query",
+            input,
+            output,
+            initial_value,
+        )?;
+        let storage = DeviceAlgorithmTemporaryStorage::new(storage_bytes)?;
+        call_rocprim_exclusive(
+            rocm_oxide_rocprim_exclusive_sum_f32,
+            "rocPRIM exclusive_sum_f32",
+            &stream,
+            &storage,
+            input,
+            output,
+            initial_value,
+        )?;
+        Ok(stream.synchronize()?)
+    }
+
+    pub fn sort_keys_u32(
+        &self,
+        input: &DeviceBuffer<u32>,
+        output: &DeviceBuffer<u32>,
+    ) -> Result<()> {
+        validate_buffer_len("rocPRIM sort output", output.len(), input.len())?;
+        let stream = Stream::new()?;
+        let storage_bytes = query_rocprim_unary_storage(
+            rocm_oxide_rocprim_sort_keys_u32,
+            "rocPRIM sort_keys_u32 storage query",
+            input,
+            output,
+        )?;
+        let storage = DeviceAlgorithmTemporaryStorage::new(storage_bytes)?;
+        call_rocprim_unary(
+            rocm_oxide_rocprim_sort_keys_u32,
+            "rocPRIM sort_keys_u32",
+            &stream,
+            &storage,
+            input,
+            output,
+        )?;
+        Ok(stream.synchronize()?)
+    }
+
+    pub fn select_flagged_u32(
+        &self,
+        input: &DeviceBuffer<u32>,
+        flags: &DeviceBuffer<u8>,
+        output: &DeviceBuffer<u32>,
+        selected_count: &DeviceBuffer<u32>,
+    ) -> Result<()> {
+        validate_select_flagged_u32(input, flags, output, selected_count)?;
+        let stream = Stream::new()?;
+        let storage_bytes =
+            query_rocprim_select_flagged_u32_storage(input, flags, output, selected_count)?;
+        let storage = DeviceAlgorithmTemporaryStorage::new(storage_bytes)?;
+        call_rocprim_select_flagged_u32(&stream, &storage, input, flags, output, selected_count)?;
+        Ok(stream.synchronize()?)
+    }
+
+    pub fn transform_add_u32(
+        &self,
+        input: &DeviceBuffer<u32>,
+        output: &DeviceBuffer<u32>,
+        addend: u32,
+    ) -> Result<()> {
+        validate_buffer_len("rocPRIM transform output", output.len(), input.len())?;
+        let stream = Stream::new()?;
+        unsafe {
+            check_rocprim(
+                rocm_oxide_rocprim_transform_add_u32(
+                    input.as_ptr(),
+                    output.as_mut_ptr(),
+                    addend,
+                    input.len(),
+                    stream.as_raw(),
+                ),
+                "rocPRIM transform_add_u32",
+            )?;
+        }
+        Ok(stream.synchronize()?)
+    }
 }
 
 impl DeviceAlgorithmTemporaryStorage {
@@ -1640,7 +1942,7 @@ fn validate_temporary_storage(
 }
 
 fn query_rocprim_u32_storage(
-    function: RocPrimReduceSumU32,
+    function: RocPrimUnary<u32>,
     op: &str,
     input: &DeviceBuffer<u32>,
     output: &DeviceBuffer<u32>,
@@ -1663,7 +1965,7 @@ fn query_rocprim_u32_storage(
 }
 
 fn call_rocprim_u32(
-    function: RocPrimReduceSumU32,
+    function: RocPrimUnary<u32>,
     op: &str,
     stream: &Stream,
     temporary_storage: &DeviceAlgorithmTemporaryStorage,
@@ -1682,6 +1984,190 @@ fn call_rocprim_u32(
                 stream.as_raw(),
             ),
             op,
+        )
+    }
+}
+
+fn validate_reduce<T>(input: &DeviceBuffer<T>, output: &DeviceBuffer<T>) -> Result<()> {
+    if input.is_empty() {
+        return Err(Error::Library(
+            "rocPRIM reductions require at least one input element".to_string(),
+        ));
+    }
+    validate_buffer_len("rocPRIM reduce output", output.len(), 1)
+}
+
+fn validate_scan<T>(
+    output_name: &str,
+    input: &DeviceBuffer<T>,
+    output: &DeviceBuffer<T>,
+) -> Result<()> {
+    if input.is_empty() {
+        return Err(Error::Library(
+            "rocPRIM scans require at least one input element".to_string(),
+        ));
+    }
+    validate_buffer_len(output_name, output.len(), input.len())
+}
+
+fn query_rocprim_unary_storage<T>(
+    function: RocPrimUnary<T>,
+    op: &str,
+    input: &DeviceBuffer<T>,
+    output: &DeviceBuffer<T>,
+) -> Result<usize> {
+    let mut storage_bytes = 0usize;
+    unsafe {
+        check_rocprim(
+            function(
+                ptr::null_mut(),
+                &mut storage_bytes,
+                input.as_ptr(),
+                output.as_mut_ptr(),
+                input.len(),
+                ptr::null_mut(),
+            ),
+            op,
+        )?;
+    }
+    Ok(storage_bytes)
+}
+
+fn query_rocprim_exclusive_storage<T: Copy>(
+    function: RocPrimExclusive<T>,
+    op: &str,
+    input: &DeviceBuffer<T>,
+    output: &DeviceBuffer<T>,
+    initial_value: T,
+) -> Result<usize> {
+    validate_scan("rocPRIM exclusive scan output", input, output)?;
+    let mut storage_bytes = 0usize;
+    unsafe {
+        check_rocprim(
+            function(
+                ptr::null_mut(),
+                &mut storage_bytes,
+                input.as_ptr(),
+                output.as_mut_ptr(),
+                initial_value,
+                input.len(),
+                ptr::null_mut(),
+            ),
+            op,
+        )?;
+    }
+    Ok(storage_bytes)
+}
+
+fn call_rocprim_unary<T>(
+    function: RocPrimUnary<T>,
+    op: &str,
+    stream: &Stream,
+    temporary_storage: &DeviceAlgorithmTemporaryStorage,
+    input: &DeviceBuffer<T>,
+    output: &DeviceBuffer<T>,
+) -> Result<()> {
+    let mut storage_bytes = temporary_storage.bytes();
+    unsafe {
+        check_rocprim(
+            function(
+                temporary_storage.as_mut_ptr(),
+                &mut storage_bytes,
+                input.as_ptr(),
+                output.as_mut_ptr(),
+                input.len(),
+                stream.as_raw(),
+            ),
+            op,
+        )
+    }
+}
+
+fn call_rocprim_exclusive<T: Copy>(
+    function: RocPrimExclusive<T>,
+    op: &str,
+    stream: &Stream,
+    temporary_storage: &DeviceAlgorithmTemporaryStorage,
+    input: &DeviceBuffer<T>,
+    output: &DeviceBuffer<T>,
+    initial_value: T,
+) -> Result<()> {
+    let mut storage_bytes = temporary_storage.bytes();
+    unsafe {
+        check_rocprim(
+            function(
+                temporary_storage.as_mut_ptr(),
+                &mut storage_bytes,
+                input.as_ptr(),
+                output.as_mut_ptr(),
+                initial_value,
+                input.len(),
+                stream.as_raw(),
+            ),
+            op,
+        )
+    }
+}
+
+fn validate_select_flagged_u32(
+    input: &DeviceBuffer<u32>,
+    flags: &DeviceBuffer<u8>,
+    output: &DeviceBuffer<u32>,
+    selected_count: &DeviceBuffer<u32>,
+) -> Result<()> {
+    validate_buffer_len("rocPRIM select flags", flags.len(), input.len())?;
+    validate_buffer_len("rocPRIM select output", output.len(), input.len())?;
+    validate_buffer_len("rocPRIM select count", selected_count.len(), 1)
+}
+
+fn query_rocprim_select_flagged_u32_storage(
+    input: &DeviceBuffer<u32>,
+    flags: &DeviceBuffer<u8>,
+    output: &DeviceBuffer<u32>,
+    selected_count: &DeviceBuffer<u32>,
+) -> Result<usize> {
+    validate_select_flagged_u32(input, flags, output, selected_count)?;
+    let mut storage_bytes = 0usize;
+    unsafe {
+        check_rocprim(
+            rocm_oxide_rocprim_select_flagged_u32(
+                ptr::null_mut(),
+                &mut storage_bytes,
+                input.as_ptr(),
+                flags.as_ptr(),
+                output.as_mut_ptr(),
+                selected_count.as_mut_ptr(),
+                input.len(),
+                ptr::null_mut(),
+            ),
+            "rocPRIM select_flagged_u32 storage query",
+        )?;
+    }
+    Ok(storage_bytes)
+}
+
+fn call_rocprim_select_flagged_u32(
+    stream: &Stream,
+    temporary_storage: &DeviceAlgorithmTemporaryStorage,
+    input: &DeviceBuffer<u32>,
+    flags: &DeviceBuffer<u8>,
+    output: &DeviceBuffer<u32>,
+    selected_count: &DeviceBuffer<u32>,
+) -> Result<()> {
+    let mut storage_bytes = temporary_storage.bytes();
+    unsafe {
+        check_rocprim(
+            rocm_oxide_rocprim_select_flagged_u32(
+                temporary_storage.as_mut_ptr(),
+                &mut storage_bytes,
+                input.as_ptr(),
+                flags.as_ptr(),
+                output.as_mut_ptr(),
+                selected_count.as_mut_ptr(),
+                input.len(),
+                stream.as_raw(),
+            ),
+            "rocPRIM select_flagged_u32",
         )
     }
 }
@@ -1834,6 +2320,76 @@ void comgr_smoke(float* out) {
         assert_eq!(
             exclusive.copy_to_vec().expect("exclusive download"),
             [0, 1, 3, 6]
+        );
+
+        let signed_input = DeviceBuffer::from_slice(&[-3i32, 4, 7, -2]).expect("upload i32");
+        let signed_reduced = DeviceBuffer::<i32>::new(1).expect("i32 reduce output");
+        rocprim
+            .reduce_sum_i32(&signed_input, &signed_reduced)
+            .expect("rocPRIM i32 reduce should work");
+        assert_eq!(signed_reduced.copy_to_vec().expect("i32 reduce"), [6]);
+        let signed_scan = DeviceBuffer::<i32>::new(signed_input.len()).expect("i32 scan output");
+        rocprim
+            .inclusive_sum_i32(&signed_input, &signed_scan)
+            .expect("rocPRIM i32 scan should work");
+        assert_eq!(signed_scan.copy_to_vec().expect("i32 scan"), [-3, 1, 8, 6]);
+
+        let float_input = DeviceBuffer::from_slice(&[1.0f32, 2.5, -0.5]).expect("upload f32");
+        let float_reduced = DeviceBuffer::<f32>::new(1).expect("f32 reduce output");
+        rocprim
+            .reduce_sum_f32(&float_input, &float_reduced)
+            .expect("rocPRIM f32 reduce should work");
+        assert_eq!(float_reduced.copy_to_vec().expect("f32 reduce"), [3.0]);
+        let float_exclusive = DeviceBuffer::<f32>::new(float_input.len()).expect("f32 scan output");
+        rocprim
+            .exclusive_sum_f32(&float_input, &float_exclusive, 0.0)
+            .expect("rocPRIM f32 exclusive scan should work");
+        assert_eq!(
+            float_exclusive.copy_to_vec().expect("f32 exclusive"),
+            [0.0, 1.0, 3.5]
+        );
+    }
+
+    #[test]
+    fn rocprim_sort_select_and_transform_smoke_if_available() {
+        let Ok(rocprim) = RocPrim::open() else {
+            return;
+        };
+        let sort_input = DeviceBuffer::from_slice(&[9u32, 2, 7, 2, 1]).expect("sort upload");
+        let sort_output = DeviceBuffer::<u32>::new(sort_input.len()).expect("sort output");
+        rocprim
+            .sort_keys_u32(&sort_input, &sort_output)
+            .expect("rocPRIM sort should work");
+        assert_eq!(
+            sort_output.copy_to_vec().expect("sort download"),
+            [1, 2, 2, 7, 9]
+        );
+
+        let select_input =
+            DeviceBuffer::from_slice(&[10u32, 20, 30, 40, 50]).expect("select upload");
+        let flags = DeviceBuffer::from_slice(&[1u8, 0, 1, 0, 1]).expect("flags upload");
+        let selected = DeviceBuffer::<u32>::new(select_input.len()).expect("select output");
+        let selected_count = DeviceBuffer::<u32>::new(1).expect("select count");
+        rocprim
+            .select_flagged_u32(&select_input, &flags, &selected, &selected_count)
+            .expect("rocPRIM flagged select should work");
+        assert_eq!(
+            selected_count.copy_to_vec().expect("select count download"),
+            [3]
+        );
+        assert_eq!(
+            &selected.copy_to_vec().expect("select download")[..3],
+            [10, 30, 50]
+        );
+
+        let transform_output =
+            DeviceBuffer::<u32>::new(select_input.len()).expect("transform output");
+        rocprim
+            .transform_add_u32(&select_input, &transform_output, 7)
+            .expect("rocPRIM transform should work");
+        assert_eq!(
+            transform_output.copy_to_vec().expect("transform download"),
+            [17, 27, 37, 47, 57]
         );
     }
 

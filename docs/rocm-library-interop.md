@@ -32,9 +32,9 @@ plan wrapper for in-place interleaved complex `f32` buffers.
 ## rocPRIM / hipCUB
 
 `RocPrim::open()` checks whether the build-time shim was compiled with
-`rocprim/rocprim.hpp` and `hipcub/hipcub.hpp` available. The first safe wrappers
-cover `u32` sum reduction, inclusive sum scan, and exclusive sum scan over
-`DeviceBuffer`.
+`rocprim/rocprim.hpp` and `hipcub/hipcub.hpp` available. The safe wrappers now
+cover `u32`, `i32`, and `f32` sum reductions and prefix scans, plus `u32` radix
+sort, flagged select, and transform-add over `DeviceBuffer`.
 
 The async methods accept a `DeviceAlgorithmTemporaryStorage` value so callers can
 keep rocPRIM temporary storage alive until the stream reaches the operation. The

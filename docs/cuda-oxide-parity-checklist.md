@@ -39,6 +39,8 @@ Primary upstream reference:
 - [x] HIP VMM-backed device virtual memory reserve/map/access wrapper.
 - [x] rocPRIM/hipCUB-backed `u32` sum reduction plus inclusive/exclusive scan
       wrappers over `DeviceBuffer`.
+- [x] rocPRIM/hipCUB wrappers for signed/float sum reductions and scans, `u32`
+      radix sort, flagged select, and transform-add over `DeviceBuffer`.
 - [x] Matrix integration candidate reporting for hipBLASLt, Composable Kernel,
       and rocWMMA, plus hipBLASLt handle/version loading.
 - [x] HIPRTC specialization cache keyed by backend, architecture, source,

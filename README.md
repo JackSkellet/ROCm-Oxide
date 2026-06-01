@@ -249,8 +249,9 @@ execution ergonomics on ROCm:
   reuse toggles, stats, trimming, and `DeviceBuffer::new_from_pool_async`
 - owned HIP memory pools with access-policy controls, plus
   `DeviceVirtualMemory` for device-local HIP VMM reserve/map/access lifetimes
-- rocPRIM/hipCUB-backed `RocPrim` wrappers for `u32` sum reduction plus
-  inclusive/exclusive prefix scans over `DeviceBuffer`
+- rocPRIM/hipCUB-backed `RocPrim` wrappers for `u32`/`i32`/`f32` sum reduction
+  and prefix scans, plus `u32` radix sort, flagged select, and transform-add
+  over `DeviceBuffer`
 - matrix integration candidate reporting for hipBLASLt, Composable Kernel, and
   rocWMMA, plus hipBLASLt handle/version loading
 - HIPRTC runtime compilation through a process-wide specialization cache, plus
@@ -551,10 +552,10 @@ This roadmap is grounded in the validated probe targets:
   to compile HIP source to a relocatable, link it into an executable code
   object, and cache it persistently. Next is extending the same backend shape to
   ROCm library/device-object interop where HIPRTC is too narrow.
-- Library parity: extend rocPRIM/hipCUB beyond `u32` reduce/scan into sort,
-  select, transform, and typed temporary-storage plans. Promote hipBLASLt or
-  Composable Kernel from availability checks into first checked matmul
-  descriptors and heuristics.
+- Library parity: rocPRIM/hipCUB now covers `u32`/`i32`/`f32` sum
+  reduce/scans, `u32` radix sort, flagged select, and transform-add over
+  `DeviceBuffer`. Promote hipBLASLt or Composable Kernel from availability
+  checks into first checked matmul descriptors and heuristics.
 - CUDA-only advanced hardware mapping: keep TMA, WGMMA, DSMEM clusters, and
   nvJitLink/LTOIR as source-level rewrite targets. Use stream-ordered copies
   plus LDS staging for TMA-like flows, rocWMMA/hipBLASLt/Composable Kernel for
