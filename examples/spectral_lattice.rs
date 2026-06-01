@@ -17,6 +17,7 @@ const BLOCK_X: u32 = 256;
 const DEFAULT_OUTPUT: &str = "target/spectral_lattice.png";
 const MODES: [&str; 4] = ["Core", "LDS", "Atomic", "Chain"];
 const FPS_LIMITS: [usize; 7] = [30, 60, 90, 120, 144, 240, 0];
+const PRESENT_SCALES: [usize; 3] = [1, 2, 4];
 const GPU_WORK_PRESETS: [usize; 11] = [1, 2, 4, 8, 16, 32, 64, 128, 256, 512, 1024];
 const DEFAULT_GPU_WORK: usize = 64;
 const RESOLUTION_PRESETS: [ResolutionPreset; 5] = [
@@ -34,6 +35,7 @@ struct DemoArgs {
     size: RenderSize,
     fps_limit: usize,
     gpu_work: usize,
+    present_scale: usize,
 }
 
 struct PaletteSeed {
@@ -61,6 +63,7 @@ struct DemoState {
     frame_ms: f64,
     fps_limit: usize,
     gpu_work: usize,
+    present_scale: usize,
     render_size: RenderSize,
     save_requested: bool,
 }
@@ -170,6 +173,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         frame_ms: 0.0,
         fps_limit: args.fps_limit,
         gpu_work: args.gpu_work,
+        present_scale: args.present_scale,
         render_size: args.size,
         save_requested: false,
     };
@@ -203,13 +207,14 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         return Ok(());
     }
 
-    let mut window = create_window(buffers.size, state.fps_limit)?;
+    let mut window = create_window(buffers.size, state.fps_limit, state.present_scale)?;
 
     let start = Instant::now();
     let mut last_fps = Instant::now();
     let mut frames_since_fps = 0u32;
     let mut mouse_was_down = false;
     let mut applied_fps_limit = state.fps_limit;
+    let mut applied_present_scale = state.present_scale;
     while window.is_open() && !window.is_key_down(Key::Escape) {
         let frame_start = Instant::now();
         handle_keyboard(&window, &mut state, &kernels, &buffers.short);
@@ -225,9 +230,15 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             buffers = DemoBuffers::new(state.render_size)?;
             host_frame = PinnedHostBuffer::<u32>::new_zeroed(buffers.size.pixel_count())?;
             resources = ResourceSnapshot::new(&device, &kernels, buffers.size.pixel_count())?;
-            window = create_window(buffers.size, state.fps_limit)?;
+            window = create_window(buffers.size, state.fps_limit, state.present_scale)?;
             applied_fps_limit = state.fps_limit;
-            state.status = format!("resolution set to {}", buffers.size.label());
+            applied_present_scale = state.present_scale;
+            state.status = format!("resolution set to {}", display_label(&state));
+        } else if state.present_scale != applied_present_scale {
+            window = create_window(buffers.size, state.fps_limit, state.present_scale)?;
+            applied_fps_limit = state.fps_limit;
+            applied_present_scale = state.present_scale;
+            state.status = format!("present scale set to {}x", state.present_scale);
         } else if state.fps_limit != applied_fps_limit {
             window.set_target_fps(state.fps_limit);
             applied_fps_limit = state.fps_limit;
@@ -271,7 +282,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             last_fps = Instant::now();
             window.set_title(&format!(
                 "ROCm-Oxide Spectral Lattice | {} | {:.1} FPS | {:.1} ms frame | limit {} | {}",
-                buffers.size.label(),
+                display_label(&state),
                 state.fps,
                 state.frame_ms,
                 fps_label(state.fps_limit),
@@ -283,14 +294,18 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     Ok(())
 }
 
-fn create_window(size: RenderSize, fps_limit: usize) -> Result<Window, Box<dyn std::error::Error>> {
+fn create_window(
+    size: RenderSize,
+    fps_limit: usize,
+    present_scale: usize,
+) -> Result<Window, Box<dyn std::error::Error>> {
     let mut window = Window::new(
         "ROCm-Oxide Spectral Lattice",
         size.width,
         size.height,
         WindowOptions {
             resize: true,
-            scale: Scale::X1,
+            scale: minifb_scale(present_scale),
             ..WindowOptions::default()
         },
     )?;
@@ -511,6 +526,7 @@ fn handle_keyboard(
             Key::Equal => step_fps_limit(state, 1),
             Key::Comma => cycle_resolution(state, -1),
             Key::Period => cycle_resolution(state, 1),
+            Key::M => cycle_present_scale(state),
             Key::LeftBracket => step_gpu_work(state, -1),
             Key::RightBracket => step_gpu_work(state, 1),
             Key::Space => state.paused = !state.paused,
@@ -633,6 +649,16 @@ fn resolution_preset_index(size: RenderSize) -> Option<usize> {
     RESOLUTION_PRESETS
         .iter()
         .position(|preset| preset.size == size)
+}
+
+fn cycle_present_scale(state: &mut DemoState) {
+    let current = PRESENT_SCALES
+        .iter()
+        .position(|scale| *scale == state.present_scale)
+        .unwrap_or(0);
+    let next = (current + 1) % PRESENT_SCALES.len();
+    state.present_scale = PRESENT_SCALES[next];
+    state.status = format!("present scale set to {}x", state.present_scale);
 }
 
 fn set_fps_limit_from_slider(state: &mut DemoState, x: usize) {
@@ -932,7 +958,7 @@ fn draw_overlay(
         size,
         scale,
         scale_rect(button_rect(5), scale),
-        &format!("Res {}", state.render_size.label()),
+        &format!("Res {}", display_label(state)),
         0x34485f,
         false,
     );
@@ -1314,6 +1340,7 @@ fn parse_args() -> Result<DemoArgs, Box<dyn std::error::Error>> {
     let mut size = RESOLUTION_PRESETS[0].size;
     let mut fps_limit = 60usize;
     let mut gpu_work = DEFAULT_GPU_WORK;
+    let mut present_scale = 1usize;
     let mut args = std::env::args().skip(1);
     while let Some(arg) = args.next() {
         match arg.as_str() {
@@ -1353,9 +1380,15 @@ fn parse_args() -> Result<DemoArgs, Box<dyn std::error::Error>> {
                     .ok_or_else(|| "--gpu-work requires an iteration count".to_string())?;
                 gpu_work = parse_gpu_work(&value)?;
             }
+            "--present-scale" | "--scale" => {
+                let value = args
+                    .next()
+                    .ok_or_else(|| "--present-scale requires 1, 2, or 4".to_string())?;
+                present_scale = parse_present_scale(&value)?;
+            }
             "--help" | "-h" => {
                 println!(
-                    "Usage: cargo run --example spectral_lattice -- [--frames N] [--mode MODE] [--resolution 4k|WIDTHxHEIGHT] [--fps-limit FPS|uncapped] [--gpu-work ITERATIONS] [--output PATH]"
+                    "Usage: cargo run --example spectral_lattice -- [--frames N] [--mode MODE] [--resolution 4k|WIDTHxHEIGHT] [--present-scale 1|2|4] [--fps-limit FPS|uncapped] [--gpu-work ITERATIONS] [--output PATH]"
                 );
                 std::process::exit(0);
             }
@@ -1369,6 +1402,7 @@ fn parse_args() -> Result<DemoArgs, Box<dyn std::error::Error>> {
         size,
         fps_limit,
         gpu_work,
+        present_scale,
     })
 }
 
@@ -1455,6 +1489,35 @@ fn parse_gpu_work(value: &str) -> Result<usize, Box<dyn std::error::Error>> {
         .into());
     }
     Ok(iterations)
+}
+
+fn parse_present_scale(value: &str) -> Result<usize, Box<dyn std::error::Error>> {
+    let scale = value
+        .strip_suffix('x')
+        .or_else(|| value.strip_suffix('X'))
+        .unwrap_or(value)
+        .parse::<usize>()?;
+    if PRESENT_SCALES.contains(&scale) {
+        Ok(scale)
+    } else {
+        Err(format!("present scale {scale} is outside supported values 1, 2, or 4").into())
+    }
+}
+
+fn minifb_scale(scale: usize) -> Scale {
+    match scale {
+        2 => Scale::X2,
+        4 => Scale::X4,
+        _ => Scale::X1,
+    }
+}
+
+fn display_label(state: &DemoState) -> String {
+    if state.present_scale == 1 {
+        state.render_size.label()
+    } else {
+        format!("{} x{}", state.render_size.label(), state.present_scale)
+    }
 }
 
 fn blend_rect(

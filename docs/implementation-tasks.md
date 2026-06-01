@@ -139,6 +139,7 @@ Local probes:
   - [x] expose first rocFFT setup/plan/execute wrappers for in-place complex `f32` buffers
 - [ ] ROCm Compute Profiler integration for achieved occupancy and memory behavior.
 - [ ] GPU-native presentation path for `spectral_lattice`:
+  - [x] add a scaled minifb presentation mode so `720p` can present as a 1440p-sized window and `1080p` can present as a 4K-sized window without native-resolution readback
   - [ ] replace the live `minifb` CPU framebuffer path with Vulkan/OpenGL texture presentation or ROCm graphics interop
   - [ ] avoid full-frame VRAM-to-host readback every frame for 1440p and 4K interactive runs
   - [ ] keep the existing CPU readback path for headless PNG export and simple compatibility smoke tests

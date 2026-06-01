@@ -65,6 +65,7 @@ cargo run --example spectral_lattice
 cargo run --example spectral_lattice -- --frames 3
 cargo run --example spectral_lattice -- --frames 3 --mode atomic
 cargo run --example spectral_lattice -- --frames 1 --resolution 4k --fps-limit 120 --gpu-work 256
+cargo run --example spectral_lattice -- --resolution 720p --present-scale 2 --fps-limit uncapped
 ```
 
 `spectral_lattice` is an interactive visual workbench with clickable mode tabs
@@ -80,7 +81,10 @@ The live GUI currently presents through a CPU framebuffer, so high-resolution
 interactive FPS can be limited by full-frame VRAM-to-host readback and the
 windowing copy rather than by kernel throughput. The local `gfx1100` workstation
 is especially sensitive to this because the RX 7900 XT path negotiates an
-upstream `8GT/s x4` PCIe link.
+upstream `8GT/s x4` PCIe link. Use `--present-scale 2` or press `M` in the
+live demo to keep the render buffer smaller while presenting a larger window;
+for example, `--resolution 720p --present-scale 2` opens a 1440p-sized window
+with one quarter of the native 1440p readback traffic.
 
 The root [build.rs](/home/kjwtil/Documents/ROCm-Oxide/build.rs)
 generates device artifacts before the host crate compiles. It exposes these
