@@ -253,9 +253,10 @@ execution ergonomics on ROCm:
   inclusive/exclusive prefix scans over `DeviceBuffer`
 - matrix integration candidate reporting for hipBLASLt, Composable Kernel, and
   rocWMMA, plus hipBLASLt handle/version loading
-- HIPRTC runtime compilation through a process-wide specialization cache keyed
-  by backend, architecture, source, options, and launch metadata, with COMGR
-  availability probing for a future COMGR compiler backend
+- HIPRTC runtime compilation through a process-wide specialization cache, plus
+  an explicit COMGR HIP source compile/link backend with a persistent
+  code-object cache keyed by backend, architecture, source, options, and launch
+  metadata
 - `Device::properties`, `Device::all`, and peer-access probes for
   multi-device/host-memory launch validation
 - fallible allocation-size and copy-length validation instead of panics
@@ -546,8 +547,9 @@ This roadmap is grounded in the validated probe targets:
   and breakpoint entry points are live. rocTX host profiler markers/ranges and
   HIP clock-rate metadata are live; GPU printf and selectable device clock
   counters remain documented ROCm/Rust-backend gaps until a stable path exists.
-- COMGR/code-object backend: turn the current COMGR availability probe into a
-  real compile/link path, then use it for persistent code-object caching and
+- COMGR/code-object backend: `Device::compile_hip_source_comgr` now uses COMGR
+  to compile HIP source to a relocatable, link it into an executable code
+  object, and cache it persistently. Next is extending the same backend shape to
   ROCm library/device-object interop where HIPRTC is too narrow.
 - Library parity: extend rocPRIM/hipCUB beyond `u32` reduce/scan into sort,
   select, transform, and typed temporary-storage plans. Promote hipBLASLt or

@@ -42,8 +42,9 @@ Primary upstream reference:
 - [x] Matrix integration candidate reporting for hipBLASLt, Composable Kernel,
       and rocWMMA, plus hipBLASLt handle/version loading.
 - [x] HIPRTC specialization cache keyed by backend, architecture, source,
-      options, and launch metadata, with COMGR availability probing for a future
-      code-object compiler backend.
+      options, and launch metadata.
+- [x] COMGR HIP source compile/link backend with a persistent code-object cache
+      path keyed by backend, architecture, source, options, and launch metadata.
 - [x] Lazy host-side `DeviceOperation` model.
 - [x] Stream-pool operation scheduling.
 - [x] Generated kernel bindings can return lazy `DeviceOperation` launch jobs.
@@ -119,7 +120,7 @@ Primary upstream reference:
   - [x] cross-crate kernel discovery and bundling
   - [x] cargo subcommand and pipeline inspection equivalents
   - [x] AMDGPU LLVM IR to `.hsaco` code-object path
-  - [ ] COMGR compile/link backend for persistent code-object caching
+  - [x] COMGR compile/link backend for persistent code-object caching
   - [ ] ROCm replacement for CUDA LTOIR/nvJitLink interop using AMD LLVM IR,
         HIP modules, and ROCm libraries
   - [ ] debug-info and debugger workflow equivalent for ROCgdb or ROCm-native

@@ -106,6 +106,38 @@ fn launch_scoped_atomics_raw(
     }
 }
 
+fn run_comgr_compile_smoke(device: &Device) -> Result<()> {
+    let source = format!("#include <hip/hip_runtime.h>\n{VECTOR_ADD_HIPRTC}");
+    let module = device.compile_hip_source_specialized_comgr(
+        &source,
+        &["-DROCM_OXIDE_COMGR_SMOKE=1"],
+        "vector_add:backend=comgr;block=64;items=4",
+    )?;
+    let kernel = module.kernel(c"vector_add")?;
+    let a = DeviceBuffer::from_slice(&[1.0f32, 2.0, 3.0, 4.0])?;
+    let b = DeviceBuffer::from_slice(&[0.5f32, 1.5, 2.5, 3.5])?;
+    let out = DeviceBuffer::<f32>::new(4)?;
+    let mut out_ptr = out.as_mut_ptr();
+    let mut a_ptr = a.as_ptr();
+    let mut b_ptr = b.as_ptr();
+    let mut n_arg = 4u64;
+    let mut params = [
+        rocm_oxide::__private::arg_ptr(&mut out_ptr),
+        rocm_oxide::__private::arg_ptr(&mut a_ptr),
+        rocm_oxide::__private::arg_ptr(&mut b_ptr),
+        rocm_oxide::__private::arg_ptr(&mut n_arg),
+    ];
+    unsafe {
+        kernel.launch_raw(
+            LaunchConfig::for_num_elems_with_block_size(4, 64),
+            &mut params,
+        )?;
+    }
+    rocm_oxide::hip::synchronize()?;
+    assert_eq!(out.copy_to_vec()?, [1.5, 3.5, 5.5, 7.5]);
+    Ok(())
+}
+
 fn main() -> Result<()> {
     let device = Device::first()?;
     let kernels = generated::DeviceKernels::load_embedded(&device)?;
@@ -166,6 +198,10 @@ fn main() -> Result<()> {
             );
         }
         Err(err) => println!("skip: COMGR compiler backend library smoke: {err}"),
+    }
+    match run_comgr_compile_smoke(&device) {
+        Ok(()) => println!("ok: COMGR compile/link backend produced and cached a HIP code object"),
+        Err(err) => println!("skip: COMGR compile/link backend smoke: {err}"),
     }
     match RocTx::open() {
         Ok(roctx) => {

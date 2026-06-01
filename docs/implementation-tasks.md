@@ -65,7 +65,7 @@ features on top of stronger contracts.
           markers and ranges, HIP clock-rate metadata, and documented ROCm
           limits for GPU printf plus selectable device clock counters
   - [ ] ROCm-native interop/backends:
-    - [ ] turn COMGR probing into a real compile/link backend and persistent
+    - [x] turn COMGR probing into a real compile/link backend and persistent
           code-object cache path
     - [ ] define the ROCm replacement for NVIDIA LTOIR/nvJitLink interop using
           AMD LLVM IR, code objects, HIP modules, and ROCm libraries

@@ -1,6 +1,8 @@
 use std::collections::HashMap;
 use std::ffi::{CStr, CString, c_char, c_int};
 use std::fmt;
+use std::fs;
+use std::path::PathBuf;
 use std::ptr;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex, OnceLock};
@@ -128,6 +130,26 @@ impl SpecializationCacheKey {
             source_hash: stable_hash(source.as_bytes()),
             options_hash: stable_hash_strings(options.iter().map(String::as_str)),
             launch_metadata_hash: stable_hash(launch_metadata.as_bytes()),
+        }
+    }
+
+    pub fn persistent_filename(&self) -> String {
+        format!(
+            "{}-{}-{:016x}-{:016x}-{:016x}.hsaco",
+            self.backend.as_str(),
+            sanitize_cache_component(&self.arch),
+            self.source_hash,
+            self.options_hash,
+            self.launch_metadata_hash
+        )
+    }
+}
+
+impl SpecializationBackend {
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Hiprtc => "hiprtc",
+            Self::Comgr => "comgr",
         }
     }
 }
@@ -280,6 +302,10 @@ pub fn compile_code_object_cached(source: &str, arch: &str) -> Result<Arc<Vec<u8
     compile_code_object_cached_with_metadata(source, arch, &[], "")
 }
 
+pub fn compile_code_object_cached_comgr(source: &str, arch: &str) -> Result<Arc<Vec<u8>>> {
+    compile_code_object_cached_comgr_with_metadata(source, arch, &[], "")
+}
+
 pub fn compile_code_object_cached_with_metadata(
     source: &str,
     arch: &str,
@@ -290,6 +316,27 @@ pub fn compile_code_object_cached_with_metadata(
     let key = SpecializationCacheKey::new(source, arch, &options, launch_metadata);
     global_specialization_cache().get_or_compile(key, || {
         compile_code_object_with_resolved_options(source, &options)
+    })
+}
+
+pub fn compile_code_object_cached_comgr_with_metadata(
+    source: &str,
+    arch: &str,
+    extra_options: &[&str],
+    launch_metadata: &str,
+) -> Result<Arc<Vec<u8>>> {
+    let options = comgr_compile_options(extra_options);
+    let key = SpecializationCacheKey::with_backend(
+        SpecializationBackend::Comgr,
+        source,
+        arch,
+        &options,
+        launch_metadata,
+    );
+    global_specialization_cache().get_or_compile(key.clone(), || {
+        persistent_code_object_cache_get_or_compile(&key, || {
+            compile_code_object_comgr_with_resolved_options(source, arch, &options)
+        })
     })
 }
 
@@ -316,6 +363,26 @@ fn compile_options(arch: &str, extra_options: &[&str]) -> Vec<String> {
     options
 }
 
+fn comgr_compile_options(extra_options: &[&str]) -> Vec<String> {
+    let mut options = vec![
+        "-x".to_string(),
+        "hip".to_string(),
+        "-std=c++17".to_string(),
+        "-O3".to_string(),
+        "-Wno-macro-redefined".to_string(),
+        format!("-I{}", rocm_path().join("include").display()),
+    ];
+    options.extend(extra_options.iter().map(|option| (*option).to_string()));
+    options
+}
+
+fn rocm_path() -> PathBuf {
+    std::env::var_os("ROCM_PATH")
+        .filter(|value| !value.is_empty())
+        .map(PathBuf::from)
+        .unwrap_or_else(|| PathBuf::from("/opt/rocm"))
+}
+
 fn compile_code_object_with_resolved_options(source: &str, options: &[String]) -> Result<Vec<u8>> {
     let source = CString::new(source)
         .map_err(|_| Error::invalid_input("kernel source contained a NUL byte"))?;
@@ -331,6 +398,68 @@ fn compile_code_object_with_resolved_options(source: &str, options: &[String]) -
         .collect::<Result<Vec<_>>>()?;
     program.compile(&options)?;
     program.code()
+}
+
+fn compile_code_object_comgr_with_resolved_options(
+    source: &str,
+    arch: &str,
+    options: &[String],
+) -> Result<Vec<u8>> {
+    let comgr = crate::libraries::Comgr::open()
+        .map_err(|err| Error::invalid_input(format!("COMGR backend unavailable: {err}")))?;
+    comgr
+        .compile_hip_source_to_code_object_with_options(source, arch, options)
+        .map_err(|err| Error::invalid_input(format!("COMGR backend failed: {err}")))
+}
+
+fn persistent_code_object_cache_get_or_compile<F>(
+    key: &SpecializationCacheKey,
+    compile: F,
+) -> Result<Vec<u8>>
+where
+    F: FnOnce() -> Result<Vec<u8>>,
+{
+    let path = persistent_code_object_cache_path(key);
+    if let Ok(bytes) = fs::read(&path) {
+        if bytes.starts_with(b"\x7fELF") {
+            return Ok(bytes);
+        }
+    }
+
+    let bytes = compile()?;
+    if let Some(parent) = path.parent() {
+        if fs::create_dir_all(parent).is_ok() {
+            let temp_path = path.with_extension("tmp");
+            if fs::write(&temp_path, &bytes).is_ok() {
+                let _ = fs::rename(temp_path, path);
+            }
+        }
+    }
+    Ok(bytes)
+}
+
+pub fn persistent_code_object_cache_path(key: &SpecializationCacheKey) -> PathBuf {
+    persistent_code_object_cache_dir().join(key.persistent_filename())
+}
+
+pub fn persistent_code_object_cache_dir() -> PathBuf {
+    if let Some(path) =
+        std::env::var_os("ROCM_OXIDE_CODE_OBJECT_CACHE_DIR").filter(|value| !value.is_empty())
+    {
+        return PathBuf::from(path);
+    }
+    if let Some(path) = std::env::var_os("XDG_CACHE_HOME").filter(|value| !value.is_empty()) {
+        return PathBuf::from(path).join("rocm-oxide").join("code-objects");
+    }
+    if let Some(home) = std::env::var_os("HOME").filter(|value| !value.is_empty()) {
+        return PathBuf::from(home)
+            .join(".cache")
+            .join("rocm-oxide")
+            .join("code-objects");
+    }
+    PathBuf::from("target")
+        .join("rocm-oxide-cache")
+        .join("code-objects")
 }
 
 fn stable_hash(bytes: &[u8]) -> u64 {
@@ -358,9 +487,25 @@ fn stable_hash_strings<'a>(strings: impl Iterator<Item = &'a str>) -> u64 {
     hash
 }
 
+fn sanitize_cache_component(value: &str) -> String {
+    value
+        .chars()
+        .map(|ch| {
+            if ch.is_ascii_alphanumeric() || matches!(ch, '-' | '_' | '.') {
+                ch
+            } else {
+                '_'
+            }
+        })
+        .collect()
+}
+
 #[cfg(test)]
 mod tests {
-    use super::{SpecializationBackend, SpecializationCache, SpecializationCacheKey};
+    use super::{
+        SpecializationBackend, SpecializationCache, SpecializationCacheKey,
+        persistent_code_object_cache_path,
+    };
     use std::sync::Arc;
 
     #[test]
@@ -393,6 +538,25 @@ mod tests {
             "meta",
         );
         assert_ne!(hiprtc, comgr);
+    }
+
+    #[test]
+    fn persistent_cache_path_separates_backend_and_arch() {
+        let options = vec!["-O3".to_string()];
+        let key = SpecializationCacheKey::with_backend(
+            SpecializationBackend::Comgr,
+            "source",
+            "amdgcn-amd-amdhsa--gfx1201",
+            &options,
+            "meta",
+        );
+        let path = persistent_code_object_cache_path(&key);
+        let filename = path
+            .file_name()
+            .expect("cache path should include a filename")
+            .to_string_lossy();
+        assert!(filename.starts_with("comgr-amdgcn-amd-amdhsa--gfx1201-"));
+        assert!(filename.ends_with(".hsaco"));
     }
 
     #[test]

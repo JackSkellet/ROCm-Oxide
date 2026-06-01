@@ -9,6 +9,15 @@ const ROCBLAS_STATUS_SUCCESS: c_int = 0;
 const ROCBLAS_OPERATION_NONE: c_int = 111;
 const ROCFFT_STATUS_SUCCESS: c_int = 0;
 const HIPBLAS_STATUS_SUCCESS: c_int = 0;
+const AMD_COMGR_STATUS_SUCCESS: c_int = 0;
+const AMD_COMGR_LANGUAGE_HIP: c_int = 0x3;
+const AMD_COMGR_DATA_KIND_SOURCE: c_int = 0x1;
+const AMD_COMGR_DATA_KIND_DIAGNOSTIC: c_int = 0x4;
+const AMD_COMGR_DATA_KIND_LOG: c_int = 0x5;
+const AMD_COMGR_DATA_KIND_RELOCATABLE: c_int = 0x7;
+const AMD_COMGR_DATA_KIND_EXECUTABLE: c_int = 0x8;
+const AMD_COMGR_ACTION_LINK_RELOCATABLE_TO_EXECUTABLE: c_int = 0x7;
+const AMD_COMGR_ACTION_COMPILE_SOURCE_TO_RELOCATABLE: c_int = 0xD;
 const ROCPRIM_SHIM_STATUS_UNAVAILABLE: c_int = 1_000_001;
 
 type RocBlasStatus = c_int;
@@ -68,7 +77,62 @@ type HipBlasLtCreate = unsafe extern "C" fn(*mut HipBlasLtHandleRaw) -> HipBlasL
 type HipBlasLtDestroy = unsafe extern "C" fn(HipBlasLtHandleRaw) -> HipBlasLtStatus;
 type HipBlasLtGetVersion = unsafe extern "C" fn(HipBlasLtHandleRaw, *mut c_int) -> HipBlasLtStatus;
 
+type AmdComgrStatus = c_int;
+type AmdComgrLanguage = c_int;
+type AmdComgrDataKind = c_int;
+type AmdComgrActionKind = c_int;
+#[repr(C)]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+struct AmdComgrData {
+    handle: u64,
+}
+#[repr(C)]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+struct AmdComgrDataSet {
+    handle: u64,
+}
+#[repr(C)]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+struct AmdComgrActionInfo {
+    handle: u64,
+}
+type AmdComgrStatusString =
+    unsafe extern "C" fn(AmdComgrStatus, *mut *const c_char) -> AmdComgrStatus;
 type AmdComgrGetVersion = unsafe extern "C" fn(*mut usize, *mut usize);
+type AmdComgrCreateData =
+    unsafe extern "C" fn(AmdComgrDataKind, *mut AmdComgrData) -> AmdComgrStatus;
+type AmdComgrReleaseData = unsafe extern "C" fn(AmdComgrData) -> AmdComgrStatus;
+type AmdComgrSetData = unsafe extern "C" fn(AmdComgrData, usize, *const c_char) -> AmdComgrStatus;
+type AmdComgrSetDataName = unsafe extern "C" fn(AmdComgrData, *const c_char) -> AmdComgrStatus;
+type AmdComgrGetData =
+    unsafe extern "C" fn(AmdComgrData, *mut usize, *mut c_char) -> AmdComgrStatus;
+type AmdComgrCreateDataSet = unsafe extern "C" fn(*mut AmdComgrDataSet) -> AmdComgrStatus;
+type AmdComgrDestroyDataSet = unsafe extern "C" fn(AmdComgrDataSet) -> AmdComgrStatus;
+type AmdComgrDataSetAdd = unsafe extern "C" fn(AmdComgrDataSet, AmdComgrData) -> AmdComgrStatus;
+type AmdComgrActionDataCount =
+    unsafe extern "C" fn(AmdComgrDataSet, AmdComgrDataKind, *mut usize) -> AmdComgrStatus;
+type AmdComgrActionDataGetData = unsafe extern "C" fn(
+    AmdComgrDataSet,
+    AmdComgrDataKind,
+    usize,
+    *mut AmdComgrData,
+) -> AmdComgrStatus;
+type AmdComgrCreateActionInfo = unsafe extern "C" fn(*mut AmdComgrActionInfo) -> AmdComgrStatus;
+type AmdComgrDestroyActionInfo = unsafe extern "C" fn(AmdComgrActionInfo) -> AmdComgrStatus;
+type AmdComgrActionInfoSetIsaName =
+    unsafe extern "C" fn(AmdComgrActionInfo, *const c_char) -> AmdComgrStatus;
+type AmdComgrActionInfoSetLanguage =
+    unsafe extern "C" fn(AmdComgrActionInfo, AmdComgrLanguage) -> AmdComgrStatus;
+type AmdComgrActionInfoSetOptionList =
+    unsafe extern "C" fn(AmdComgrActionInfo, *const *const c_char, usize) -> AmdComgrStatus;
+type AmdComgrActionInfoSetLogging =
+    unsafe extern "C" fn(AmdComgrActionInfo, bool) -> AmdComgrStatus;
+type AmdComgrDoAction = unsafe extern "C" fn(
+    AmdComgrActionKind,
+    AmdComgrActionInfo,
+    AmdComgrDataSet,
+    AmdComgrDataSet,
+) -> AmdComgrStatus;
 
 type RocPrimStatus = c_int;
 type RocPrimReduceSumU32 = unsafe extern "C" fn(
@@ -238,7 +302,40 @@ struct HipBlasLtFunctions {
 
 struct ComgrFunctions {
     _lib: Arc<DynamicLibrary>,
+    status_string: AmdComgrStatusString,
     get_version: AmdComgrGetVersion,
+    create_data: AmdComgrCreateData,
+    release_data: AmdComgrReleaseData,
+    set_data: AmdComgrSetData,
+    set_data_name: AmdComgrSetDataName,
+    get_data: AmdComgrGetData,
+    create_data_set: AmdComgrCreateDataSet,
+    destroy_data_set: AmdComgrDestroyDataSet,
+    data_set_add: AmdComgrDataSetAdd,
+    action_data_count: AmdComgrActionDataCount,
+    action_data_get_data: AmdComgrActionDataGetData,
+    create_action_info: AmdComgrCreateActionInfo,
+    destroy_action_info: AmdComgrDestroyActionInfo,
+    action_info_set_isa_name: AmdComgrActionInfoSetIsaName,
+    action_info_set_language: AmdComgrActionInfoSetLanguage,
+    action_info_set_option_list: AmdComgrActionInfoSetOptionList,
+    action_info_set_logging: AmdComgrActionInfoSetLogging,
+    do_action: AmdComgrDoAction,
+}
+
+struct ComgrData {
+    raw: AmdComgrData,
+    funcs: Arc<ComgrFunctions>,
+}
+
+struct ComgrDataSet {
+    raw: AmdComgrDataSet,
+    funcs: Arc<ComgrFunctions>,
+}
+
+struct ComgrActionInfo {
+    raw: AmdComgrActionInfo,
+    funcs: Arc<ComgrFunctions>,
 }
 
 struct RocFftSessionInner {
@@ -557,6 +654,343 @@ impl Comgr {
             (self.funcs.get_version)(&mut major, &mut minor);
         }
         ComgrVersion { major, minor }
+    }
+
+    pub fn compile_hip_source_to_code_object(
+        &self,
+        source: &str,
+        arch: &str,
+        extra_options: &[&str],
+    ) -> Result<Vec<u8>> {
+        let options = comgr_compile_options(extra_options);
+        self.compile_hip_source_to_code_object_with_options(source, arch, &options)
+    }
+
+    pub fn compile_hip_source_to_code_object_with_options(
+        &self,
+        source: &str,
+        arch: &str,
+        options: &[String],
+    ) -> Result<Vec<u8>> {
+        let source_data = ComgrData::new(Arc::clone(&self.funcs), AMD_COMGR_DATA_KIND_SOURCE)?;
+        source_data.set_name("kernel.hip")?;
+        source_data.set_data(source.as_bytes())?;
+
+        let source_input = ComgrDataSet::new(Arc::clone(&self.funcs))?;
+        source_input.add(&source_data)?;
+        let relocatable_output = ComgrDataSet::new(Arc::clone(&self.funcs))?;
+
+        let isa_name = comgr_isa_name(arch);
+        let compile_info = ComgrActionInfo::new(Arc::clone(&self.funcs))?;
+        compile_info.set_isa_name(&isa_name)?;
+        compile_info.set_language(AMD_COMGR_LANGUAGE_HIP)?;
+        compile_info.set_option_list(options)?;
+        compile_info.set_logging(true)?;
+
+        let compile_status = unsafe {
+            (self.funcs.do_action)(
+                AMD_COMGR_ACTION_COMPILE_SOURCE_TO_RELOCATABLE,
+                compile_info.raw,
+                source_input.raw,
+                relocatable_output.raw,
+            )
+        };
+        if compile_status != AMD_COMGR_STATUS_SUCCESS {
+            let logs = relocatable_output.diagnostics_and_logs();
+            let mut message = format!(
+                "COMGR compile HIP source to relocatable failed: {}",
+                self.funcs.status_message(compile_status)
+            );
+            if !logs.trim().is_empty() {
+                message.push('\n');
+                message.push_str(logs.trim());
+            }
+            return Err(Error::Library(message));
+        }
+        if relocatable_output.count(AMD_COMGR_DATA_KIND_RELOCATABLE)? == 0 {
+            return Err(Error::Library(
+                "COMGR compile produced no relocatable code object".to_string(),
+            ));
+        }
+
+        let link_info = ComgrActionInfo::new(Arc::clone(&self.funcs))?;
+        link_info.set_isa_name(&isa_name)?;
+        link_info.set_logging(true)?;
+        let executable_output = ComgrDataSet::new(Arc::clone(&self.funcs))?;
+        let link_status = unsafe {
+            (self.funcs.do_action)(
+                AMD_COMGR_ACTION_LINK_RELOCATABLE_TO_EXECUTABLE,
+                link_info.raw,
+                relocatable_output.raw,
+                executable_output.raw,
+            )
+        };
+        if link_status != AMD_COMGR_STATUS_SUCCESS {
+            let logs = executable_output.diagnostics_and_logs();
+            let mut message = format!(
+                "COMGR link relocatable to executable failed: {}",
+                self.funcs.status_message(link_status)
+            );
+            if !logs.trim().is_empty() {
+                message.push('\n');
+                message.push_str(logs.trim());
+            }
+            return Err(Error::Library(message));
+        }
+
+        executable_output.first_data_bytes(AMD_COMGR_DATA_KIND_EXECUTABLE)
+    }
+}
+
+impl ComgrData {
+    fn new(funcs: Arc<ComgrFunctions>, kind: AmdComgrDataKind) -> Result<Self> {
+        let mut raw = AmdComgrData::default();
+        unsafe {
+            check_comgr(
+                &funcs,
+                (funcs.create_data)(kind, &mut raw),
+                "amd_comgr_create_data",
+            )?;
+        }
+        Ok(Self { raw, funcs })
+    }
+
+    fn set_name(&self, name: &str) -> Result<()> {
+        let name = CString::new(name)
+            .map_err(|_| Error::Library("COMGR data name contains a NUL byte".to_string()))?;
+        unsafe {
+            check_comgr(
+                &self.funcs,
+                (self.funcs.set_data_name)(self.raw, name.as_ptr()),
+                "amd_comgr_set_data_name",
+            )
+        }
+    }
+
+    fn set_data(&self, bytes: &[u8]) -> Result<()> {
+        unsafe {
+            check_comgr(
+                &self.funcs,
+                (self.funcs.set_data)(self.raw, bytes.len(), bytes.as_ptr().cast::<c_char>()),
+                "amd_comgr_set_data",
+            )
+        }
+    }
+
+    fn bytes(&self) -> Result<Vec<u8>> {
+        let mut size = 0usize;
+        unsafe {
+            check_comgr(
+                &self.funcs,
+                (self.funcs.get_data)(self.raw, &mut size, ptr::null_mut()),
+                "amd_comgr_get_data size",
+            )?;
+            let mut bytes = vec![0u8; size];
+            check_comgr(
+                &self.funcs,
+                (self.funcs.get_data)(self.raw, &mut size, bytes.as_mut_ptr().cast::<c_char>()),
+                "amd_comgr_get_data",
+            )?;
+            bytes.truncate(size);
+            Ok(bytes)
+        }
+    }
+
+    fn text_lossy(&self) -> String {
+        match self.bytes() {
+            Ok(bytes) => String::from_utf8_lossy(&bytes)
+                .trim_end_matches('\0')
+                .to_string(),
+            Err(err) => format!("<failed to read COMGR output: {err}>"),
+        }
+    }
+}
+
+impl Drop for ComgrData {
+    fn drop(&mut self) {
+        if self.raw.handle != 0 {
+            unsafe {
+                let _ = (self.funcs.release_data)(self.raw);
+            }
+            self.raw.handle = 0;
+        }
+    }
+}
+
+impl ComgrDataSet {
+    fn new(funcs: Arc<ComgrFunctions>) -> Result<Self> {
+        let mut raw = AmdComgrDataSet::default();
+        unsafe {
+            check_comgr(
+                &funcs,
+                (funcs.create_data_set)(&mut raw),
+                "amd_comgr_create_data_set",
+            )?;
+        }
+        Ok(Self { raw, funcs })
+    }
+
+    fn add(&self, data: &ComgrData) -> Result<()> {
+        unsafe {
+            check_comgr(
+                &self.funcs,
+                (self.funcs.data_set_add)(self.raw, data.raw),
+                "amd_comgr_data_set_add",
+            )
+        }
+    }
+
+    fn count(&self, kind: AmdComgrDataKind) -> Result<usize> {
+        let mut count = 0usize;
+        unsafe {
+            check_comgr(
+                &self.funcs,
+                (self.funcs.action_data_count)(self.raw, kind, &mut count),
+                "amd_comgr_action_data_count",
+            )?;
+        }
+        Ok(count)
+    }
+
+    fn get(&self, kind: AmdComgrDataKind, index: usize) -> Result<ComgrData> {
+        let mut raw = AmdComgrData::default();
+        unsafe {
+            check_comgr(
+                &self.funcs,
+                (self.funcs.action_data_get_data)(self.raw, kind, index, &mut raw),
+                "amd_comgr_action_data_get_data",
+            )?;
+        }
+        Ok(ComgrData {
+            raw,
+            funcs: Arc::clone(&self.funcs),
+        })
+    }
+
+    fn first_data_bytes(&self, kind: AmdComgrDataKind) -> Result<Vec<u8>> {
+        let count = self.count(kind)?;
+        if count == 0 {
+            let logs = self.diagnostics_and_logs();
+            let mut message = "COMGR action produced no executable code object".to_string();
+            if !logs.trim().is_empty() {
+                message.push('\n');
+                message.push_str(logs.trim());
+            }
+            return Err(Error::Library(message));
+        }
+        self.get(kind, 0)?.bytes()
+    }
+
+    fn diagnostics_and_logs(&self) -> String {
+        let mut parts = Vec::new();
+        for kind in [AMD_COMGR_DATA_KIND_LOG, AMD_COMGR_DATA_KIND_DIAGNOSTIC] {
+            let Ok(count) = self.count(kind) else {
+                continue;
+            };
+            for index in 0..count {
+                if let Ok(data) = self.get(kind, index) {
+                    let text = data.text_lossy();
+                    if !text.trim().is_empty() {
+                        parts.push(text);
+                    }
+                }
+            }
+        }
+        parts.join("\n")
+    }
+}
+
+impl Drop for ComgrDataSet {
+    fn drop(&mut self) {
+        if self.raw.handle != 0 {
+            unsafe {
+                let _ = (self.funcs.destroy_data_set)(self.raw);
+            }
+            self.raw.handle = 0;
+        }
+    }
+}
+
+impl ComgrActionInfo {
+    fn new(funcs: Arc<ComgrFunctions>) -> Result<Self> {
+        let mut raw = AmdComgrActionInfo::default();
+        unsafe {
+            check_comgr(
+                &funcs,
+                (funcs.create_action_info)(&mut raw),
+                "amd_comgr_create_action_info",
+            )?;
+        }
+        Ok(Self { raw, funcs })
+    }
+
+    fn set_isa_name(&self, isa_name: &str) -> Result<()> {
+        let isa_name = CString::new(isa_name)
+            .map_err(|_| Error::Library("COMGR ISA name contains a NUL byte".to_string()))?;
+        unsafe {
+            check_comgr(
+                &self.funcs,
+                (self.funcs.action_info_set_isa_name)(self.raw, isa_name.as_ptr()),
+                "amd_comgr_action_info_set_isa_name",
+            )
+        }
+    }
+
+    fn set_language(&self, language: AmdComgrLanguage) -> Result<()> {
+        unsafe {
+            check_comgr(
+                &self.funcs,
+                (self.funcs.action_info_set_language)(self.raw, language),
+                "amd_comgr_action_info_set_language",
+            )
+        }
+    }
+
+    fn set_option_list(&self, options: &[String]) -> Result<()> {
+        let options = options
+            .iter()
+            .map(|option| {
+                CString::new(option.as_str()).map_err(|_| {
+                    Error::Library(format!("COMGR option `{option}` contains a NUL byte"))
+                })
+            })
+            .collect::<Result<Vec<_>>>()?;
+        let option_ptrs = options
+            .iter()
+            .map(|option| option.as_ptr())
+            .collect::<Vec<_>>();
+        unsafe {
+            check_comgr(
+                &self.funcs,
+                (self.funcs.action_info_set_option_list)(
+                    self.raw,
+                    option_ptrs.as_ptr(),
+                    option_ptrs.len(),
+                ),
+                "amd_comgr_action_info_set_option_list",
+            )
+        }
+    }
+
+    fn set_logging(&self, enabled: bool) -> Result<()> {
+        unsafe {
+            check_comgr(
+                &self.funcs,
+                (self.funcs.action_info_set_logging)(self.raw, enabled),
+                "amd_comgr_action_info_set_logging",
+            )
+        }
+    }
+}
+
+impl Drop for ComgrActionInfo {
+    fn drop(&mut self) {
+        if self.raw.handle != 0 {
+            unsafe {
+                let _ = (self.funcs.destroy_action_info)(self.raw);
+            }
+            self.raw.handle = 0;
+        }
     }
 }
 
@@ -932,7 +1366,27 @@ impl HipBlasLtFunctions {
 impl ComgrFunctions {
     unsafe fn load(lib: Arc<DynamicLibrary>) -> Result<Self> {
         Ok(Self {
+            status_string: unsafe { lib.symbol(c"amd_comgr_status_string")? },
             get_version: unsafe { lib.symbol(c"amd_comgr_get_version")? },
+            create_data: unsafe { lib.symbol(c"amd_comgr_create_data")? },
+            release_data: unsafe { lib.symbol(c"amd_comgr_release_data")? },
+            set_data: unsafe { lib.symbol(c"amd_comgr_set_data")? },
+            set_data_name: unsafe { lib.symbol(c"amd_comgr_set_data_name")? },
+            get_data: unsafe { lib.symbol(c"amd_comgr_get_data")? },
+            create_data_set: unsafe { lib.symbol(c"amd_comgr_create_data_set")? },
+            destroy_data_set: unsafe { lib.symbol(c"amd_comgr_destroy_data_set")? },
+            data_set_add: unsafe { lib.symbol(c"amd_comgr_data_set_add")? },
+            action_data_count: unsafe { lib.symbol(c"amd_comgr_action_data_count")? },
+            action_data_get_data: unsafe { lib.symbol(c"amd_comgr_action_data_get_data")? },
+            create_action_info: unsafe { lib.symbol(c"amd_comgr_create_action_info")? },
+            destroy_action_info: unsafe { lib.symbol(c"amd_comgr_destroy_action_info")? },
+            action_info_set_isa_name: unsafe { lib.symbol(c"amd_comgr_action_info_set_isa_name")? },
+            action_info_set_language: unsafe { lib.symbol(c"amd_comgr_action_info_set_language")? },
+            action_info_set_option_list: unsafe {
+                lib.symbol(c"amd_comgr_action_info_set_option_list")?
+            },
+            action_info_set_logging: unsafe { lib.symbol(c"amd_comgr_action_info_set_logging")? },
+            do_action: unsafe { lib.symbol(c"amd_comgr_do_action")? },
             _lib: lib,
         })
     }
@@ -1056,6 +1510,52 @@ fn rocwmma_availability() -> LibraryAvailability {
             "missing rocWMMA headers under {}",
             root.join("include").display()
         ))
+    }
+}
+
+impl ComgrFunctions {
+    fn status_message(&self, status: AmdComgrStatus) -> String {
+        let mut message = ptr::null();
+        let result = unsafe { (self.status_string)(status, &mut message) };
+        if result != AMD_COMGR_STATUS_SUCCESS || message.is_null() {
+            format!("COMGR status {status}")
+        } else {
+            unsafe { CStr::from_ptr(message) }
+                .to_string_lossy()
+                .into_owned()
+        }
+    }
+}
+
+fn check_comgr(funcs: &ComgrFunctions, status: AmdComgrStatus, op: &str) -> Result<()> {
+    if status == AMD_COMGR_STATUS_SUCCESS {
+        Ok(())
+    } else {
+        Err(Error::Library(format!(
+            "{op} failed: {}",
+            funcs.status_message(status)
+        )))
+    }
+}
+
+fn comgr_compile_options(extra_options: &[&str]) -> Vec<String> {
+    let mut options = vec![
+        "-x".to_string(),
+        "hip".to_string(),
+        "-std=c++17".to_string(),
+        "-O3".to_string(),
+        "-Wno-macro-redefined".to_string(),
+        format!("-I{}", rocm_path().join("include").display()),
+    ];
+    options.extend(extra_options.iter().map(|option| (*option).to_string()));
+    options
+}
+
+fn comgr_isa_name(arch: &str) -> String {
+    if arch.starts_with("amdgcn-amd-amdhsa") {
+        arch.to_string()
+    } else {
+        format!("amdgcn-amd-amdhsa--{arch}")
     }
 }
 
@@ -1280,6 +1780,27 @@ mod tests {
         };
         let version = comgr.version();
         assert!(version.major > 0 || version.minor > 0);
+    }
+
+    #[test]
+    fn comgr_compile_hip_source_smoke_if_available() {
+        let Ok(comgr) = Comgr::open() else {
+            return;
+        };
+        let Ok(device) = crate::Device::first() else {
+            return;
+        };
+        let source = r#"
+#include <hip/hip_runtime.h>
+extern "C" __global__
+void comgr_smoke(float* out) {
+    out[0] = 7.0f;
+}
+"#;
+        let code_object = comgr
+            .compile_hip_source_to_code_object(source, device.arch(), &[])
+            .expect("COMGR should compile and link a simple HIP kernel");
+        assert!(code_object.starts_with(b"\x7fELF"));
     }
 
     #[test]

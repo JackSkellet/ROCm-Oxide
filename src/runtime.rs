@@ -138,6 +138,26 @@ impl Device {
         self.load_code_object(code_object.as_ref())
     }
 
+    pub fn compile_hip_source_comgr(&self, source: &str) -> Result<Module> {
+        let code_object = hiprtc::compile_code_object_cached_comgr(source, &self.arch)?;
+        self.load_code_object(code_object.as_ref())
+    }
+
+    pub fn compile_hip_source_specialized_comgr(
+        &self,
+        source: &str,
+        extra_options: &[&str],
+        launch_metadata: &str,
+    ) -> Result<Module> {
+        let code_object = hiprtc::compile_code_object_cached_comgr_with_metadata(
+            source,
+            &self.arch,
+            extra_options,
+            launch_metadata,
+        )?;
+        self.load_code_object(code_object.as_ref())
+    }
+
     pub fn load_code_object(&self, code_object: &[u8]) -> Result<Module> {
         let module = hip::Module::from_code_object(&code_object)?;
         Ok(Module {
