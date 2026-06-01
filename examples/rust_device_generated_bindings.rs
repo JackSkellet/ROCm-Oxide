@@ -185,6 +185,30 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         );
     }
 
+    let layout_input = vec![2u32, 3, 5, 8, 13, 21];
+    let layout_values = DeviceBuffer::from_slice(&layout_input)?;
+    let layout_out = DeviceBuffer::<u32>::new(layout_input.len())?;
+    let layout_params = generated::RustLayoutParams { base: 7, stride: 4 };
+    unsafe {
+        kernels.compiler_layout_probe(
+            LaunchConfig::for_num_elems_with_block_size(layout_input.len(), 32),
+            &layout_out,
+            &layout_values,
+            layout_params,
+            layout_input.len(),
+        )?;
+    }
+    rocm_oxide::hip::synchronize()?;
+    assert_eq!(
+        layout_out.copy_to_vec()?,
+        layout_input
+            .iter()
+            .map(|value| value
+                .wrapping_mul(layout_params.stride)
+                .wrapping_add(layout_params.base))
+            .collect::<Vec<_>>()
+    );
+
     let flow_input = vec![0u32, 1, 2, 3, 4, 7, 9, 12, 15, 31, 42, 63];
     let flow_values = DeviceBuffer::from_slice(&flow_input)?;
     let flow_out = DeviceBuffer::<u32>::new(flow_input.len())?;

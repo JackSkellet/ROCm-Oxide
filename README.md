@@ -199,8 +199,9 @@ The build also emits host-consumable artifacts next to the `.hsaco`:
 The compiler path now preserves source spans for kernel diagnostics, rewrites
 more global-pointer-producing IR than just `getelementptr`, catches internal
 rewrite panics as actionable diagnostics, discovers kernel-bearing local path
-dependencies for bundling, and mirrors `#[repr(C)]` device structs into host
-bindings for captured-environment style ABI payloads.
+dependencies for bundling, records rustc-reported AMDGPU layout facts for
+device structs, and mirrors layout-proven `repr(C)` and default `repr(Rust)`
+payloads into host bindings.
 The repo pins nightly Rust in `rust-toolchain.toml` so `cargo` commands use a
 toolchain with `rust-src`; `rocm-oxide-build --doctor` also probes that `core`
 can actually be built for `amdgcn-amd-amdhsa`.
@@ -465,7 +466,8 @@ This roadmap is grounded in the validated probe targets:
   and device-API breadth slice is live: `compiler_parity_matrix` and
   `compiler_flow_cast_probe` now smoke enums, `Option`, `Result`, custom
   discriminants, match, arrays, nested/range loops, iterator-like slice walks,
-  pointer casts, by-value `repr(C)` struct ABI scalarization,
+  pointer casts, by-value `repr(C)` and default `repr(Rust)` struct ABI
+  scalarization,
   `DisjointSliceMut`, thread-index witnesses, barrier tokens, typed integer
   atomics, wavefront shuffle/match/vote helpers, and wavefront reductions
   through generated bindings. Unsupported pointer/integer casts now fail with a
@@ -508,9 +510,10 @@ This roadmap is grounded in the validated probe targets:
   by validating move closures, reference captures when the selected memory kind
   can safely support them, host-to-device closure arguments, and device-internal
   closures.
-- ABI and layout parity: teach metadata and generated bindings enough layout
-  information to reject unsupported cases early and to remove unnecessary
-  `repr(C)` requirements where rustc layout facts are available.
+- ABI and layout parity: generated metadata now records rustc AMDGPU struct
+  layout facts, including field offsets, padding, ABI size, and alignment;
+  generated host bindings assert matching host layout and reject unsupported
+  by-value payloads before launch.
 - Direct exported generic-kernel monomorphization without wrapper functions:
   `#[kernel(monomorphize(...))]` now emits concrete entry points and generated
   typed host bindings.

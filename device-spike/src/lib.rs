@@ -32,6 +32,12 @@ pub struct ControlPair {
     pub right: u32,
 }
 
+#[derive(Clone, Copy)]
+pub struct RustLayoutParams {
+    pub base: u32,
+    pub stride: u32,
+}
+
 #[repr(u32)]
 #[derive(Clone, Copy)]
 enum ControlKind {
@@ -322,6 +328,27 @@ pub unsafe extern "C" fn compiler_parity_matrix(
     let disjoint_pairs = unsafe { gpu::DisjointSliceMut::new_unchecked(pairs) };
     disjoint_out.write_for_thread(thread, result);
     disjoint_pairs.write_for_thread(thread, pair);
+}
+
+// rocm-oxide: len(out)=n
+// rocm-oxide: len(input)=n
+#[kernel]
+pub unsafe extern "C" fn compiler_layout_probe(
+    out: gpu::DeviceSliceMut<u32>,
+    input: gpu::DeviceSlice<u32>,
+    params: RustLayoutParams,
+    n: usize,
+) {
+    let thread = gpu::thread_index_x_witness();
+    let i = thread.get();
+    if i >= n {
+        return;
+    }
+
+    let value = unsafe { input.read_unchecked(i) };
+    let result = value.wrapping_mul(params.stride).wrapping_add(params.base);
+    let disjoint_out = unsafe { gpu::DisjointSliceMut::new_unchecked(out) };
+    disjoint_out.write_for_thread(thread, result);
 }
 
 // rocm-oxide: len(out)=n

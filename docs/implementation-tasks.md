@@ -21,15 +21,15 @@ features on top of stronger contracts.
     - [x] add loop coverage for `while`, `loop`, `break`, and `continue`
     - [x] add nested-branch, range-loop, iterator-like slice traversal, pointer
           cast, and unsupported-cast diagnostic coverage
-  - [ ] ABI/layout parity:
-    - [ ] query rustc layout facts for host/device structs and record field
+  - [x] ABI/layout parity:
+    - [x] query rustc layout facts for host/device structs and record field
           offsets, padding, and ABI width in metadata
-    - [ ] support default `repr(Rust)` structs where the generated metadata can
+    - [x] support default `repr(Rust)` structs where the generated metadata can
           prove layout compatibility
-    - [ ] keep `repr(C)` as the compatibility fallback for unproven layouts
+    - [x] keep `repr(C)` as the compatibility fallback for unproven layouts
     - [x] scalarize known `repr(C)` by-value struct arguments in generated host
           bindings and keep a unit test for that ABI shape
-    - [ ] extend generated bindings to reject unsupported layout and by-value
+    - [x] extend generated bindings to reject unsupported layout and by-value
           argument cases before launch
   - [ ] Closure parity:
     - [ ] support move closures captured by value for generic device kernels

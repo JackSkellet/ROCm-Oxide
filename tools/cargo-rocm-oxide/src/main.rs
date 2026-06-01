@@ -117,7 +117,7 @@ fn pipeline(args: &[OsString]) -> Result<(), String> {
     println!("4. lower LLVM IR with ROCm llc");
     println!("5. link HSACO with ROCm clang");
     println!("6. validate kernel symbols and .kd descriptors with llvm-readelf");
-    println!("7. emit metadata, mirrored repr(C) device structs, and typed host bindings");
+    println!("7. emit metadata, layout-proven device structs, and typed host bindings");
     println!("8. root build.rs copies artifacts into OUT_DIR for host embedding");
 
     let metadata = find_latest_metadata(&root);

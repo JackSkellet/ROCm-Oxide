@@ -84,15 +84,16 @@ Primary upstream reference:
 ## High-Priority Remaining Work
 
 - [ ] ASAP feature parity sequence is tracked in
-      [implementation-tasks.md](/home/kjwtil/Documents/ROCm-Oxide/docs/implementation-tasks.md).
+      [implementation-tasks.md](implementation-tasks.md).
 - [ ] Compiler memory model parity:
   - [ ] HMM-style host-visible reference captures where ROCm memory properties
         and host-native atomics make the access pattern valid
-  - [ ] default `repr(Rust)` struct layout matching from rustc layout facts
-  - [ ] dynamic field offset and padding metadata for generated bindings
+  - [x] default `repr(Rust)` struct layout matching from rustc layout facts
+  - [x] dynamic field offset and padding metadata for generated bindings
 - [ ] Compiler type-system parity:
   - [x] enum, `Option`, `Result`, and custom discriminant GPU smoke coverage
-  - [x] struct literals, field access, and pass-by-value `repr(C)` binding tests
+  - [x] struct literals, field access, and pass-by-value `repr(C)`/default
+        `repr(Rust)` binding tests
   - [ ] return-by-value tests
   - [x] array construction, constant indexing, runtime indexing, and mutable
         array lowering

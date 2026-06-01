@@ -59,12 +59,37 @@ fn run() -> Result<(), String> {
                 ));
             }
         }
-        for device_struct in discover_device_structs(device_crate)?.values() {
+        let mut crate_device_structs = discover_device_structs(device_crate)?;
+        let used_device_structs =
+            used_device_struct_names(crate_kernels.values(), crate_device_structs.keys());
+        if !used_device_structs.is_empty() {
+            let rustc_layouts =
+                query_rustc_device_layouts(device_crate, &arch, &used_device_structs)?;
+            for name in &used_device_structs {
+                let device_struct = crate_device_structs
+                    .get_mut(name)
+                    .ok_or_else(|| format!("internal error: missing device struct `{name}`"))?;
+                let layout = rustc_layouts.get(name).ok_or_else(|| {
+                    format!(
+                        "{}: rustc did not report AMDGPU layout facts for device struct `{name}`",
+                        device_struct.span
+                    )
+                })?;
+                let mut layout = layout.clone();
+                validate_rustc_layout(device_struct, &mut layout)?;
+                device_struct.layout = layout;
+                device_struct.layout_source = DeviceStructLayoutSource::Rustc;
+            }
+        }
+        for device_struct in crate_device_structs.values() {
+            if !used_device_structs.contains(&device_struct.name) {
+                continue;
+            }
             if let Some(previous) =
                 device_structs.insert(device_struct.name.clone(), device_struct.clone())
             {
                 return Err(format!(
-                    "duplicate repr(C) device struct `{}`\n  first: {}\n  again: {}",
+                    "duplicate device struct `{}`\n  first: {}\n  again: {}",
                     device_struct.name, previous.span, device_struct.span
                 ));
             }
@@ -165,6 +190,7 @@ fn run() -> Result<(), String> {
         &hsaco,
         &link_inputs,
         &kernels,
+        &device_structs,
         &device_globals,
         &code_object_metadata,
     )?;
@@ -314,6 +340,7 @@ fn inspect_metadata(path: &Path) -> Result<(), String> {
     let kernel_count = resources.len();
     let contract_count = text.matches("\"required_len\":").count();
     let linked_object_count = text.matches("\"package\":").count();
+    let device_struct_count = text.matches("\"layout_source\":").count();
     let max_workgroup = max_json_u32(&text, "max_flat_workgroup_size");
     let max_vgpr = max_json_u32(&text, "vgpr_count");
     let max_sgpr = max_json_u32(&text, "sgpr_count");
@@ -327,6 +354,7 @@ fn inspect_metadata(path: &Path) -> Result<(), String> {
     println!("kernels: {kernel_count}");
     println!("buffer contracts: {contract_count}");
     println!("linked objects: {linked_object_count}");
+    println!("device structs: {device_struct_count}");
     if let Some(value) = max_workgroup {
         println!("max flat workgroup size: {value}");
     }
@@ -401,7 +429,7 @@ fn parse_kernel_resource_rows(text: &str) -> Vec<KernelResourceRow> {
     let mut in_code_object = false;
 
     for line in text.lines() {
-        if line.trim() == "\"globals\": [" {
+        if matches!(line.trim(), "\"structs\": [" | "\"globals\": [") {
             break;
         }
         if line.starts_with("      \"name\":") {
@@ -942,6 +970,201 @@ fn build_device_crate(device_crate: &Path, arch: &str) -> Result<(), String> {
         .map_err(with_core_build_hint)
 }
 
+fn query_rustc_device_layouts(
+    device_crate: &Path,
+    arch: &str,
+    struct_names: &BTreeSet<String>,
+) -> Result<BTreeMap<String, DeviceStructLayout>, String> {
+    if struct_names.is_empty() {
+        return Ok(BTreeMap::new());
+    }
+
+    let mut command = cargo_command();
+    command
+        .arg("rustc")
+        .arg("-Z")
+        .arg("build-std=core")
+        .arg("--target")
+        .arg(TARGET)
+        .arg("--release")
+        .arg("--")
+        .arg("-Zprint-type-sizes")
+        .arg("--emit=metadata")
+        .arg("--cfg")
+        .arg(format!(
+            "rocm_oxide_layout_query_{}",
+            unique_build_suffix()?
+        ))
+        .current_dir(device_crate)
+        .env("RUSTFLAGS", format!("-C target-cpu={arch}"));
+    sanitize_rust_env(&mut command);
+    let output = command
+        .output()
+        .map_err(|err| format!("failed to query rustc AMDGPU struct layouts: {err}"))?;
+    if !output.status.success() {
+        return Err(with_core_build_hint(format!(
+            "failed to query rustc AMDGPU struct layouts\nstatus: {}\nstdout:\n{}\nstderr:\n{}",
+            output.status,
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        )));
+    }
+
+    let mut text = String::from_utf8_lossy(&output.stdout).to_string();
+    text.push_str(&String::from_utf8_lossy(&output.stderr));
+    Ok(parse_rustc_type_size_layouts(&text, struct_names))
+}
+
+fn unique_build_suffix() -> Result<u128, String> {
+    Ok(SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map_err(|err| format!("system clock before Unix epoch: {err}"))?
+        .as_nanos())
+}
+
+fn parse_rustc_type_size_layouts(
+    text: &str,
+    struct_names: &BTreeSet<String>,
+) -> BTreeMap<String, DeviceStructLayout> {
+    let mut layouts = BTreeMap::new();
+    let mut current: Option<(String, DeviceStructLayout, u32)> = None;
+
+    for line in text.lines() {
+        if let Some((type_name, size, align)) = parse_rustc_type_header(line) {
+            if let Some((name, mut layout, offset)) = current.take() {
+                finish_rustc_layout(&mut layout, offset);
+                layouts.insert(name, layout);
+            }
+            if let Some(name) = struct_names
+                .iter()
+                .find(|name| rustc_type_name_matches(&type_name, name))
+            {
+                current = Some((
+                    name.clone(),
+                    DeviceStructLayout {
+                        size,
+                        align,
+                        fields: Vec::new(),
+                        padding: Vec::new(),
+                    },
+                    0,
+                ));
+            }
+            continue;
+        }
+
+        let Some((_, layout, offset)) = current.as_mut() else {
+            continue;
+        };
+        if let Some((field, size)) = parse_rustc_type_field(line) {
+            layout.fields.push(DeviceStructLayoutField {
+                name: field,
+                ty: String::new(),
+                offset: *offset,
+                size,
+            });
+            *offset = offset.saturating_add(size);
+        } else if let Some(size) = parse_rustc_type_padding(line) {
+            layout.padding.push(DeviceStructPadding {
+                offset: *offset,
+                size,
+            });
+            *offset = offset.saturating_add(size);
+        }
+    }
+
+    if let Some((name, mut layout, offset)) = current.take() {
+        finish_rustc_layout(&mut layout, offset);
+        layouts.insert(name, layout);
+    }
+
+    layouts
+}
+
+fn finish_rustc_layout(layout: &mut DeviceStructLayout, offset: u32) {
+    if layout.size > offset {
+        layout.padding.push(DeviceStructPadding {
+            offset,
+            size: layout.size - offset,
+        });
+    }
+}
+
+fn parse_rustc_type_header(line: &str) -> Option<(String, u32, u32)> {
+    let rest = line.strip_prefix("print-type-size type: `")?;
+    let (name, rest) = rest.split_once("`: ")?;
+    let (size, rest) = rest.split_once(" bytes, alignment: ")?;
+    let align = rest.strip_suffix(" bytes")?;
+    Some((name.to_string(), size.parse().ok()?, align.parse().ok()?))
+}
+
+fn parse_rustc_type_field(line: &str) -> Option<(String, u32)> {
+    let rest = line.strip_prefix("print-type-size     field `.")?;
+    let (name, rest) = rest.split_once("`: ")?;
+    let size = parse_rustc_byte_count(rest)?;
+    Some((name.to_string(), size))
+}
+
+fn parse_rustc_type_padding(line: &str) -> Option<u32> {
+    let rest = line.strip_prefix("print-type-size     padding: ")?;
+    parse_rustc_byte_count(rest)
+}
+
+fn parse_rustc_byte_count(value: &str) -> Option<u32> {
+    let byte_count = value.split_once(" bytes")?.0;
+    byte_count.parse().ok()
+}
+
+fn rustc_type_name_matches(rustc_name: &str, struct_name: &str) -> bool {
+    rustc_name == struct_name || rustc_name.ends_with(&format!("::{struct_name}"))
+}
+
+fn validate_rustc_layout(
+    device_struct: &DeviceStruct,
+    layout: &mut DeviceStructLayout,
+) -> Result<(), String> {
+    let fields = device_struct
+        .fields
+        .iter()
+        .map(|field| (field.name.as_str(), field.ty.as_str()))
+        .collect::<BTreeMap<_, _>>();
+    for layout_field in &mut layout.fields {
+        let Some(ty) = fields.get(layout_field.name.as_str()) else {
+            return Err(format!(
+                "{}: rustc reported unexpected field `{}` for device struct `{}`",
+                device_struct.span, layout_field.name, device_struct.name
+            ));
+        };
+        layout_field_type_supported(ty, device_struct)?;
+        layout_field.ty = (*ty).to_string();
+    }
+    for field in &device_struct.fields {
+        if !layout
+            .fields
+            .iter()
+            .any(|layout_field| layout_field.name == field.name)
+        {
+            return Err(format!(
+                "{}: rustc layout facts did not include field `{}` for device struct `{}`",
+                device_struct.span, field.name, device_struct.name
+            ));
+        }
+    }
+    Ok(())
+}
+
+fn layout_field_type_supported(
+    ty: &str,
+    device_struct: &DeviceStruct,
+) -> Result<(), String> {
+    device_type_layout(ty).map(|_| ()).ok_or_else(|| {
+        format!(
+            "{}: unsupported field type `{ty}` in device struct `{}`; pass this payload through a DeviceSlice or add explicit layout support before using it by value",
+            device_struct.span, device_struct.name
+        )
+    })
+}
+
 fn sanitize_rust_env(command: &mut Command) {
     command
         .env_remove("CARGO_ENCODED_RUSTFLAGS")
@@ -1150,7 +1373,10 @@ struct KernelArg {
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct DeviceStruct {
     name: String,
+    repr: DeviceStructRepr,
     fields: Vec<DeviceStructField>,
+    layout: DeviceStructLayout,
+    layout_source: DeviceStructLayoutSource,
     span: SourceSpan,
 }
 
@@ -1158,6 +1384,58 @@ struct DeviceStruct {
 struct DeviceStructField {
     name: String,
     ty: String,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum DeviceStructRepr {
+    C,
+    Rust,
+}
+
+impl DeviceStructRepr {
+    fn as_str(self) -> &'static str {
+        match self {
+            DeviceStructRepr::C => "C",
+            DeviceStructRepr::Rust => "Rust",
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct DeviceStructLayout {
+    size: u32,
+    align: u32,
+    fields: Vec<DeviceStructLayoutField>,
+    padding: Vec<DeviceStructPadding>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct DeviceStructLayoutField {
+    name: String,
+    ty: String,
+    offset: u32,
+    size: u32,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct DeviceStructPadding {
+    offset: u32,
+    size: u32,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum DeviceStructLayoutSource {
+    Computed,
+    Rustc,
+}
+
+impl DeviceStructLayoutSource {
+    fn as_str(self) -> &'static str {
+        match self {
+            DeviceStructLayoutSource::Computed => "computed",
+            DeviceStructLayoutSource::Rustc => "rustc-amdgpu",
+        }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -1344,6 +1622,43 @@ fn discover_device_structs(device_crate: &Path) -> Result<BTreeMap<String, Devic
     Ok(structs)
 }
 
+fn used_device_struct_names<'a>(
+    kernels: impl Iterator<Item = &'a KernelDecl> + Clone,
+    struct_names: impl Iterator<Item = &'a String>,
+) -> BTreeSet<String> {
+    struct_names
+        .filter(|name| kernel_bundle_uses_type(kernels.clone(), name))
+        .cloned()
+        .collect()
+}
+
+fn kernel_bundle_uses_type<'a>(
+    kernels: impl Iterator<Item = &'a KernelDecl>,
+    type_name: &str,
+) -> bool {
+    kernels
+        .flat_map(|kernel| kernel.args.iter())
+        .any(|arg| kernel_arg_uses_type(arg, type_name))
+}
+
+fn kernel_arg_uses_type(arg: &KernelArg, type_name: &str) -> bool {
+    match &arg.kind {
+        ArgKind::MutPtr(inner)
+        | ArgKind::ConstPtr(inner)
+        | ArgKind::MutSlice(inner)
+        | ArgKind::ConstSlice(inner) => type_leaf_name(inner) == type_name,
+        ArgKind::Scalar => type_leaf_name(&arg.ty) == type_name,
+    }
+}
+
+fn type_leaf_name(ty: &str) -> &str {
+    ty.trim()
+        .rsplit("::")
+        .next()
+        .unwrap_or(ty)
+        .trim()
+}
+
 fn discover_device_structs_in_dir(
     dir: &Path,
     structs: &mut BTreeMap<String, DeviceStruct>,
@@ -1376,25 +1691,46 @@ fn discover_device_structs_in_source_at(
     path: &Path,
 ) -> Result<Vec<DeviceStruct>, String> {
     let mut structs = Vec::new();
-    let mut saw_repr_c = false;
+    let mut pending_repr = None;
+    let mut pending_unsupported_repr: Option<(usize, String)> = None;
     let mut struct_source = String::new();
     let mut struct_start_line = 0usize;
+    let mut struct_repr = DeviceStructRepr::Rust;
 
     for (line_index, line) in source.lines().enumerate() {
         let trimmed = line.trim();
-        if trimmed == "#[repr(C)]" {
-            saw_repr_c = true;
+        if let Some(repr) = device_struct_repr_attribute(trimmed) {
+            match repr {
+                "C" => pending_repr = Some(DeviceStructRepr::C),
+                "Rust" => pending_repr = Some(DeviceStructRepr::Rust),
+                _ => pending_unsupported_repr = Some((line_index + 1, repr.to_string())),
+            }
             struct_start_line = line_index + 1;
             continue;
         }
-        if saw_repr_c && trimmed.starts_with("#[") {
+        if trimmed.starts_with("#[") {
+            if pending_repr.is_none() {
+                struct_start_line = line_index + 1;
+            }
             continue;
         }
-        if saw_repr_c && (trimmed.starts_with("pub struct ") || trimmed.starts_with("struct ")) {
+        if trimmed.starts_with("pub struct ") || trimmed.starts_with("struct ") {
+            if let Some((line, repr)) = pending_unsupported_repr.take() {
+                return Err(format!(
+                    "{}:{}: unsupported repr({repr}) on device struct; generated bindings currently support repr(C), repr(Rust), and default Rust layout",
+                    path.display(),
+                    line
+                ));
+            }
+            struct_repr = pending_repr.take().unwrap_or(DeviceStructRepr::Rust);
+            if struct_start_line == 0 {
+                struct_start_line = line_index + 1;
+            }
             struct_source.push_str(trimmed);
             if trimmed.contains('}') {
                 structs.push(parse_device_struct(
                     &struct_source,
+                    struct_repr,
                     SourceSpan {
                         path: path.to_path_buf(),
                         line: struct_start_line,
@@ -1402,7 +1738,7 @@ fn discover_device_structs_in_source_at(
                     },
                 )?);
                 struct_source.clear();
-                saw_repr_c = false;
+                struct_start_line = 0;
             }
             continue;
         }
@@ -1412,6 +1748,7 @@ fn discover_device_structs_in_source_at(
             if trimmed.contains('}') {
                 structs.push(parse_device_struct(
                     &struct_source,
+                    struct_repr,
                     SourceSpan {
                         path: path.to_path_buf(),
                         line: struct_start_line,
@@ -1419,16 +1756,23 @@ fn discover_device_structs_in_source_at(
                     },
                 )?);
                 struct_source.clear();
-                saw_repr_c = false;
+                struct_start_line = 0;
             }
             continue;
         }
-        if saw_repr_c && !trimmed.is_empty() {
-            saw_repr_c = false;
+        if !trimmed.is_empty() {
+            pending_repr = None;
+            pending_unsupported_repr = None;
+            struct_start_line = 0;
         }
     }
 
     Ok(structs)
+}
+
+fn device_struct_repr_attribute(line: &str) -> Option<&str> {
+    let inner = line.strip_prefix("#[")?.strip_suffix(']')?.trim();
+    Some(inner.strip_prefix("repr(")?.strip_suffix(')')?.trim())
 }
 
 fn discover_device_globals(device_crate: &Path) -> Result<BTreeMap<String, DeviceGlobal>, String> {
@@ -1561,19 +1905,23 @@ fn parse_device_global(
     })
 }
 
-fn parse_device_struct(source: &str, span: SourceSpan) -> Result<DeviceStruct, String> {
+fn parse_device_struct(
+    source: &str,
+    repr: DeviceStructRepr,
+    span: SourceSpan,
+) -> Result<DeviceStruct, String> {
     let struct_pos = source
         .find("struct ")
-        .ok_or_else(|| format!("{}: malformed repr(C) struct", span))?
+        .ok_or_else(|| format!("{}: malformed device struct", span))?
         + "struct ".len();
     let name_end = source[struct_pos..]
         .find(|ch: char| ch == '{' || ch.is_whitespace())
-        .ok_or_else(|| format!("{}: malformed repr(C) struct name", span))?
+        .ok_or_else(|| format!("{}: malformed device struct name", span))?
         + struct_pos;
     let name = source[struct_pos..name_end].trim().to_string();
     if name.contains('<') {
         return Err(format!(
-            "{}: generic repr(C) device structs are not supported in generated host bindings",
+            "{}: generic device structs are not supported in generated host bindings",
             span
         ));
     }
@@ -1600,7 +1948,111 @@ fn parse_device_struct(source: &str, span: SourceSpan) -> Result<DeviceStruct, S
             })
         })
         .collect::<Result<Vec<_>, String>>()?;
-    Ok(DeviceStruct { name, fields, span })
+    let layout = compute_device_struct_layout(&name, &fields, &span)?;
+    Ok(DeviceStruct {
+        name,
+        repr,
+        fields,
+        layout,
+        layout_source: DeviceStructLayoutSource::Computed,
+        span,
+    })
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct TypeLayout {
+    size: u32,
+    align: u32,
+}
+
+fn compute_device_struct_layout(
+    struct_name: &str,
+    fields: &[DeviceStructField],
+    span: &SourceSpan,
+) -> Result<DeviceStructLayout, String> {
+    let mut offset = 0u32;
+    let mut max_align = 1u32;
+    let mut layout_fields = Vec::new();
+    let mut padding = Vec::new();
+
+    for field in fields {
+        let field_layout = device_type_layout(&field.ty).ok_or_else(|| {
+            format!(
+                "{}: unsupported field type `{}` in device struct `{struct_name}`; supported layout fields are scalar integers/floats/bool and fixed-size arrays of those types",
+                span, field.ty
+            )
+        })?;
+        max_align = max_align.max(field_layout.align);
+        let aligned_offset = align_up_u32(offset, field_layout.align)?;
+        if aligned_offset > offset {
+            padding.push(DeviceStructPadding {
+                offset,
+                size: aligned_offset - offset,
+            });
+        }
+        offset = aligned_offset;
+        layout_fields.push(DeviceStructLayoutField {
+            name: field.name.clone(),
+            ty: field.ty.clone(),
+            offset,
+            size: field_layout.size,
+        });
+        offset = offset
+            .checked_add(field_layout.size)
+            .ok_or_else(|| format!("{}: device struct `{struct_name}` layout overflowed", span))?;
+    }
+
+    let size = align_up_u32(offset, max_align)?;
+    if size > offset {
+        padding.push(DeviceStructPadding {
+            offset,
+            size: size - offset,
+        });
+    }
+
+    Ok(DeviceStructLayout {
+        size,
+        align: max_align,
+        fields: layout_fields,
+        padding,
+    })
+}
+
+fn device_type_layout(ty: &str) -> Option<TypeLayout> {
+    let ty = ty.trim();
+    if let Some((inner, len)) = parse_array_type(ty) {
+        let inner = device_type_layout(inner)?;
+        let len = len.parse::<u32>().ok()?;
+        let size = inner.size.checked_mul(len)?;
+        return Some(TypeLayout {
+            size,
+            align: inner.align,
+        });
+    }
+    match ty {
+        "bool" | "u8" | "i8" => Some(TypeLayout { size: 1, align: 1 }),
+        "u16" | "i16" => Some(TypeLayout { size: 2, align: 2 }),
+        "u32" | "i32" | "f32" => Some(TypeLayout { size: 4, align: 4 }),
+        "usize" | "isize" | "u64" | "i64" | "f64" => Some(TypeLayout { size: 8, align: 8 }),
+        _ => None,
+    }
+}
+
+fn parse_array_type(ty: &str) -> Option<(&str, &str)> {
+    let inner = ty.strip_prefix('[')?.strip_suffix(']')?;
+    let (element, len) = inner.rsplit_once(';')?;
+    Some((element.trim(), len.trim()))
+}
+
+fn align_up_u32(value: u32, align: u32) -> Result<u32, String> {
+    if align == 0 || !align.is_power_of_two() {
+        return Err(format!("invalid ABI alignment {align}"));
+    }
+    let addend = align - 1;
+    value
+        .checked_add(addend)
+        .map(|value| value & !addend)
+        .ok_or_else(|| "ABI layout overflowed while aligning a device struct".to_string())
 }
 
 fn is_kernel_attribute(line: &str) -> bool {
@@ -3125,6 +3577,7 @@ fn write_metadata(
     hsaco: &Path,
     link_inputs: &[LinkInput],
     kernels: &BTreeMap<String, KernelDecl>,
+    device_structs: &BTreeMap<String, DeviceStruct>,
     device_globals: &BTreeMap<String, DeviceGlobal>,
     code_object_metadata: &CodeObjectMetadata,
 ) -> Result<(), String> {
@@ -3216,7 +3669,7 @@ fn write_metadata(
             } else {
                 out.push_str(&format!(
                     ",\n          \"abi_size\": {}",
-                    fallback_abi_size(arg)
+                    fallback_abi_size(arg, device_structs)
                 ));
                 if !matches!(arg.kind, ArgKind::Scalar) {
                     out.push_str(",\n          \"address_space\": \"global\"");
@@ -3250,6 +3703,14 @@ fn write_metadata(
     }
 
     out.push_str("\n  ],\n");
+    out.push_str("  \"structs\": [\n");
+    for (struct_index, device_struct) in device_structs.values().enumerate() {
+        if struct_index > 0 {
+            out.push_str(",\n");
+        }
+        write_device_struct_metadata(&mut out, device_struct);
+    }
+    out.push_str("\n  ],\n");
     out.push_str("  \"globals\": [\n");
     for (global_index, global) in device_globals.values().enumerate() {
         if global_index > 0 {
@@ -3278,6 +3739,58 @@ fn write_metadata(
     out.push_str("\n  ]\n");
     out.push_str("}\n");
     fs::write(path, out).map_err(|err| format!("failed to write {}: {err}", path.display()))
+}
+
+fn write_device_struct_metadata(out: &mut String, device_struct: &DeviceStruct) {
+    out.push_str("    {\n");
+    out.push_str(&format!(
+        "      \"name\": \"{}\",\n",
+        json_escape(&device_struct.name)
+    ));
+    out.push_str(&format!(
+        "      \"repr\": \"{}\",\n",
+        device_struct.repr.as_str()
+    ));
+    out.push_str(&format!(
+        "      \"layout_source\": \"{}\",\n",
+        device_struct.layout_source.as_str()
+    ));
+    out.push_str(&format!(
+        "      \"abi_size\": {},\n",
+        device_struct.layout.size
+    ));
+    out.push_str(&format!("      \"align\": {},\n", device_struct.layout.align));
+    out.push_str("      \"fields\": [\n");
+    for (field_index, field) in device_struct.layout.fields.iter().enumerate() {
+        if field_index > 0 {
+            out.push_str(",\n");
+        }
+        out.push_str("        {\n");
+        out.push_str(&format!(
+            "          \"name\": \"{}\",\n",
+            json_escape(&field.name)
+        ));
+        out.push_str(&format!(
+            "          \"type\": \"{}\",\n",
+            json_escape(&field.ty)
+        ));
+        out.push_str(&format!("          \"offset\": {},\n", field.offset));
+        out.push_str(&format!("          \"size\": {}\n", field.size));
+        out.push_str("        }");
+    }
+    out.push_str("\n      ],\n");
+    out.push_str("      \"padding\": [\n");
+    for (padding_index, padding) in device_struct.layout.padding.iter().enumerate() {
+        if padding_index > 0 {
+            out.push_str(",\n");
+        }
+        out.push_str("        {\n");
+        out.push_str(&format!("          \"offset\": {},\n", padding.offset));
+        out.push_str(&format!("          \"size\": {}\n", padding.size));
+        out.push_str("        }");
+    }
+    out.push_str("\n      ]\n");
+    out.push_str("    }");
 }
 
 fn write_kernel_object_metadata(out: &mut String, metadata: Option<&KernelObjectMetadata>) {
@@ -3341,17 +3854,27 @@ fn write_json_u32_field(out: &mut String, key: &str, value: Option<u32>, first: 
     }
 }
 
-fn fallback_abi_size(arg: &KernelArg) -> u32 {
+fn fallback_abi_size(arg: &KernelArg, device_structs: &BTreeMap<String, DeviceStruct>) -> u32 {
     match &arg.kind {
         ArgKind::MutPtr(_) | ArgKind::ConstPtr(_) => 8,
         ArgKind::MutSlice(_) | ArgKind::ConstSlice(_) => 16,
-        ArgKind::Scalar => match arg.ty.as_str() {
-            "usize" | "isize" | "u64" | "i64" | "f64" => 8,
-            "u32" | "i32" | "f32" => 4,
-            "u16" | "i16" => 2,
-            "u8" | "i8" | "bool" => 1,
-            _ => 8,
-        },
+        ArgKind::Scalar => primitive_abi_size(&arg.ty)
+            .or_else(|| {
+                device_structs
+                    .get(type_leaf_name(&arg.ty))
+                    .map(|device_struct| device_struct.layout.size)
+            })
+            .unwrap_or(8),
+    }
+}
+
+fn primitive_abi_size(ty: &str) -> Option<u32> {
+    match ty.trim() {
+        "usize" | "isize" | "u64" | "i64" | "f64" => Some(8),
+        "u32" | "i32" | "f32" => Some(4),
+        "u16" | "i16" => Some(2),
+        "u8" | "i8" | "bool" => Some(1),
+        _ => None,
     }
 }
 
@@ -3480,13 +4003,31 @@ fn write_bindings(
 
 fn generate_device_struct_binding(device_struct: &DeviceStruct) -> String {
     let mut out = String::new();
-    out.push_str("#[repr(C)]\n");
+    if device_struct.repr == DeviceStructRepr::C {
+        out.push_str("#[repr(C)]\n");
+    }
     out.push_str("#[derive(Clone, Copy, Debug, Default)]\n");
     out.push_str(&format!("pub struct {} {{\n", device_struct.name));
     for field in &device_struct.fields {
         out.push_str(&format!("    pub {}: {},\n", field.name, field.ty));
     }
     out.push_str("}\n");
+    out.push_str("const _: () = {\n");
+    out.push_str(&format!(
+        "    assert!(std::mem::size_of::<{}>() == {});\n",
+        device_struct.name, device_struct.layout.size
+    ));
+    out.push_str(&format!(
+        "    assert!(std::mem::align_of::<{}>() == {});\n",
+        device_struct.name, device_struct.layout.align
+    ));
+    for field in &device_struct.layout.fields {
+        out.push_str(&format!(
+            "    assert!(std::mem::offset_of!({}, {}) == {});\n",
+            device_struct.name, field.name, field.offset
+        ));
+    }
+    out.push_str("};\n");
     out
 }
 
@@ -3634,12 +4175,17 @@ fn generate_kernel_binding(
             ArgKind::Scalar => {
                 params.push(format!("{}: {}", arg.name, arg.ty));
                 operation_params.push(format!("{}: {}", arg.name, arg.ty));
-                if let Some(device_struct) = device_structs.get(&arg.ty) {
-                    for field in &device_struct.fields {
+                if let Some(device_struct) = device_structs.get(type_leaf_name(&arg.ty)) {
+                    for field in &device_struct.layout.fields {
                         launch_args.push(format!("{}.{}", arg.name, field.name));
                     }
-                } else {
+                } else if primitive_abi_size(&arg.ty).is_some() {
                     launch_args.push(arg.name.clone());
+                } else {
+                    return Err(format!(
+                        "{}: unsupported by-value kernel argument `{}` with type `{}`; use a primitive scalar, a layout-proven device struct, or pass the payload through a DeviceSlice",
+                        kernel.span, arg.name, arg.ty
+                    ));
                 }
             }
         }
@@ -4838,6 +5384,75 @@ pub struct AffineParams {
         assert!(binding.contains("pub struct AffineParams"));
         assert!(binding.contains("pub scale: f32"));
         assert!(binding.contains("pub bias: f32"));
+        assert!(binding.contains("std::mem::size_of::<AffineParams>() == 8"));
+        assert!(binding.contains("std::mem::offset_of!(AffineParams, scale) == 0"));
+        assert!(binding.contains("std::mem::offset_of!(AffineParams, bias) == 4"));
+    }
+
+    #[test]
+    fn emits_default_repr_rust_device_struct_layout_assertions() {
+        let structs = discover_device_structs_in_source(
+            r#"
+#[derive(Clone, Copy)]
+pub struct RustLayoutParams {
+    pub base: u32,
+    pub stride: u32,
+}
+"#,
+        )
+        .expect("default repr Rust struct should parse");
+        assert_eq!(structs.len(), 1);
+        assert_eq!(structs[0].repr, super::DeviceStructRepr::Rust);
+        let binding = generate_device_struct_binding(&structs[0]);
+        assert!(!binding.contains("#[repr(C)]"));
+        assert!(binding.contains("pub struct RustLayoutParams"));
+        assert!(binding.contains("std::mem::size_of::<RustLayoutParams>() == 8"));
+        assert!(binding.contains("std::mem::align_of::<RustLayoutParams>() == 4"));
+        assert!(binding.contains(
+            "std::mem::offset_of!(RustLayoutParams, base) == 0"
+        ));
+        assert!(binding.contains(
+            "std::mem::offset_of!(RustLayoutParams, stride) == 4"
+        ));
+    }
+
+    #[test]
+    fn rejects_unsupported_device_struct_repr_attributes() {
+        let err = discover_device_structs_in_source(
+            r#"
+#[repr(C, align(16))]
+pub struct OverAligned {
+    pub value: u32,
+}
+"#,
+        )
+        .expect_err("unsupported repr attributes should be rejected");
+        assert!(err.contains("unsupported repr(C, align(16))"));
+    }
+
+    #[test]
+    fn parses_rustc_layout_offsets_and_padding() {
+        let names = BTreeSet::from(["RustLayoutParams".to_string()]);
+        let layouts = super::parse_rustc_type_size_layouts(
+            r#"
+print-type-size type: `RustLayoutParams`: 12 bytes, alignment: 4 bytes
+print-type-size     field `.base`: 4 bytes
+print-type-size     padding: 4 bytes
+print-type-size     field `.stride`: 4 bytes
+"#,
+            &names,
+        );
+        let layout = layouts
+            .get("RustLayoutParams")
+            .expect("target layout should parse");
+        assert_eq!(layout.size, 12);
+        assert_eq!(layout.align, 4);
+        assert_eq!(layout.fields[0].name, "base");
+        assert_eq!(layout.fields[0].offset, 0);
+        assert_eq!(layout.fields[1].name, "stride");
+        assert_eq!(layout.fields[1].offset, 8);
+        assert_eq!(layout.padding[0].offset, 4);
+        assert_eq!(layout.padding[0].size, 4);
     }
 
     #[test]
@@ -4871,6 +5486,23 @@ pub unsafe extern "C" fn probe(
         assert!(binding.contains("let mut __arg3 = params.scale;"));
         assert!(binding.contains("let mut __arg4 = n;"));
         assert!(!binding.contains("let mut __arg2 = params;"));
+    }
+
+    #[test]
+    fn rejects_unknown_by_value_struct_launch_args() {
+        let source = r#"
+#[kernel]
+pub unsafe extern "C" fn probe(
+    out: gpu::DeviceSliceMut<u32>,
+    params: MissingLayout,
+    n: usize,
+) {}
+"#;
+        let kernels = discover_kernels_in_source(source).expect("source should parse");
+        let err = generate_kernel_binding(&kernels[0], &BTreeMap::new(), None)
+            .expect_err("unknown by-value struct should be rejected");
+        assert!(err.contains("unsupported by-value kernel argument `params`"));
+        assert!(err.contains("MissingLayout"));
     }
 
     #[test]
