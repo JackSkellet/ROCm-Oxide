@@ -1,4 +1,7 @@
-use rocm_oxide::{Device, DeviceBuffer, DeviceOperation, Dim3, LaunchConfig, StreamPool};
+use rocm_oxide::{
+    Device, DeviceBuffer, DeviceOperation, Dim3, LaunchConfig, ManagedBuffer, PinnedHostBuffer,
+    StreamPool,
+};
 use std::sync::Arc;
 
 mod generated {
@@ -423,6 +426,55 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             .collect::<Vec<_>>()
     );
 
+    let reference_closure_input = vec![3u32, 5, 8, 13, 21, 34, 55, 89];
+    let reference_closure_values = DeviceBuffer::from_slice(&reference_closure_input)?;
+    let reference_closure_out = DeviceBuffer::<u32>::new(reference_closure_input.len())?;
+    let reference_bias = 41u32;
+    let reference_scale = 7u32;
+    let properties = device.properties()?;
+    if properties.can_map_host_memory {
+        let mut bias = PinnedHostBuffer::<u32>::new_zeroed_mapped_coherent(1)?;
+        bias.as_mut_slice()[0] = reference_bias;
+        let reference_closure = generated::HostReferenceClosure {
+            bias: bias.device_ptr()? as *const u32,
+            scale: reference_scale,
+        };
+        unsafe {
+            kernels.compiler_host_reference_closure_probe_host_reference_closure(
+                LaunchConfig::for_num_elems_with_block_size(reference_closure_input.len(), 32),
+                &reference_closure_out,
+                &reference_closure_values,
+                reference_closure,
+                reference_closure_input.len(),
+            )?;
+        }
+        rocm_oxide::hip::synchronize()?;
+        assert_eq!(
+            reference_closure_out.copy_to_vec()?,
+            expected_reference_closure(&reference_closure_input, reference_bias, reference_scale)
+        );
+    } else if properties.managed_memory {
+        let bias = ManagedBuffer::from_slice(&[reference_bias])?;
+        let reference_closure = generated::HostReferenceClosure {
+            bias: bias.as_ptr(),
+            scale: reference_scale,
+        };
+        unsafe {
+            kernels.compiler_host_reference_closure_probe_host_reference_closure(
+                LaunchConfig::for_num_elems_with_block_size(reference_closure_input.len(), 32),
+                &reference_closure_out,
+                &reference_closure_values,
+                reference_closure,
+                reference_closure_input.len(),
+            )?;
+        }
+        rocm_oxide::hip::synchronize()?;
+        assert_eq!(
+            reference_closure_out.copy_to_vec()?,
+            expected_reference_closure(&reference_closure_input, reference_bias, reference_scale)
+        );
+    }
+
     let flow_input = vec![0u32, 1, 2, 3, 4, 7, 9, 12, 15, 31, 42, 63];
     let flow_values = DeviceBuffer::from_slice(&flow_input)?;
     let flow_out = DeviceBuffer::<u32>::new(flow_input.len())?;
@@ -663,6 +715,19 @@ fn assert_close(
     } else {
         Ok(())
     }
+}
+
+fn expected_reference_closure(input: &[u32], bias: u32, scale: u32) -> Vec<u32> {
+    input
+        .iter()
+        .enumerate()
+        .map(|(index, value)| {
+            value
+                .wrapping_add((index as u32) & 1)
+                .wrapping_mul(scale)
+                .wrapping_add(bias)
+        })
+        .collect()
 }
 
 fn classify_control_host(value: u32) -> u32 {

@@ -1978,7 +1978,7 @@ fn compute_device_struct_layout(
     for field in fields {
         let field_layout = device_type_layout(&field.ty).ok_or_else(|| {
             format!(
-                "{}: unsupported field type `{}` in device struct `{struct_name}`; supported layout fields are scalar integers/floats/bool and fixed-size arrays of those types",
+                "{}: unsupported field type `{}` in device struct `{struct_name}`; supported layout fields are raw pointers, scalar integers/floats/bool, and fixed-size arrays of those types",
                 span, field.ty
             )
         })?;
@@ -2029,6 +2029,9 @@ fn device_type_layout(ty: &str) -> Option<TypeLayout> {
             align: inner.align,
         });
     }
+    if is_raw_pointer_type(ty) {
+        return Some(TypeLayout { size: 8, align: 8 });
+    }
     match ty {
         "bool" | "u8" | "i8" => Some(TypeLayout { size: 1, align: 1 }),
         "u16" | "i16" => Some(TypeLayout { size: 2, align: 2 }),
@@ -2042,6 +2045,11 @@ fn parse_array_type(ty: &str) -> Option<(&str, &str)> {
     let inner = ty.strip_prefix('[')?.strip_suffix(']')?;
     let (element, len) = inner.rsplit_once(';')?;
     Some((element.trim(), len.trim()))
+}
+
+fn is_raw_pointer_type(ty: &str) -> bool {
+    let ty = ty.trim();
+    ty.strip_prefix("*const ").is_some() || ty.strip_prefix("*mut ").is_some()
 }
 
 fn align_up_u32(value: u32, align: u32) -> Result<u32, String> {
@@ -4144,6 +4152,7 @@ fn generate_kernel_binding(
     let mut buffer_arg_names = Vec::new();
     let mut indirect_scalar_buffer_arg_names = Vec::new();
     let mut keep_alive_arg_names = Vec::new();
+    let mut operation_supported = true;
     let has_len_arg = kernel
         .args
         .iter()
@@ -4225,6 +4234,13 @@ fn generate_kernel_binding(
                         indirect_scalar_buffer_arg_names.push(arg.name.clone());
                         keep_alive_arg_names.push(arg.name.clone());
                     } else {
+                        if device_struct
+                            .fields
+                            .iter()
+                            .any(|field| is_raw_pointer_type(&field.ty))
+                        {
+                            operation_supported = false;
+                        }
                         params.push(format!("{}: {}", arg.name, arg.ty));
                         operation_params.push(format!("{}: {}", arg.name, arg.ty));
                         for field in &device_struct.layout.fields {
@@ -4364,43 +4380,49 @@ fn generate_kernel_binding(
     out.push_str("    }\n");
 
     out.push('\n');
-    out.push_str(&format!(
-        "    pub unsafe fn {}_operation(&self, {}) -> rocm_oxide::Result<impl rocm_oxide::DeviceOperation<Output = rocm_oxide::KernelLaunchCompletion> + 'static> {{\n",
-        method_name,
-        operation_params.join(", ")
-    ));
-    out.push_str(&generate_kernel_validation_lines(
-        kernel,
-        &buffer_arg_names,
-        &indirect_scalar_buffer_arg_names,
-        has_len_arg,
-        has_block_x_arg,
-        true,
-    ));
-    out.push_str("        let module = std::sync::Arc::clone(&self.module);\n");
-    out.push_str(&format!(
-        "        let kernel = std::sync::Arc::clone(&self.{field_name});\n"
-    ));
-    out.push_str(
-        "        Ok(move |context: &rocm_oxide::ExecutionContext| -> rocm_oxide::Result<rocm_oxide::KernelLaunchCompletion> {\n",
-    );
-    out.push_str(&generate_kernel_param_setup(&launch_args, "            "));
-    out.push_str("            unsafe {\n");
-    out.push_str(
-        "                kernel.launch_raw_on_stream(context.stream(), config, &mut __params)?;\n",
-    );
-    out.push_str("            }\n");
-    out.push_str("            let mut __completion = rocm_oxide::KernelLaunchCompletion::new();\n");
-    out.push_str("            __completion.keep_alive(module);\n");
-    out.push_str("            __completion.keep_alive(kernel);\n");
-    for arg_name in &keep_alive_arg_names {
+    if operation_supported {
         out.push_str(&format!(
-            "            __completion.keep_alive({arg_name});\n"
+            "    pub unsafe fn {}_operation(&self, {}) -> rocm_oxide::Result<impl rocm_oxide::DeviceOperation<Output = rocm_oxide::KernelLaunchCompletion> + 'static> {{\n",
+            method_name,
+            operation_params.join(", ")
+        ));
+        out.push_str(&generate_kernel_validation_lines(
+            kernel,
+            &buffer_arg_names,
+            &indirect_scalar_buffer_arg_names,
+            has_len_arg,
+            has_block_x_arg,
+            true,
+        ));
+        out.push_str("        let module = std::sync::Arc::clone(&self.module);\n");
+        out.push_str(&format!(
+            "        let kernel = std::sync::Arc::clone(&self.{field_name});\n"
+        ));
+        out.push_str(
+            "        Ok(move |context: &rocm_oxide::ExecutionContext| -> rocm_oxide::Result<rocm_oxide::KernelLaunchCompletion> {\n",
+        );
+        out.push_str(&generate_kernel_param_setup(&launch_args, "            "));
+        out.push_str("            unsafe {\n");
+        out.push_str(
+            "                kernel.launch_raw_on_stream(context.stream(), config, &mut __params)?;\n",
+        );
+        out.push_str("            }\n");
+        out.push_str("            let mut __completion = rocm_oxide::KernelLaunchCompletion::new();\n");
+        out.push_str("            __completion.keep_alive(module);\n");
+        out.push_str("            __completion.keep_alive(kernel);\n");
+        for arg_name in &keep_alive_arg_names {
+            out.push_str(&format!(
+                "            __completion.keep_alive({arg_name});\n"
+            ));
+        }
+        out.push_str("            Ok(__completion)\n");
+        out.push_str("        })\n");
+        out.push_str("    }\n");
+    } else {
+        out.push_str(&format!(
+            "    // {method_name}_operation is intentionally omitted because by-value raw pointer arguments require caller-managed lifetimes.\n"
         ));
     }
-    out.push_str("            Ok(__completion)\n");
-    out.push_str("        })\n");
-    out.push_str("    }\n");
     Ok(out)
 }
 
@@ -5577,6 +5599,65 @@ pub struct RustLayoutParams {
         assert!(binding.contains(
             "std::mem::offset_of!(RustLayoutParams, stride) == 4"
         ));
+    }
+
+    #[test]
+    fn emits_pointer_fields_for_host_visible_reference_closures() {
+        let structs = discover_device_structs_in_source(
+            r#"
+#[derive(Clone, Copy)]
+pub struct HostReferenceClosure {
+    pub bias: *const u32,
+    pub scale: u32,
+}
+"#,
+        )
+        .expect("pointer-bearing closure environment should parse");
+        assert_eq!(structs.len(), 1);
+        let binding = generate_device_struct_binding(&structs[0]);
+        assert!(binding.contains("pub struct HostReferenceClosure"));
+        assert!(binding.contains("pub bias: *const u32"));
+        assert!(binding.contains("std::mem::size_of::<HostReferenceClosure>() == 16"));
+        assert!(binding.contains("std::mem::align_of::<HostReferenceClosure>() == 8"));
+        assert!(binding.contains(
+            "std::mem::offset_of!(HostReferenceClosure, bias) == 0"
+        ));
+        assert!(binding.contains(
+            "std::mem::offset_of!(HostReferenceClosure, scale) == 8"
+        ));
+        assert!(!binding.contains("unsafe impl Send for HostReferenceClosure"));
+        assert!(!binding.contains("unsafe impl Sync for HostReferenceClosure"));
+    }
+
+    #[test]
+    fn omits_operations_for_by_value_raw_pointer_kernel_args() {
+        let source = r#"
+#[derive(Clone, Copy)]
+pub struct HostReferenceClosure {
+    pub bias: *const u32,
+    pub scale: u32,
+}
+
+#[kernel]
+pub unsafe extern "C" fn reference_probe(
+    out: gpu::DeviceSliceMut<u32>,
+    f: HostReferenceClosure,
+    n: usize,
+) {}
+"#;
+        let kernels = discover_kernels_in_source(source).expect("source should parse");
+        let device_structs = discover_device_structs_in_source(source)
+            .expect("pointer-bearing struct should parse")
+            .into_iter()
+            .map(|device_struct| (device_struct.name.clone(), device_struct))
+            .collect::<BTreeMap<_, _>>();
+        let binding = generate_kernel_binding(&kernels[0], &device_structs, None)
+            .expect("binding should generate");
+        assert!(binding.contains("pub unsafe fn reference_probe"));
+        assert!(binding.contains("f: HostReferenceClosure"));
+        assert!(binding.contains("let mut __arg2 = f.bias;"));
+        assert!(binding.contains("reference_probe_operation is intentionally omitted"));
+        assert!(!binding.contains("pub unsafe fn reference_probe_operation"));
     }
 
     #[test]

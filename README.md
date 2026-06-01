@@ -511,8 +511,10 @@ This roadmap is grounded in the validated probe targets:
   environment and passes it through a device helper.
   `compiler_host_closure_arg_probe_HostAffineClosure` validates a host-provided
   closure environment implementing `FnOnce` through ROCm metadata-driven
-  global-buffer kernargs; reference-capture safety gating is the remaining open
-  closure-parity item.
+  global-buffer kernargs. `compiler_host_reference_closure_probe_HostReferenceClosure`
+  adds a pointer-bearing closure environment for mapped pinned or managed memory,
+  so reference captures are only exercised when ROCm reports a host-visible
+  memory path.
 - ABI and layout parity: generated metadata now records rustc AMDGPU struct
   layout facts, including field offsets, padding, ABI size, and alignment;
   generated host bindings assert matching host layout and reject unsupported

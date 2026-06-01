@@ -100,9 +100,9 @@ Primary upstream reference:
   - [ ] SIMD/vector register helper type once a real AMDGPU use case is chosen
   - [x] slice scalarization at kernel boundaries for `DeviceSlice<T>` and
         `DeviceSliceMut<T>`
-- [ ] Closure parity:
+- [x] Closure parity:
   - [x] move closures captured by value
-  - [ ] reference closures gated by safe ROCm host-visible memory semantics
+  - [x] reference closures gated by safe ROCm host-visible memory semantics
   - [x] host-to-device closure arguments via metadata-driven closure
         environment buffers
   - [x] device-internal closures passed to device functions

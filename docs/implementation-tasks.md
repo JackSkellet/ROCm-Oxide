@@ -31,9 +31,9 @@ features on top of stronger contracts.
           bindings and keep a unit test for that ABI shape
     - [x] extend generated bindings to reject unsupported layout and by-value
           argument cases before launch
-  - [ ] Closure parity:
+  - [x] Closure parity:
     - [x] support move closures captured by value for generic device kernels
-    - [ ] support reference captures only when the chosen ROCm memory kind can
+    - [x] support reference captures only when the chosen ROCm memory kind can
           safely back the host-visible access pattern
     - [x] add host-to-device closure argument examples and tests, including
           metadata-driven indirect closure environment buffers

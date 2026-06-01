@@ -47,6 +47,12 @@ pub struct HostAffineClosure {
     pub xor_mask: u32,
 }
 
+#[derive(Clone, Copy)]
+pub struct HostReferenceClosure {
+    pub bias: *const u32,
+    pub scale: u32,
+}
+
 pub trait ClosureCaptureParams: Copy {
     fn apply(self, value: u32) -> u32;
 }
@@ -65,6 +71,15 @@ impl core::ops::FnOnce<(u32,)> for HostAffineClosure {
             .wrapping_mul(self.stride)
             .wrapping_add(self.base)
             ^ self.xor_mask
+    }
+}
+
+impl core::ops::FnOnce<(u32,)> for HostReferenceClosure {
+    type Output = u32;
+
+    extern "rust-call" fn call_once(self, args: (u32,)) -> Self::Output {
+        let bias = unsafe { core::ptr::read_volatile(self.bias) };
+        args.0.wrapping_mul(self.scale).wrapping_add(bias)
     }
 }
 
@@ -748,6 +763,27 @@ pub unsafe extern "C" fn compiler_host_closure_arg_probe<F: FnOnce(u32) -> u32 +
 
     let value = unsafe { input.read_unchecked(i) };
     let result = apply_device_closure(value.wrapping_add((i as u32) & 3), f);
+    let disjoint_out = unsafe { gpu::DisjointSliceMut::new_unchecked(out) };
+    disjoint_out.write_for_thread(thread, result);
+}
+
+// rocm-oxide: len(out)=n
+// rocm-oxide: len(input)=n
+#[kernel(monomorphize(HostReferenceClosure))]
+pub unsafe extern "C" fn compiler_host_reference_closure_probe<F: FnOnce(u32) -> u32 + Copy>(
+    out: gpu::DeviceSliceMut<u32>,
+    input: gpu::DeviceSlice<u32>,
+    f: F,
+    n: usize,
+) {
+    let thread = gpu::thread_index_x_witness();
+    let i = thread.get();
+    if i >= n {
+        return;
+    }
+
+    let value = unsafe { input.read_unchecked(i) };
+    let result = apply_device_closure(value.wrapping_add((i as u32) & 1), f);
     let disjoint_out = unsafe { gpu::DisjointSliceMut::new_unchecked(out) };
     disjoint_out.write_for_thread(thread, result);
 }
