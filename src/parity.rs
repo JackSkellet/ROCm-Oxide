@@ -5,6 +5,8 @@ pub enum CudaPortingConcept {
     ThreadBlockCluster,
     TensorMemoryAccelerator,
     WarpGroupMma,
+    NvvmLtoIr,
+    NvJitLink,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -55,6 +57,18 @@ pub struct RocmMatrixMathPlan {
     pub requires_external_library: bool,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct RocmCodeObjectInteropPlan {
+    pub lto_ir: RocmFeaturePlan,
+    pub jit_link: RocmFeaturePlan,
+    pub source_ir: &'static str,
+    pub compile_link_backend: &'static str,
+    pub load_backend: &'static str,
+    pub library_backend: &'static str,
+    pub cache_key: &'static str,
+    pub cuda_binary_compatible: bool,
+}
+
 pub fn rocm_feature_parity_for_device(properties: DeviceProperties) -> RocmFeatureSet {
     RocmFeatureSet {
         cluster_launch: RocmFeaturePlan {
@@ -79,6 +93,29 @@ pub fn rocm_feature_parity_for_device(properties: DeviceProperties) -> RocmFeatu
             requires_runtime_capability: properties.warp_size == 32 || properties.warp_size == 64,
             notes: "WGMMA is NVIDIA-specific; the AMD path is wavefront/block fragments or a ROCm library call.",
         },
+    }
+}
+
+pub const fn rocm_code_object_interop_plan() -> RocmCodeObjectInteropPlan {
+    RocmCodeObjectInteropPlan {
+        lto_ir: RocmFeaturePlan {
+            concept: CudaPortingConcept::NvvmLtoIr,
+            replacement: "AMDGPU LLVM IR, LLVM bitcode, or HIP source passed through COMGR",
+            requires_runtime_capability: true,
+            notes: "NVVM and LTOIR are NVIDIA formats; keep interchange at the source/IR layer and retarget to AMDGPU before code-object emission.",
+        },
+        jit_link: RocmFeaturePlan {
+            concept: CudaPortingConcept::NvJitLink,
+            replacement: "COMGR or ROCm clang linking relocatable AMDGPU objects into HSACO code objects",
+            requires_runtime_capability: true,
+            notes: "ROCm loads executable code objects through HIP modules or HIP library APIs; do not promise PTX, cubin, or nvJitLink ABI compatibility.",
+        },
+        source_ir: "Rust-authored AMDGPU LLVM IR, LLVM bitcode, or HIP source",
+        compile_link_backend: "COMGR compile/link backend with ROCm clang as the offline generated-artifact fallback",
+        load_backend: "hipModuleLoadData/hipModuleGetFunction with generated metadata validation",
+        library_backend: "optional ROCm library FFI such as rocBLAS, rocFFT, rocPRIM/hipCUB, hipBLASLt, and Composable Kernel",
+        cache_key: "backend + architecture + source/object inputs + options + launch metadata",
+        cuda_binary_compatible: false,
     }
 }
 
@@ -231,5 +268,15 @@ mod tests {
         assert_eq!(plan.staged_lds_bytes, 4096);
         assert!(plan.stream_ordered_copy);
         assert!(plan.host_mapped_staging);
+    }
+
+    #[test]
+    fn maps_nvvm_and_nvjitlink_to_rocm_artifact_model() {
+        let plan = rocm_code_object_interop_plan();
+        assert_eq!(plan.lto_ir.concept, CudaPortingConcept::NvvmLtoIr);
+        assert_eq!(plan.jit_link.concept, CudaPortingConcept::NvJitLink);
+        assert!(plan.compile_link_backend.contains("COMGR"));
+        assert!(plan.load_backend.contains("hipModuleLoadData"));
+        assert!(!plan.cuda_binary_compatible);
     }
 }

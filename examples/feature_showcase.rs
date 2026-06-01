@@ -2,7 +2,7 @@ use rocm_oxide::{
     AtomicMemoryKind, Comgr, Device, DeviceBuffer, DeviceOperation, Dim3, ExecutionContext,
     HipBlasLt, LaunchConfig, ManagedBuffer, ManagedMemoryKind, MatrixIntegrationReport,
     PinnedHostBuffer, Result, RocBlas, RocPrim, RocTx, RocmLibraryReport, SgemmLayout, StreamPool,
-    hiprtc, rocm_feature_parity_for_device,
+    hiprtc, rocm_code_object_interop_plan, rocm_feature_parity_for_device,
 };
 use std::sync::{Arc, mpsc};
 use std::time::Duration;
@@ -180,6 +180,12 @@ fn main() -> Result<()> {
     );
     println!(
         "ok: ROCm parity planner mapped cluster/TMA/WGMMA ports to AMD-specific launch, LDS, and matrix-library paths"
+    );
+    let artifact_plan = rocm_code_object_interop_plan();
+    assert!(!artifact_plan.cuda_binary_compatible);
+    assert!(artifact_plan.compile_link_backend.contains("COMGR"));
+    println!(
+        "ok: ROCm artifact interop planner mapped NVVM/LTOIR and nvJitLink to AMDGPU IR, COMGR, HSACO, HIP modules, and ROCm libraries"
     );
     let libraries = RocmLibraryReport::query();
     println!(

@@ -121,7 +121,7 @@ Primary upstream reference:
   - [x] cargo subcommand and pipeline inspection equivalents
   - [x] AMDGPU LLVM IR to `.hsaco` code-object path
   - [x] COMGR compile/link backend for persistent code-object caching
-  - [ ] ROCm replacement for CUDA LTOIR/nvJitLink interop using AMD LLVM IR,
+  - [x] ROCm replacement for CUDA LTOIR/nvJitLink interop using AMD LLVM IR,
         HIP modules, and ROCm libraries
   - [ ] debug-info and debugger workflow equivalent for ROCgdb or ROCm-native
         tooling
@@ -220,7 +220,8 @@ Primary upstream reference:
 - [ ] DSMEM and CUDA cluster launch should map to HIP cooperative launch where
       available, otherwise graph/stream-scheduled tiling plus global-memory
       rendezvous.
-- [ ] NVVM/LTOIR and nvJitLink concepts map only partially to ROCm code-object
-      linking; implement after the basic artifact model is stable.
+- [x] NVVM/LTOIR and nvJitLink concepts map to AMDGPU LLVM IR or HIP source,
+      COMGR/clang code-object linking, HIP modules, and optional ROCm libraries
+      rather than CUDA binary compatibility.
 - [ ] Fine-grained LLVM `syncscope` selection for ROCm atomics should follow the
       typed scoped API once the backend has a source marker path for that IR.

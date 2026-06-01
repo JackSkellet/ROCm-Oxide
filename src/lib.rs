@@ -22,8 +22,9 @@ pub use operation::{
     StreamPool, Value,
 };
 pub use parity::{
-    CudaPortingConcept, MatrixMathBackend, RocmFeaturePlan, RocmFeatureSet, RocmMatrixMathPlan,
-    RocmTileTransferPlan, RocmWorkgroupClusterPlan, rocm_feature_parity_for_device,
+    CudaPortingConcept, MatrixMathBackend, RocmCodeObjectInteropPlan, RocmFeaturePlan,
+    RocmFeatureSet, RocmMatrixMathPlan, RocmTileTransferPlan, RocmWorkgroupClusterPlan,
+    rocm_code_object_interop_plan, rocm_feature_parity_for_device,
 };
 pub use profiling::{RocTx, RocTxScopedRange, RocTxVersion};
 pub use runtime::{

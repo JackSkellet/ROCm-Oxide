@@ -11,6 +11,8 @@ uses HIP capabilities where they exist.
 | Thread block clusters | HIP cooperative grid launch when the device reports `hipDeviceAttributeCooperativeLaunch`; otherwise stream/graph-scheduled workgroup tiles with an explicit global-memory rendezvous. |
 | Tensor Memory Accelerator | Stream-ordered HIP copies into device buffers, then explicit LDS/shared-memory tile staging sized through `LaunchConfig::shared_mem_bytes`. |
 | WGMMA | rocWMMA-style wavefront fragments where that stack is installed, rocBLAS/hipBLAS library calls for host-orchestrated GEMM, and tiled Rust kernels as the portable fallback. |
+| NVVM/LTOIR | AMDGPU LLVM IR, LLVM bitcode, or HIP source that is retargeted before code-object emission. |
+| nvJitLink | COMGR or ROCm `clang` links relocatable AMDGPU objects into executable HSACO code objects; loading uses HIP module/library APIs. |
 
 ## Runtime Surface
 
@@ -24,11 +26,17 @@ uses HIP capabilities where they exist.
   `grid * block < 2^32` cooperative-launch limit explicit before launch.
 - `rocm_feature_parity_for_device()` turns a probed device into a
   `RocmFeatureSet` for code generators and examples.
+- `rocm_code_object_interop_plan()` defines the AMD artifact replacement for
+  NVIDIA NVVM/LTOIR and nvJitLink flows: AMDGPU IR, COMGR/clang code-object
+  linking, HIP module loading, optional ROCm library FFI, and cache keys over
+  backend, architecture, source/object inputs, options, and launch metadata.
 
 The important boundary is still explicit: CUDA DSMEM clusters, Hopper TMA, and
-NVIDIA WGMMA are not promised as ABI-compatible concepts. Ports should use the
-replacement plan as a source-level rewrite target, then let generated bindings
-validate buffer ownership, LDS sizing, and launch shape before the HIP call.
+NVIDIA WGMMA are not promised as ABI-compatible concepts. NVVM, LTOIR, PTX,
+cubin, and nvJitLink artifacts are not accepted as ROCm binary contracts.
+Ports should use the replacement plan as a source-level rewrite target, then
+let generated bindings validate buffer ownership, LDS sizing, artifact metadata,
+and launch shape before the HIP call.
 
 Primary references:
 [HIP device attributes](https://rocm.docs.amd.com/projects/HIP/en/latest/reference/hip_runtime_api/modules/device_management.html),

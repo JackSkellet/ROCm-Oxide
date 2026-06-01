@@ -24,3 +24,23 @@ points such as `hipLibraryLoadData`, `hipLibraryGetKernel`, and kernel-count
 queries. Those are useful future hooks for runtime artifact inspection, but the
 current launch path should keep using the explicit generated metadata until a
 runtime enumeration layer can add value without weakening validation.
+
+## CUDA Artifact Interop Mapping
+
+ROCm-Oxide does not treat NVIDIA NVVM IR, LTOIR, PTX, cubin, or nvJitLink as
+binary-compatible inputs. The supported replacement model is:
+
+1. keep source-level interchange in Rust-authored AMDGPU LLVM IR, LLVM bitcode,
+   or HIP source,
+2. compile with the generated LLVM/`llc`/ROCm `clang` path or the runtime COMGR
+   HIP source backend,
+3. link relocatable AMDGPU objects into executable HSACO code objects,
+4. cache code objects by backend, architecture, source/object inputs, options,
+   and launch metadata,
+5. load executable bytes through HIP module APIs, and
+6. call optional ROCm libraries through typed FFI wrappers when a library path
+   is a better fit than generated kernels.
+
+`rocm_code_object_interop_plan()` exposes this mapping to code generators and
+examples so ports can reason about the artifact boundary without promising CUDA
+ABI compatibility.

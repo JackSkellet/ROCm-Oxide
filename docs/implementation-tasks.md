@@ -67,7 +67,7 @@ features on top of stronger contracts.
   - [ ] ROCm-native interop/backends:
     - [x] turn COMGR probing into a real compile/link backend and persistent
           code-object cache path
-    - [ ] define the ROCm replacement for NVIDIA LTOIR/nvJitLink interop using
+    - [x] define the ROCm replacement for NVIDIA LTOIR/nvJitLink interop using
           AMD LLVM IR, code objects, HIP modules, and ROCm libraries
     - [ ] extend rocPRIM/hipCUB wrappers to sort, select, transform, and more
           scalar types
