@@ -3698,6 +3698,37 @@ fn generate_kernel_binding(
     out.push_str("    }\n");
 
     out.push('\n');
+    let mut graph_params = vec![
+        "graph: &rocm_oxide::hip::Graph".to_string(),
+        "dependencies: &[rocm_oxide::hip::GraphNode]".to_string(),
+    ];
+    graph_params.extend(params.clone());
+    out.push_str("    /// Adds this kernel launch as a node in an explicit HIP graph.\n");
+    out.push_str("    ///\n");
+    out.push_str("    /// # Safety\n");
+    out.push_str("    /// The caller must keep `self`, all buffers, and all argument-owned data\n");
+    out.push_str("    /// alive until graph execution using the returned node has completed.\n");
+    out.push_str(&format!(
+        "    pub unsafe fn {}_graph_node(&self, {}) -> rocm_oxide::Result<rocm_oxide::hip::GraphNode> {{\n",
+        kernel.name,
+        graph_params.join(", ")
+    ));
+    out.push_str(&generate_kernel_validation_lines(
+        kernel,
+        &buffer_arg_names,
+        has_len_arg,
+        has_block_x_arg,
+        false,
+    ));
+    out.push_str(&generate_kernel_param_setup(&launch_args, "        "));
+    out.push_str("        unsafe {\n");
+    out.push_str(&format!(
+        "            self.{field_name}.add_graph_node_raw(graph, dependencies, config, &mut __params)\n"
+    ));
+    out.push_str("        }\n");
+    out.push_str("    }\n");
+
+    out.push('\n');
     out.push_str(&format!(
         "    pub unsafe fn {}_operation(&self, {}) -> rocm_oxide::Result<impl rocm_oxide::DeviceOperation<Output = rocm_oxide::KernelLaunchCompletion> + 'static> {{\n",
         kernel.name,
@@ -4206,6 +4237,12 @@ pub unsafe extern "C" fn vector_add(
         assert!(binding.contains("out.as_mut_ptr()"));
         assert!(binding.contains("a.as_ptr()"));
         assert!(binding.contains("pub unsafe fn vector_add_operation"));
+        assert!(binding.contains("pub unsafe fn vector_add_graph_node"));
+        assert!(binding.contains("graph: &rocm_oxide::hip::Graph"));
+        assert!(binding.contains("dependencies: &[rocm_oxide::hip::GraphNode]"));
+        assert!(binding.contains(
+            "add_graph_node_raw(graph, dependencies, config, &mut __params)"
+        ));
         assert!(binding.contains("out: std::sync::Arc<rocm_oxide::DeviceBuffer<f32>>"));
         assert!(binding.contains("a: std::sync::Arc<rocm_oxide::DeviceBuffer<f32>>"));
         assert!(binding.contains("Output = rocm_oxide::KernelLaunchCompletion"));

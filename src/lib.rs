@@ -6,12 +6,15 @@ pub mod parity;
 mod runtime;
 
 pub use hip::{
-    DeviceBuffer, Event, Global, ManagedBuffer, ManagedMemoryKind, MemPool, PinnedHostBuffer,
+    DeviceBuffer, DeviceVirtualMemory, Event, Global, ManagedBuffer, ManagedMemoryKind,
+    MemAccessFlags, MemAllocationGranularity, MemLocation, MemPool, OwnedMemPool, PinnedHostBuffer,
     Stream,
 };
 pub use libraries::{
-    LibraryAvailability, RocBlas, RocBlasHandle, RocFft, RocFftComplexDirection,
-    RocFftExecutionInfo, RocFftPlan, RocFftSession, RocmLibraryReport, SgemmLayout,
+    Comgr, ComgrVersion, DeviceAlgorithmTemporaryStorage, HipBlasLt, HipBlasLtHandle,
+    LibraryAvailability, MatrixIntegrationReport, RocBlas, RocBlasHandle, RocFft,
+    RocFftComplexDirection, RocFftExecutionInfo, RocFftPlan, RocFftSession, RocPrim,
+    RocmLibraryReport, SgemmLayout,
 };
 pub use operation::{
     CapturedGraph, DeviceFuture, DeviceOperation, ExecutionContext, KernelLaunchCompletion,

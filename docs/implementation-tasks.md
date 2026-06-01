@@ -7,6 +7,27 @@ features on top of stronger contracts.
 
 ## Active Sequence
 
+- [x] CUDA-like feature follow-up sequence from
+      [cuda-future-work.md](/home/kjwtil/Documents/ROCm-Oxide/docs/cuda-future-work.md):
+  - [x] document CUDA features to track and their ROCm-Oxide rewrite targets
+  - [x] add first cooperative group device handles for thread blocks, wavefronts, and static tiles
+  - [x] smoke-test cooperative group handles through generated Rust device bindings
+  - [x] build an explicit HIP graph builder beyond stream capture:
+    - [x] add explicit graph creation, empty/dependency/memcpy/memset/kernel
+          node builders, node parameter setters, and graph exec update
+    - [x] verify explicit memset/memcpy graph replay and graph exec update
+          against device buffers
+    - [x] make generated bindings optionally produce graph kernel nodes
+  - [x] mature memory-pool allocation plans and then add HIP VMM primitives:
+    - [x] add owned HIP memory pools with release-threshold and access-policy
+          controls
+    - [x] add HIP VMM reserve/create/map/access RAII wrapper for device memory
+    - [x] verify custom pools and VMM-backed device copies on the local runtime
+    - [x] add graph mem alloc/free nodes and higher-level allocation-plan
+          objects for generated operation pipelines
+  - [x] add rocPRIM/hipCUB reduction and scan wrappers
+  - [x] add rocWMMA/hipBLASLt/Composable Kernel matrix integration candidates
+  - [x] add HIPRTC/COMGR specialization cache
 - [x] Typed device slices:
   - [x] add `DeviceSlice<T>` and `DeviceSliceMut<T>` to device code
   - [x] mirror the ABI shape on the host side
@@ -39,7 +60,7 @@ Local probes:
   HIP/runtime `7.2.53211-364a905`; AMD LLVM/clang `22.0.0git`. HIP reported
   managed memory, concurrent managed access, host-native atomics, host mapped
   memory, host registration, and memory pools. Current generated artifact on
-  that probe: 21 kernels, 33 buffer contracts, one linked object input, max VGPR
+  that probe: 22 kernels, 34 buffer contracts, one linked object input, max VGPR
   33, max SGPR 28, max kernarg 368 bytes, max static LDS 1024 bytes, max
   private segment 260 bytes, two dynamic-LDS kernels, and no dynamic stack
   users.
@@ -51,7 +72,7 @@ Local probes:
   reported on this topology. The RX 7900 XT path negotiates an upstream
   `8GT/s x4` PCIe link, which makes full-frame CPU readback/present paths
   bandwidth-sensitive at 1440p and 4K. Current generated artifact on this probe:
-  21 kernels, 33 buffer contracts, one linked object input, max VGPR 34, max
+  22 kernels, 34 buffer contracts, one linked object input, max VGPR 34, max
   SGPR 34, max kernarg 368 bytes, max static LDS 1024 bytes, max private
   segment 260 bytes, two dynamic-LDS kernels, and no dynamic stack users.
 - Both probes report wavefront size 32, max workgroup size 1024, max waves per

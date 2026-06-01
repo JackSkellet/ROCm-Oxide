@@ -1,6 +1,9 @@
+use std::collections::HashMap;
 use std::ffi::{CStr, CString, c_char, c_int};
 use std::fmt;
 use std::ptr;
+use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::{Arc, Mutex, OnceLock};
 
 pub type HiprtcResult = c_int;
 pub type HiprtcProgram = *mut std::ffi::c_void;
@@ -48,6 +51,14 @@ impl Error {
         };
         Self { code, message, log }
     }
+
+    fn invalid_input(message: impl Into<String>) -> Self {
+        Self {
+            code: -1,
+            message: message.into(),
+            log: None,
+        }
+    }
 }
 
 impl fmt::Display for Error {
@@ -63,6 +74,115 @@ impl fmt::Display for Error {
 impl std::error::Error for Error {}
 
 pub type Result<T> = std::result::Result<T, Error>;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum SpecializationBackend {
+    Hiprtc,
+    Comgr,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub struct SpecializationCacheKey {
+    pub backend: SpecializationBackend,
+    pub arch: String,
+    pub source_hash: u64,
+    pub options_hash: u64,
+    pub launch_metadata_hash: u64,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct SpecializationCacheStats {
+    pub entries: usize,
+    pub hits: usize,
+    pub misses: usize,
+}
+
+#[derive(Default)]
+pub struct SpecializationCache {
+    entries: Mutex<HashMap<SpecializationCacheKey, Arc<Vec<u8>>>>,
+    hits: AtomicUsize,
+    misses: AtomicUsize,
+}
+
+impl SpecializationCacheKey {
+    pub fn new(source: &str, arch: &str, options: &[String], launch_metadata: &str) -> Self {
+        Self::with_backend(
+            SpecializationBackend::Hiprtc,
+            source,
+            arch,
+            options,
+            launch_metadata,
+        )
+    }
+
+    pub fn with_backend(
+        backend: SpecializationBackend,
+        source: &str,
+        arch: &str,
+        options: &[String],
+        launch_metadata: &str,
+    ) -> Self {
+        Self {
+            backend,
+            arch: arch.to_string(),
+            source_hash: stable_hash(source.as_bytes()),
+            options_hash: stable_hash_strings(options.iter().map(String::as_str)),
+            launch_metadata_hash: stable_hash(launch_metadata.as_bytes()),
+        }
+    }
+}
+
+impl SpecializationCache {
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    pub fn get_or_compile<F>(&self, key: SpecializationCacheKey, compile: F) -> Result<Arc<Vec<u8>>>
+    where
+        F: FnOnce() -> Result<Vec<u8>>,
+    {
+        if let Some(code_object) = self
+            .entries
+            .lock()
+            .expect("HIPRTC specialization cache mutex poisoned")
+            .get(&key)
+            .cloned()
+        {
+            self.hits.fetch_add(1, Ordering::Relaxed);
+            return Ok(code_object);
+        }
+
+        self.misses.fetch_add(1, Ordering::Relaxed);
+        let compiled = Arc::new(compile()?);
+        let mut entries = self
+            .entries
+            .lock()
+            .expect("HIPRTC specialization cache mutex poisoned");
+        let entry = entries.entry(key).or_insert_with(|| Arc::clone(&compiled));
+        Ok(Arc::clone(entry))
+    }
+
+    pub fn stats(&self) -> SpecializationCacheStats {
+        SpecializationCacheStats {
+            entries: self
+                .entries
+                .lock()
+                .expect("HIPRTC specialization cache mutex poisoned")
+                .len(),
+            hits: self.hits.load(Ordering::Relaxed),
+            misses: self.misses.load(Ordering::Relaxed),
+        }
+    }
+
+    pub fn clear(&self) {
+        self.entries
+            .lock()
+            .expect("HIPRTC specialization cache mutex poisoned")
+            .clear();
+        self.hits.store(0, Ordering::Relaxed);
+        self.misses.store(0, Ordering::Relaxed);
+    }
+}
 
 fn check(code: HiprtcResult) -> Result<()> {
     if code == HIPRTC_SUCCESS {
@@ -144,14 +264,152 @@ impl Drop for Program {
 }
 
 pub fn compile_code_object(source: &str, arch: &str) -> Result<Vec<u8>> {
-    let source = CString::new(source).expect("kernel source contained NUL");
+    compile_code_object_with_options(source, arch, &[])
+}
+
+pub fn compile_code_object_with_options(
+    source: &str,
+    arch: &str,
+    extra_options: &[&str],
+) -> Result<Vec<u8>> {
+    let options = compile_options(arch, extra_options);
+    compile_code_object_with_resolved_options(source, &options)
+}
+
+pub fn compile_code_object_cached(source: &str, arch: &str) -> Result<Arc<Vec<u8>>> {
+    compile_code_object_cached_with_metadata(source, arch, &[], "")
+}
+
+pub fn compile_code_object_cached_with_metadata(
+    source: &str,
+    arch: &str,
+    extra_options: &[&str],
+    launch_metadata: &str,
+) -> Result<Arc<Vec<u8>>> {
+    let options = compile_options(arch, extra_options);
+    let key = SpecializationCacheKey::new(source, arch, &options, launch_metadata);
+    global_specialization_cache().get_or_compile(key, || {
+        compile_code_object_with_resolved_options(source, &options)
+    })
+}
+
+pub fn specialization_cache_stats() -> SpecializationCacheStats {
+    global_specialization_cache().stats()
+}
+
+pub fn clear_specialization_cache() {
+    global_specialization_cache().clear();
+}
+
+pub fn global_specialization_cache() -> &'static SpecializationCache {
+    static CACHE: OnceLock<SpecializationCache> = OnceLock::new();
+    CACHE.get_or_init(SpecializationCache::new)
+}
+
+fn compile_options(arch: &str, extra_options: &[&str]) -> Vec<String> {
+    let mut options = vec![
+        format!("--gpu-architecture={arch}"),
+        "-std=c++17".to_string(),
+        "-O3".to_string(),
+    ];
+    options.extend(extra_options.iter().map(|option| (*option).to_string()));
+    options
+}
+
+fn compile_code_object_with_resolved_options(source: &str, options: &[String]) -> Result<Vec<u8>> {
+    let source = CString::new(source)
+        .map_err(|_| Error::invalid_input("kernel source contained a NUL byte"))?;
     let name = c"kernel.hip";
     let program = Program::new(&source, name)?;
-    let options = [
-        CString::new(format!("--gpu-architecture={arch}")).unwrap(),
-        CString::new("-std=c++17").unwrap(),
-        CString::new("-O3").unwrap(),
-    ];
+    let options = options
+        .iter()
+        .map(|option| {
+            CString::new(option.as_str()).map_err(|_| {
+                Error::invalid_input(format!("HIPRTC option `{option}` contained a NUL byte"))
+            })
+        })
+        .collect::<Result<Vec<_>>>()?;
     program.compile(&options)?;
     program.code()
+}
+
+fn stable_hash(bytes: &[u8]) -> u64 {
+    const FNV_OFFSET: u64 = 0xcbf2_9ce4_8422_2325;
+    const FNV_PRIME: u64 = 0x0000_0100_0000_01b3;
+    let mut hash = FNV_OFFSET;
+    for byte in bytes {
+        hash ^= u64::from(*byte);
+        hash = hash.wrapping_mul(FNV_PRIME);
+    }
+    hash
+}
+
+fn stable_hash_strings<'a>(strings: impl Iterator<Item = &'a str>) -> u64 {
+    const FNV_PRIME: u64 = 0x0000_0100_0000_01b3;
+    let mut hash = 0xcbf2_9ce4_8422_2325;
+    for string in strings {
+        for byte in string.as_bytes() {
+            hash ^= u64::from(*byte);
+            hash = hash.wrapping_mul(FNV_PRIME);
+        }
+        hash ^= 0xff;
+        hash = hash.wrapping_mul(FNV_PRIME);
+    }
+    hash
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{SpecializationBackend, SpecializationCache, SpecializationCacheKey};
+    use std::sync::Arc;
+
+    #[test]
+    fn specialization_cache_key_changes_with_metadata() {
+        let options = vec!["--gpu-architecture=gfx1100".to_string(), "-O3".to_string()];
+        let a = SpecializationCacheKey::new(
+            "extern \"C\" __global__ void k() {}",
+            "gfx1100",
+            &options,
+            "block=128",
+        );
+        let b = SpecializationCacheKey::new(
+            "extern \"C\" __global__ void k() {}",
+            "gfx1100",
+            &options,
+            "block=256",
+        );
+        assert_ne!(a, b);
+    }
+
+    #[test]
+    fn specialization_cache_key_changes_with_backend() {
+        let options = vec!["--gpu-architecture=gfx1100".to_string(), "-O3".to_string()];
+        let hiprtc = SpecializationCacheKey::new("source", "gfx1100", &options, "meta");
+        let comgr = SpecializationCacheKey::with_backend(
+            SpecializationBackend::Comgr,
+            "source",
+            "gfx1100",
+            &options,
+            "meta",
+        );
+        assert_ne!(hiprtc, comgr);
+    }
+
+    #[test]
+    fn specialization_cache_reuses_successful_compile() {
+        let cache = SpecializationCache::new();
+        let key = SpecializationCacheKey::new("source", "gfx1100", &["-O3".to_string()], "meta");
+        let first = cache
+            .get_or_compile(key.clone(), || Ok(vec![1, 2, 3]))
+            .expect("first compile should work");
+        let second = cache
+            .get_or_compile(key, || Ok(vec![9, 9, 9]))
+            .expect("second compile should hit cache");
+        assert!(Arc::ptr_eq(&first, &second));
+        assert_eq!(second.as_slice(), [1, 2, 3]);
+        let stats = cache.stats();
+        assert_eq!(stats.entries, 1);
+        assert_eq!(stats.hits, 1);
+        assert_eq!(stats.misses, 1);
+    }
 }

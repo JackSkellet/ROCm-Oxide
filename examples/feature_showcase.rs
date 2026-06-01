@@ -1,7 +1,8 @@
 use rocm_oxide::{
-    AtomicMemoryKind, Device, DeviceBuffer, DeviceOperation, Dim3, ExecutionContext, LaunchConfig,
-    ManagedBuffer, ManagedMemoryKind, PinnedHostBuffer, Result, RocBlas, RocmLibraryReport,
-    SgemmLayout, StreamPool, rocm_feature_parity_for_device,
+    AtomicMemoryKind, Comgr, Device, DeviceBuffer, DeviceOperation, Dim3, ExecutionContext,
+    HipBlasLt, LaunchConfig, ManagedBuffer, ManagedMemoryKind, MatrixIntegrationReport,
+    PinnedHostBuffer, Result, RocBlas, RocPrim, RocmLibraryReport, SgemmLayout, StreamPool, hiprtc,
+    rocm_feature_parity_for_device,
 };
 use std::sync::{Arc, mpsc};
 use std::time::Duration;
@@ -146,13 +147,59 @@ fn main() -> Result<()> {
     );
     let libraries = RocmLibraryReport::query();
     println!(
-        "ok: library interop status: rocBLAS={} rocFFT={}",
-        libraries.rocblas.available, libraries.rocfft.available
+        "ok: library interop status: rocBLAS={} rocFFT={} COMGR={} rocPRIM/hipCUB={}",
+        libraries.rocblas.available,
+        libraries.rocfft.available,
+        libraries.comgr.available,
+        libraries.rocprim.available
     );
+    match Comgr::open() {
+        Ok(comgr) => {
+            let version = comgr.version();
+            println!(
+                "ok: COMGR compiler backend library is discoverable: version={}.{}",
+                version.major, version.minor
+            );
+        }
+        Err(err) => println!("skip: COMGR compiler backend library smoke: {err}"),
+    }
     match run_rocblas_sgemm_smoke() {
         Ok(()) => println!("ok: optional rocBLAS SGEMM interop completed on device buffers"),
         Err(err) => println!("skip: optional rocBLAS SGEMM smoke: {err}"),
     }
+    match run_rocprim_smoke() {
+        Ok(()) => {
+            println!("ok: rocPRIM/hipCUB reduce and scan wrappers completed on device buffers")
+        }
+        Err(err) => println!("skip: rocPRIM/hipCUB reduce/scan smoke: {err}"),
+    }
+    let matrix_libraries = MatrixIntegrationReport::query();
+    println!(
+        "ok: matrix integration candidates: hipBLASLt={} ComposableKernel={} rocWMMA={}",
+        matrix_libraries.hipblaslt.available,
+        matrix_libraries.composable_kernel.available,
+        matrix_libraries.rocwmma.available
+    );
+    match run_hipblaslt_smoke() {
+        Ok(version) => println!("ok: hipBLASLt handle/version smoke completed: version={version}"),
+        Err(err) => println!("skip: hipBLASLt handle/version smoke: {err}"),
+    }
+    hiprtc::clear_specialization_cache();
+    let _first_specialized = device.compile_hip_source_specialized(
+        VECTOR_ADD_HIPRTC,
+        &["-DROCM_OXIDE_SPECIALIZED_CACHE_SMOKE=1"],
+        "vector_add:block=256;items=65536",
+    )?;
+    let _second_specialized = device.compile_hip_source_specialized(
+        VECTOR_ADD_HIPRTC,
+        &["-DROCM_OXIDE_SPECIALIZED_CACHE_SMOKE=1"],
+        "vector_add:block=256;items=65536",
+    )?;
+    let cache_stats = hiprtc::specialization_cache_stats();
+    assert_eq!(cache_stats.entries, 1);
+    assert_eq!(cache_stats.hits, 1);
+    assert_eq!(cache_stats.misses, 1);
+    println!("ok: HIPRTC specialization cache reused a launch-metadata keyed code object");
 
     let d_a = Arc::new(DeviceBuffer::from_slice(&a)?);
     let d_b = Arc::new(DeviceBuffer::from_slice(&b)?);
@@ -496,4 +543,27 @@ fn run_rocblas_sgemm_smoke() -> Result<()> {
         }
     }
     Ok(())
+}
+
+fn run_rocprim_smoke() -> Result<()> {
+    let rocprim = RocPrim::open()?;
+    let input = DeviceBuffer::from_slice(&[1u32, 2, 3, 4])?;
+    let reduced = DeviceBuffer::<u32>::new(1)?;
+    rocprim.reduce_sum_u32(&input, &reduced)?;
+    assert_eq!(reduced.copy_to_vec()?, [10]);
+
+    let inclusive = DeviceBuffer::<u32>::new(input.len())?;
+    rocprim.inclusive_sum_u32(&input, &inclusive)?;
+    assert_eq!(inclusive.copy_to_vec()?, [1, 3, 6, 10]);
+
+    let exclusive = DeviceBuffer::<u32>::new(input.len())?;
+    rocprim.exclusive_sum_u32(&input, &exclusive, 0)?;
+    assert_eq!(exclusive.copy_to_vec()?, [0, 1, 3, 6]);
+    Ok(())
+}
+
+fn run_hipblaslt_smoke() -> Result<i32> {
+    let lt = HipBlasLt::open()?;
+    let handle = lt.create_handle()?;
+    handle.version()
 }

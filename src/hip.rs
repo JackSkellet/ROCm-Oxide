@@ -11,9 +11,12 @@ pub type HipEvent = *mut c_void;
 pub type HipGraph = *mut c_void;
 pub type HipGraphExec = *mut c_void;
 pub type HipGraphNode = *mut c_void;
+pub type HipGraphExecUpdateResult = c_int;
 pub type HipMemPool = *mut c_void;
+pub type HipMemGenericAllocationHandle = *mut c_void;
 
 pub const HIP_SUCCESS: HipError = 0;
+pub const HIP_ERROR_NOT_SUPPORTED: HipError = 801;
 pub const HIP_MEMCPY_HOST_TO_DEVICE: c_int = 1;
 pub const HIP_MEMCPY_DEVICE_TO_HOST: c_int = 2;
 pub const HIP_MEMCPY_DEVICE_TO_DEVICE: c_int = 3;
@@ -59,6 +62,104 @@ pub const HIP_MEM_POOL_ATTR_RESERVED_MEM_CURRENT: c_int = 0x5;
 pub const HIP_MEM_POOL_ATTR_RESERVED_MEM_HIGH: c_int = 0x6;
 pub const HIP_MEM_POOL_ATTR_USED_MEM_CURRENT: c_int = 0x7;
 pub const HIP_MEM_POOL_ATTR_USED_MEM_HIGH: c_int = 0x8;
+pub const HIP_GRAPH_EXEC_UPDATE_SUCCESS: HipGraphExecUpdateResult = 0;
+pub const HIP_MEM_LOCATION_TYPE_DEVICE: c_int = 1;
+pub const HIP_MEM_LOCATION_TYPE_HOST: c_int = 2;
+pub const HIP_MEM_LOCATION_TYPE_HOST_NUMA: c_int = 3;
+pub const HIP_MEM_LOCATION_TYPE_HOST_NUMA_CURRENT: c_int = 4;
+pub const HIP_MEM_ACCESS_FLAGS_PROT_NONE: c_int = 0;
+pub const HIP_MEM_ACCESS_FLAGS_PROT_READ: c_int = 1;
+pub const HIP_MEM_ACCESS_FLAGS_PROT_READ_WRITE: c_int = 3;
+pub const HIP_MEM_ALLOCATION_TYPE_PINNED: c_int = 1;
+pub const HIP_MEM_HANDLE_TYPE_NONE: c_int = 0;
+pub const HIP_MEM_ALLOCATION_GRANULARITY_MINIMUM: c_int = 0;
+pub const HIP_MEM_ALLOCATION_GRANULARITY_RECOMMENDED: c_int = 1;
+
+#[repr(C)]
+#[derive(Clone, Copy)]
+struct HipMemLocation {
+    location_type: c_int,
+    id: c_int,
+}
+
+#[repr(C)]
+struct HipMemAccessDesc {
+    location: HipMemLocation,
+    flags: c_int,
+}
+
+#[repr(C)]
+struct HipMemPoolProps {
+    alloc_type: c_int,
+    handle_types: c_int,
+    location: HipMemLocation,
+    win32_security_attributes: *mut c_void,
+    max_size: usize,
+    reserved: [u8; 56],
+}
+
+#[repr(C)]
+struct HipMemAllocationFlags {
+    compression_type: u8,
+    gpu_direct_rdma_capable: u8,
+    usage: u16,
+}
+
+#[repr(C)]
+struct HipMemAllocationProp {
+    allocation_type: c_int,
+    requested_handle_type: c_int,
+    location: HipMemLocation,
+    win32_handle_metadata: *mut c_void,
+    alloc_flags: HipMemAllocationFlags,
+}
+
+#[repr(C)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct HipDim3 {
+    x: c_uint,
+    y: c_uint,
+    z: c_uint,
+}
+
+impl HipDim3 {
+    const fn new(dims: (u32, u32, u32)) -> Self {
+        Self {
+            x: dims.0,
+            y: dims.1,
+            z: dims.2,
+        }
+    }
+}
+
+#[repr(C)]
+struct HipKernelNodeParams {
+    block_dim: HipDim3,
+    extra: *mut *mut c_void,
+    func: *mut c_void,
+    grid_dim: HipDim3,
+    kernel_params: *mut *mut c_void,
+    shared_mem_bytes: c_uint,
+}
+
+#[repr(C)]
+struct HipMemsetParams {
+    dst: *mut c_void,
+    element_size: c_uint,
+    height: usize,
+    pitch: usize,
+    value: c_uint,
+    width: usize,
+}
+
+#[repr(C)]
+struct HipMemAllocNodeParams {
+    pool_props: HipMemPoolProps,
+    access_descs: *const HipMemAccessDesc,
+    access_desc_count: usize,
+    bytesize: usize,
+    dptr: *mut c_void,
+}
 
 unsafe extern "C" {
     fn hipGetErrorString(error: HipError) -> *const c_char;
@@ -92,6 +193,18 @@ unsafe extern "C" {
     fn hipMemPoolTrimTo(mem_pool: HipMemPool, min_bytes_to_hold: usize) -> HipError;
     fn hipMemPoolSetAttribute(mem_pool: HipMemPool, attr: c_int, value: *mut c_void) -> HipError;
     fn hipMemPoolGetAttribute(mem_pool: HipMemPool, attr: c_int, value: *mut c_void) -> HipError;
+    fn hipMemPoolCreate(mem_pool: *mut HipMemPool, pool_props: *const HipMemPoolProps) -> HipError;
+    fn hipMemPoolDestroy(mem_pool: HipMemPool) -> HipError;
+    fn hipMemPoolSetAccess(
+        mem_pool: HipMemPool,
+        desc_list: *const HipMemAccessDesc,
+        count: usize,
+    ) -> HipError;
+    fn hipMemPoolGetAccess(
+        flags: *mut c_int,
+        mem_pool: HipMemPool,
+        location: *mut HipMemLocation,
+    ) -> HipError;
     fn hipHostMalloc(ptr: *mut *mut c_void, size: usize, flags: c_uint) -> HipError;
     fn hipHostGetDevicePointer(
         device_ptr: *mut *mut c_void,
@@ -178,9 +291,120 @@ unsafe extern "C" {
         log_buffer: *mut c_char,
         buffer_size: usize,
     ) -> HipError;
+    fn hipGraphCreate(graph: *mut HipGraph, flags: c_uint) -> HipError;
+    fn hipGraphAddDependencies(
+        graph: HipGraph,
+        from: *const HipGraphNode,
+        to: *const HipGraphNode,
+        num_dependencies: usize,
+    ) -> HipError;
+    fn hipGraphAddKernelNode(
+        graph_node: *mut HipGraphNode,
+        graph: HipGraph,
+        dependencies: *const HipGraphNode,
+        num_dependencies: usize,
+        node_params: *const HipKernelNodeParams,
+    ) -> HipError;
+    fn hipGraphKernelNodeSetParams(
+        node: HipGraphNode,
+        node_params: *const HipKernelNodeParams,
+    ) -> HipError;
+    fn hipGraphAddMemcpyNode1D(
+        graph_node: *mut HipGraphNode,
+        graph: HipGraph,
+        dependencies: *const HipGraphNode,
+        num_dependencies: usize,
+        dst: *mut c_void,
+        src: *const c_void,
+        count: usize,
+        kind: c_int,
+    ) -> HipError;
+    fn hipGraphMemcpyNodeSetParams1D(
+        node: HipGraphNode,
+        dst: *mut c_void,
+        src: *const c_void,
+        count: usize,
+        kind: c_int,
+    ) -> HipError;
+    fn hipGraphAddMemsetNode(
+        graph_node: *mut HipGraphNode,
+        graph: HipGraph,
+        dependencies: *const HipGraphNode,
+        num_dependencies: usize,
+        node_params: *const HipMemsetParams,
+    ) -> HipError;
+    fn hipGraphMemsetNodeSetParams(
+        node: HipGraphNode,
+        node_params: *const HipMemsetParams,
+    ) -> HipError;
+    fn hipGraphAddMemAllocNode(
+        graph_node: *mut HipGraphNode,
+        graph: HipGraph,
+        dependencies: *const HipGraphNode,
+        num_dependencies: usize,
+        node_params: *mut HipMemAllocNodeParams,
+    ) -> HipError;
+    fn hipGraphAddMemFreeNode(
+        graph_node: *mut HipGraphNode,
+        graph: HipGraph,
+        dependencies: *const HipGraphNode,
+        num_dependencies: usize,
+        dev_ptr: *mut c_void,
+    ) -> HipError;
+    fn hipGraphAddEmptyNode(
+        graph_node: *mut HipGraphNode,
+        graph: HipGraph,
+        dependencies: *const HipGraphNode,
+        num_dependencies: usize,
+    ) -> HipError;
+    fn hipGraphExecUpdate(
+        graph_exec: HipGraphExec,
+        graph: HipGraph,
+        error_node: *mut HipGraphNode,
+        update_result: *mut HipGraphExecUpdateResult,
+    ) -> HipError;
     fn hipGraphLaunch(graph_exec: HipGraphExec, stream: HipStream) -> HipError;
     fn hipGraphDestroy(graph: HipGraph) -> HipError;
     fn hipGraphExecDestroy(graph_exec: HipGraphExec) -> HipError;
+    fn hipMemAddressReserve(
+        ptr: *mut *mut c_void,
+        size: usize,
+        alignment: usize,
+        addr: *mut c_void,
+        flags: u64,
+    ) -> HipError;
+    fn hipMemAddressFree(ptr: *mut c_void, size: usize) -> HipError;
+    fn hipMemCreate(
+        handle: *mut HipMemGenericAllocationHandle,
+        size: usize,
+        props: *const HipMemAllocationProp,
+        flags: u64,
+    ) -> HipError;
+    fn hipMemRelease(handle: HipMemGenericAllocationHandle) -> HipError;
+    fn hipMemGetAllocationGranularity(
+        granularity: *mut usize,
+        props: *const HipMemAllocationProp,
+        option: c_int,
+    ) -> HipError;
+    fn hipMemMap(
+        ptr: *mut c_void,
+        size: usize,
+        offset: usize,
+        handle: HipMemGenericAllocationHandle,
+        flags: u64,
+    ) -> HipError;
+    fn hipMemUnmap(ptr: *mut c_void, size: usize) -> HipError;
+    fn hipMemSetAccess(
+        ptr: *mut c_void,
+        size: usize,
+        desc: *const HipMemAccessDesc,
+        count: usize,
+    ) -> HipError;
+    fn hipMemGetAccess(
+        flags: *mut u64,
+        location: *const HipMemLocation,
+        ptr: *mut c_void,
+    ) -> HipError;
 }
 
 #[derive(Debug, Clone)]
@@ -210,6 +434,10 @@ impl Error {
             code: None,
             message: message.into(),
         }
+    }
+
+    pub const fn code(&self) -> Option<HipError> {
+        self.code
     }
 }
 
@@ -304,13 +532,131 @@ pub enum ManagedMemoryKind {
     CoarseGrain,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum MemLocation {
+    Device(i32),
+    Host,
+    HostNuma(i32),
+    HostNumaCurrent,
+}
+
+impl MemLocation {
+    const fn as_raw(self) -> HipMemLocation {
+        match self {
+            Self::Device(id) => HipMemLocation {
+                location_type: HIP_MEM_LOCATION_TYPE_DEVICE,
+                id,
+            },
+            Self::Host => HipMemLocation {
+                location_type: HIP_MEM_LOCATION_TYPE_HOST,
+                id: 0,
+            },
+            Self::HostNuma(id) => HipMemLocation {
+                location_type: HIP_MEM_LOCATION_TYPE_HOST_NUMA,
+                id,
+            },
+            Self::HostNumaCurrent => HipMemLocation {
+                location_type: HIP_MEM_LOCATION_TYPE_HOST_NUMA_CURRENT,
+                id: 0,
+            },
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum MemAccessFlags {
+    None,
+    Read,
+    ReadWrite,
+}
+
+impl MemAccessFlags {
+    const fn as_raw(self) -> c_int {
+        match self {
+            Self::None => HIP_MEM_ACCESS_FLAGS_PROT_NONE,
+            Self::Read => HIP_MEM_ACCESS_FLAGS_PROT_READ,
+            Self::ReadWrite => HIP_MEM_ACCESS_FLAGS_PROT_READ_WRITE,
+        }
+    }
+
+    fn from_raw(raw: c_int) -> Result<Self> {
+        match raw {
+            HIP_MEM_ACCESS_FLAGS_PROT_NONE => Ok(Self::None),
+            HIP_MEM_ACCESS_FLAGS_PROT_READ => Ok(Self::Read),
+            HIP_MEM_ACCESS_FLAGS_PROT_READ_WRITE => Ok(Self::ReadWrite),
+            _ => Err(Error::invalid_value(format!(
+                "HIP returned unknown memory access flags {raw}"
+            ))),
+        }
+    }
+
+    fn from_u64(raw: u64) -> Result<Self> {
+        let raw = c_int::try_from(raw).map_err(|_| {
+            Error::invalid_value(format!(
+                "HIP returned out-of-range memory access flags {raw}"
+            ))
+        })?;
+        Self::from_raw(raw)
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum MemAllocationGranularity {
+    Minimum,
+    Recommended,
+}
+
+impl MemAllocationGranularity {
+    const fn as_raw(self) -> c_int {
+        match self {
+            Self::Minimum => HIP_MEM_ALLOCATION_GRANULARITY_MINIMUM,
+            Self::Recommended => HIP_MEM_ALLOCATION_GRANULARITY_RECOMMENDED,
+        }
+    }
+}
+
 #[derive(Clone, Copy)]
 pub struct MemPool {
     raw: HipMemPool,
 }
 
+pub struct OwnedMemPool {
+    raw: HipMemPool,
+}
+
 unsafe impl Send for MemPool {}
 unsafe impl Sync for MemPool {}
+unsafe impl Send for OwnedMemPool {}
+unsafe impl Sync for OwnedMemPool {}
+
+impl OwnedMemPool {
+    pub fn new_for_device(device_id: i32) -> Result<Self> {
+        let props = hip_mem_pool_props_for_device(device_id);
+        let mut raw = ptr::null_mut();
+        unsafe {
+            check(hipMemPoolCreate(&mut raw, &props))?;
+        }
+        Ok(Self { raw })
+    }
+
+    pub const fn as_pool(&self) -> MemPool {
+        MemPool { raw: self.raw }
+    }
+
+    pub const fn as_raw(&self) -> HipMemPool {
+        self.raw
+    }
+}
+
+impl Drop for OwnedMemPool {
+    fn drop(&mut self) {
+        if !self.raw.is_null() {
+            unsafe {
+                let _ = hipMemPoolDestroy(self.raw);
+            }
+        }
+    }
+}
 
 impl MemPool {
     pub fn default_for_device(device_id: i32) -> Result<Self> {
@@ -331,6 +677,10 @@ impl MemPool {
 
     pub fn set_current_for_device(self, device_id: i32) -> Result<()> {
         unsafe { check(hipDeviceSetMemPool(device_id, self.raw)) }
+    }
+
+    pub fn create_for_device(device_id: i32) -> Result<OwnedMemPool> {
+        OwnedMemPool::new_for_device(device_id)
     }
 
     pub fn trim_to(self, min_bytes_to_hold: usize) -> Result<()> {
@@ -394,6 +744,23 @@ impl MemPool {
         Ok(self.get_i32_attr(HIP_MEM_POOL_REUSE_ALLOW_INTERNAL_DEPENDENCIES)? != 0)
     }
 
+    pub fn set_access(self, location: MemLocation, flags: MemAccessFlags) -> Result<()> {
+        let desc = HipMemAccessDesc {
+            location: location.as_raw(),
+            flags: flags.as_raw(),
+        };
+        unsafe { check(hipMemPoolSetAccess(self.raw, &desc, 1)) }
+    }
+
+    pub fn access(self, location: MemLocation) -> Result<MemAccessFlags> {
+        let mut location = location.as_raw();
+        let mut flags = 0;
+        unsafe {
+            check(hipMemPoolGetAccess(&mut flags, self.raw, &mut location))?;
+        }
+        MemAccessFlags::from_raw(flags)
+    }
+
     pub const fn as_raw(self) -> HipMemPool {
         self.raw
     }
@@ -440,6 +807,175 @@ impl MemPool {
                 (&mut value as *mut i32).cast::<c_void>(),
             ))
         }
+    }
+}
+
+fn hip_mem_pool_props_for_device(device_id: i32) -> HipMemPoolProps {
+    HipMemPoolProps {
+        alloc_type: HIP_MEM_ALLOCATION_TYPE_PINNED,
+        handle_types: HIP_MEM_HANDLE_TYPE_NONE,
+        location: MemLocation::Device(device_id).as_raw(),
+        win32_security_attributes: ptr::null_mut(),
+        max_size: 0,
+        reserved: [0; 56],
+    }
+}
+
+pub struct DeviceVirtualMemory {
+    ptr: *mut c_void,
+    size: usize,
+    requested_size: usize,
+    handle: HipMemGenericAllocationHandle,
+}
+
+unsafe impl Send for DeviceVirtualMemory {}
+unsafe impl Sync for DeviceVirtualMemory {}
+
+impl DeviceVirtualMemory {
+    pub fn new_for_device(device_id: i32, requested_size: usize) -> Result<Self> {
+        if requested_size == 0 {
+            return Err(Error::invalid_value(
+                "HIP virtual memory reservations must be nonzero",
+            ));
+        }
+        let granularity =
+            Self::allocation_granularity(device_id, MemAllocationGranularity::Recommended)?;
+        let size =
+            round_up_to_multiple(requested_size, granularity, "HIP virtual memory allocation")?;
+        let props = hip_mem_allocation_props_for_device(device_id);
+        let mut ptr = ptr::null_mut();
+        let mut handle = ptr::null_mut();
+
+        unsafe {
+            if let Err(err) = check(hipMemAddressReserve(
+                &mut ptr,
+                size,
+                granularity,
+                ptr::null_mut(),
+                0,
+            )) {
+                return Err(err);
+            }
+            if let Err(err) = check(hipMemCreate(&mut handle, size, &props, 0)) {
+                let _ = hipMemAddressFree(ptr, size);
+                return Err(err);
+            }
+            if let Err(err) = check(hipMemMap(ptr, size, 0, handle, 0)) {
+                let _ = hipMemRelease(handle);
+                let _ = hipMemAddressFree(ptr, size);
+                return Err(err);
+            }
+            let desc = HipMemAccessDesc {
+                location: MemLocation::Device(device_id).as_raw(),
+                flags: MemAccessFlags::ReadWrite.as_raw(),
+            };
+            if let Err(err) = check(hipMemSetAccess(ptr, size, &desc, 1)) {
+                let _ = hipMemUnmap(ptr, size);
+                let _ = hipMemRelease(handle);
+                let _ = hipMemAddressFree(ptr, size);
+                return Err(err);
+            }
+        }
+
+        Ok(Self {
+            ptr,
+            size,
+            requested_size,
+            handle,
+        })
+    }
+
+    pub fn allocation_granularity(
+        device_id: i32,
+        granularity: MemAllocationGranularity,
+    ) -> Result<usize> {
+        let props = hip_mem_allocation_props_for_device(device_id);
+        let mut value = 0usize;
+        unsafe {
+            check(hipMemGetAllocationGranularity(
+                &mut value,
+                &props,
+                granularity.as_raw(),
+            ))?;
+        }
+        Ok(value)
+    }
+
+    pub fn set_access(&self, location: MemLocation, flags: MemAccessFlags) -> Result<()> {
+        let desc = HipMemAccessDesc {
+            location: location.as_raw(),
+            flags: flags.as_raw(),
+        };
+        unsafe { check(hipMemSetAccess(self.ptr, self.size, &desc, 1)) }
+    }
+
+    pub fn access(&self, location: MemLocation) -> Result<MemAccessFlags> {
+        let location = location.as_raw();
+        let mut flags = 0u64;
+        unsafe {
+            check(hipMemGetAccess(&mut flags, &location, self.ptr))?;
+        }
+        MemAccessFlags::from_u64(flags)
+    }
+
+    pub fn as_ptr<T>(&self) -> *const T {
+        self.ptr.cast::<T>()
+    }
+
+    pub fn as_mut_ptr<T>(&self) -> *mut T {
+        self.ptr.cast::<T>()
+    }
+
+    pub fn size(&self) -> usize {
+        self.size
+    }
+
+    pub fn requested_size(&self) -> usize {
+        self.requested_size
+    }
+}
+
+impl Drop for DeviceVirtualMemory {
+    fn drop(&mut self) {
+        if !self.ptr.is_null() {
+            unsafe {
+                let _ = hipMemUnmap(self.ptr, self.size);
+                if !self.handle.is_null() {
+                    let _ = hipMemRelease(self.handle);
+                }
+                let _ = hipMemAddressFree(self.ptr, self.size);
+            }
+        }
+    }
+}
+
+fn hip_mem_allocation_props_for_device(device_id: i32) -> HipMemAllocationProp {
+    HipMemAllocationProp {
+        allocation_type: HIP_MEM_ALLOCATION_TYPE_PINNED,
+        requested_handle_type: HIP_MEM_HANDLE_TYPE_NONE,
+        location: MemLocation::Device(device_id).as_raw(),
+        win32_handle_metadata: ptr::null_mut(),
+        alloc_flags: HipMemAllocationFlags {
+            compression_type: 0,
+            gpu_direct_rdma_capable: 0,
+            usage: 0,
+        },
+    }
+}
+
+fn round_up_to_multiple(value: usize, granularity: usize, label: &str) -> Result<usize> {
+    if granularity == 0 {
+        return Err(Error::invalid_value(format!(
+            "{label} granularity must be nonzero"
+        )));
+    }
+    let remainder = value % granularity;
+    if remainder == 0 {
+        Ok(value)
+    } else {
+        value
+            .checked_add(granularity - remainder)
+            .ok_or_else(|| Error::invalid_value(format!("{label} size overflow")))
     }
 }
 
@@ -520,7 +1056,135 @@ pub struct Graph {
 unsafe impl Send for Graph {}
 unsafe impl Sync for Graph {}
 
+/// Non-owning handle to a node inside a HIP graph.
+///
+/// The owning `Graph` must outlive any `GraphNode` values created from it.
+#[repr(transparent)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct GraphNode {
+    raw: HipGraphNode,
+}
+
+unsafe impl Send for GraphNode {}
+unsafe impl Sync for GraphNode {}
+
+impl GraphNode {
+    pub const fn as_raw(self) -> HipGraphNode {
+        self.raw
+    }
+
+    /// Retargets a 1D memcpy node.
+    ///
+    /// # Safety
+    ///
+    /// `self` must be a memcpy node. `dst` and `src` must be valid for
+    /// `bytes` bytes in the address space described by `kind` whenever an
+    /// executable graph built from this node is launched.
+    pub unsafe fn set_memcpy_1d(
+        self,
+        dst: *mut c_void,
+        src: *const c_void,
+        bytes: usize,
+        kind: c_int,
+    ) -> Result<()> {
+        unsafe {
+            check(hipGraphMemcpyNodeSetParams1D(
+                self.raw, dst, src, bytes, kind,
+            ))
+        }
+    }
+
+    /// Retargets a byte-pattern memset node.
+    ///
+    /// # Safety
+    ///
+    /// `self` must be a memset node. `dst` must be valid and writable for
+    /// `bytes` bytes whenever an executable graph built from this node is
+    /// launched.
+    pub unsafe fn set_memset_1d(self, dst: *mut c_void, value: u8, bytes: usize) -> Result<()> {
+        let params = hip_memset_params_1d(dst, value, bytes);
+        unsafe { check(hipGraphMemsetNodeSetParams(self.raw, &params)) }
+    }
+
+    /// Retargets a kernel node.
+    ///
+    /// # Safety
+    ///
+    /// `self` must be a kernel node. `function` and all pointed-to kernel
+    /// arguments must remain valid whenever an executable graph built from this
+    /// node is launched.
+    pub unsafe fn set_kernel_params(
+        self,
+        function: &Function,
+        grid: (u32, u32, u32),
+        block: (u32, u32, u32),
+        shared_mem_bytes: u32,
+        params: &mut [*mut c_void],
+    ) -> Result<()> {
+        let params = hip_kernel_node_params(function, grid, block, shared_mem_bytes, params);
+        unsafe { check(hipGraphKernelNodeSetParams(self.raw, &params)) }
+    }
+}
+
+/// Non-owning handle to memory allocated by a HIP graph allocation node.
+///
+/// Dropping this value does not free device memory. Add an explicit graph memory
+/// free node after the last graph node that uses the returned pointer.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct GraphMemoryAllocation {
+    allocation_node: GraphNode,
+    ptr: *mut c_void,
+    bytes: usize,
+}
+
+unsafe impl Send for GraphMemoryAllocation {}
+unsafe impl Sync for GraphMemoryAllocation {}
+
+impl GraphMemoryAllocation {
+    pub const fn allocation_node(self) -> GraphNode {
+        self.allocation_node
+    }
+
+    pub const fn as_ptr<T>(self) -> *const T {
+        self.ptr.cast::<T>()
+    }
+
+    pub const fn as_mut_ptr<T>(self) -> *mut T {
+        self.ptr.cast::<T>()
+    }
+
+    pub const fn bytes(self) -> usize {
+        self.bytes
+    }
+
+    /// Adds a graph node that frees this graph-managed allocation.
+    ///
+    /// # Safety
+    ///
+    /// `dependencies` must order this free after every node that reads or writes
+    /// the allocation. The allocation must belong to `graph`.
+    pub unsafe fn add_free_node(
+        self,
+        graph: &Graph,
+        dependencies: &[GraphNode],
+    ) -> Result<GraphNode> {
+        unsafe { graph.add_mem_free_node(dependencies, self.ptr) }
+    }
+}
+
 impl Graph {
+    pub fn new() -> Result<Self> {
+        let mut raw = ptr::null_mut();
+        unsafe {
+            check(hipGraphCreate(&mut raw, 0))?;
+        }
+        Ok(Self { raw })
+    }
+
+    pub fn as_raw(&self) -> HipGraph {
+        self.raw
+    }
+
     pub fn instantiate(&self) -> Result<GraphExec> {
         let mut raw = ptr::null_mut();
         unsafe {
@@ -533,6 +1197,259 @@ impl Graph {
             ))?;
         }
         Ok(GraphExec { raw })
+    }
+
+    pub fn add_empty_node(&self, dependencies: &[GraphNode]) -> Result<GraphNode> {
+        let (dependencies, dependency_count) = graph_dependency_slice(dependencies);
+        let mut raw = ptr::null_mut();
+        unsafe {
+            check(hipGraphAddEmptyNode(
+                &mut raw,
+                self.raw,
+                dependencies,
+                dependency_count,
+            ))?;
+        }
+        Ok(GraphNode { raw })
+    }
+
+    pub fn add_dependency(&self, from: GraphNode, to: GraphNode) -> Result<()> {
+        let from = [from.raw];
+        let to = [to.raw];
+        unsafe {
+            check(hipGraphAddDependencies(
+                self.raw,
+                from.as_ptr(),
+                to.as_ptr(),
+                1,
+            ))
+        }
+    }
+
+    pub fn add_dependencies(&self, edges: &[(GraphNode, GraphNode)]) -> Result<()> {
+        if edges.is_empty() {
+            return Ok(());
+        }
+        let from = edges.iter().map(|(from, _)| from.raw).collect::<Vec<_>>();
+        let to = edges.iter().map(|(_, to)| to.raw).collect::<Vec<_>>();
+        unsafe {
+            check(hipGraphAddDependencies(
+                self.raw,
+                from.as_ptr(),
+                to.as_ptr(),
+                edges.len(),
+            ))
+        }
+    }
+
+    /// Adds a 1D memcpy node to the graph.
+    ///
+    /// # Safety
+    ///
+    /// `dst` and `src` must be valid for `bytes` bytes in the address space
+    /// described by `kind` whenever an executable graph built from this graph
+    /// is launched.
+    pub unsafe fn add_memcpy_node_1d(
+        &self,
+        dependencies: &[GraphNode],
+        dst: *mut c_void,
+        src: *const c_void,
+        bytes: usize,
+        kind: c_int,
+    ) -> Result<GraphNode> {
+        let (dependencies, dependency_count) = graph_dependency_slice(dependencies);
+        let mut raw = ptr::null_mut();
+        unsafe {
+            check(hipGraphAddMemcpyNode1D(
+                &mut raw,
+                self.raw,
+                dependencies,
+                dependency_count,
+                dst,
+                src,
+                bytes,
+                kind,
+            ))?;
+        }
+        Ok(GraphNode { raw })
+    }
+
+    /// Adds a byte-pattern memset node to the graph.
+    ///
+    /// # Safety
+    ///
+    /// `dst` must be valid and writable for `bytes` bytes whenever an
+    /// executable graph built from this graph is launched.
+    pub unsafe fn add_memset_node_1d(
+        &self,
+        dependencies: &[GraphNode],
+        dst: *mut c_void,
+        value: u8,
+        bytes: usize,
+    ) -> Result<GraphNode> {
+        let (dependencies, dependency_count) = graph_dependency_slice(dependencies);
+        let params = hip_memset_params_1d(dst, value, bytes);
+        let mut raw = ptr::null_mut();
+        unsafe {
+            check(hipGraphAddMemsetNode(
+                &mut raw,
+                self.raw,
+                dependencies,
+                dependency_count,
+                &params,
+            ))?;
+        }
+        Ok(GraphNode { raw })
+    }
+
+    /// Adds a graph memory allocation node and returns the graph-managed pointer.
+    pub fn add_mem_alloc_node(
+        &self,
+        dependencies: &[GraphNode],
+        device_id: i32,
+        bytes: usize,
+    ) -> Result<GraphMemoryAllocation> {
+        if bytes == 0 {
+            return Err(Error::invalid_value(
+                "HIP graph memory allocation nodes must request nonzero bytes",
+            ));
+        }
+        let (dependencies, dependency_count) = graph_dependency_slice(dependencies);
+        let access_desc = HipMemAccessDesc {
+            location: MemLocation::Device(device_id).as_raw(),
+            flags: MemAccessFlags::ReadWrite.as_raw(),
+        };
+        let mut params = HipMemAllocNodeParams {
+            pool_props: hip_mem_pool_props_for_device(device_id),
+            access_descs: &access_desc,
+            access_desc_count: 1,
+            bytesize: bytes,
+            dptr: ptr::null_mut(),
+        };
+        let mut raw = ptr::null_mut();
+        unsafe {
+            check(hipGraphAddMemAllocNode(
+                &mut raw,
+                self.raw,
+                dependencies,
+                dependency_count,
+                &mut params,
+            ))?;
+        }
+        if params.dptr.is_null() {
+            return Err(Error::invalid_value(
+                "HIP graph memory allocation node returned a null device pointer",
+            ));
+        }
+        Ok(GraphMemoryAllocation {
+            allocation_node: GraphNode { raw },
+            ptr: params.dptr,
+            bytes,
+        })
+    }
+
+    /// Adds a graph memory free node.
+    ///
+    /// # Safety
+    ///
+    /// `ptr` must identify a graph-managed allocation, and `dependencies` must
+    /// order the free after every graph node that uses `ptr`.
+    pub unsafe fn add_mem_free_node(
+        &self,
+        dependencies: &[GraphNode],
+        ptr: *mut c_void,
+    ) -> Result<GraphNode> {
+        if ptr.is_null() {
+            return Err(Error::invalid_value(
+                "HIP graph memory free node pointer is null",
+            ));
+        }
+        let (dependencies, dependency_count) = graph_dependency_slice(dependencies);
+        let mut raw = ptr::null_mut();
+        unsafe {
+            check(hipGraphAddMemFreeNode(
+                &mut raw,
+                self.raw,
+                dependencies,
+                dependency_count,
+                ptr,
+            ))?;
+        }
+        Ok(GraphNode { raw })
+    }
+
+    /// Adds a kernel launch node to the graph.
+    ///
+    /// # Safety
+    ///
+    /// `function` and all pointed-to kernel arguments must remain valid
+    /// whenever an executable graph built from this graph is launched.
+    pub unsafe fn add_kernel_node(
+        &self,
+        dependencies: &[GraphNode],
+        function: &Function,
+        grid: (u32, u32, u32),
+        block: (u32, u32, u32),
+        shared_mem_bytes: u32,
+        params: &mut [*mut c_void],
+    ) -> Result<GraphNode> {
+        let (dependencies, dependency_count) = graph_dependency_slice(dependencies);
+        let params = hip_kernel_node_params(function, grid, block, shared_mem_bytes, params);
+        let mut raw = ptr::null_mut();
+        unsafe {
+            check(hipGraphAddKernelNode(
+                &mut raw,
+                self.raw,
+                dependencies,
+                dependency_count,
+                &params,
+            ))?;
+        }
+        Ok(GraphNode { raw })
+    }
+}
+
+fn graph_dependency_slice(dependencies: &[GraphNode]) -> (*const HipGraphNode, usize) {
+    if dependencies.is_empty() {
+        (ptr::null(), 0)
+    } else {
+        (
+            dependencies.as_ptr().cast::<HipGraphNode>(),
+            dependencies.len(),
+        )
+    }
+}
+
+fn hip_memset_params_1d(dst: *mut c_void, value: u8, bytes: usize) -> HipMemsetParams {
+    HipMemsetParams {
+        dst,
+        element_size: 1,
+        height: 1,
+        pitch: bytes,
+        value: value as c_uint,
+        width: bytes,
+    }
+}
+
+fn hip_kernel_node_params(
+    function: &Function,
+    grid: (u32, u32, u32),
+    block: (u32, u32, u32),
+    shared_mem_bytes: u32,
+    params: &mut [*mut c_void],
+) -> HipKernelNodeParams {
+    let kernel_params = if params.is_empty() {
+        ptr::null_mut()
+    } else {
+        params.as_mut_ptr()
+    };
+    HipKernelNodeParams {
+        block_dim: HipDim3::new(block),
+        extra: ptr::null_mut(),
+        func: function.raw.cast::<c_void>(),
+        grid_dim: HipDim3::new(grid),
+        kernel_params,
+        shared_mem_bytes,
     }
 }
 
@@ -556,6 +1473,26 @@ unsafe impl Sync for GraphExec {}
 impl GraphExec {
     pub fn launch(&self, stream: &Stream) -> Result<()> {
         unsafe { check(hipGraphLaunch(self.raw, stream.as_raw())) }
+    }
+
+    pub fn update(&self, graph: &Graph) -> Result<()> {
+        let mut error_node = ptr::null_mut();
+        let mut update_result = HIP_GRAPH_EXEC_UPDATE_SUCCESS;
+        unsafe {
+            check(hipGraphExecUpdate(
+                self.raw,
+                graph.raw,
+                &mut error_node,
+                &mut update_result,
+            ))?;
+        }
+        if update_result == HIP_GRAPH_EXEC_UPDATE_SUCCESS {
+            Ok(())
+        } else {
+            Err(Error::invalid_value(format!(
+                "HIP graph exec update failed with result {update_result}"
+            )))
+        }
     }
 }
 
@@ -1014,6 +1951,37 @@ impl<T> DeviceBuffer<T> {
             check(hipMemcpy(
                 output.cast::<c_void>(),
                 self.ptr.cast::<c_void>(),
+                bytes,
+                HIP_MEMCPY_DEVICE_TO_DEVICE,
+            ))
+        }
+    }
+
+    /// Copies from another device-visible pointer into this buffer.
+    ///
+    /// This is intended for interop sources such as HIP virtual-memory
+    /// reservations or graphics resources that expose raw device pointers.
+    ///
+    /// # Safety
+    ///
+    /// `input` must point to at least `len` valid `T` elements in device
+    /// address space, must be readable for the duration of the copy, and must
+    /// not alias this buffer.
+    pub unsafe fn copy_from_device_ptr(&self, input: *const T, len: usize) -> Result<()> {
+        validate_slice_len("device-to-device source", len, self.len)?;
+        let bytes = checked_allocation_bytes::<T>(len, "device-to-device copy")?;
+        if bytes == 0 {
+            return Ok(());
+        }
+        if input.is_null() {
+            return Err(Error::invalid_value(
+                "device-to-device source pointer is null",
+            ));
+        }
+        unsafe {
+            check(hipMemcpy(
+                self.ptr.cast::<c_void>(),
+                input.cast::<c_void>(),
                 bytes,
                 HIP_MEMCPY_DEVICE_TO_DEVICE,
             ))
@@ -1533,7 +2501,16 @@ pub fn set_device(device_id: i32) -> Result<()> {
 
 #[cfg(test)]
 mod tests {
-    use super::{DeviceBuffer, Global, ManagedBuffer, PinnedHostBuffer};
+    use super::{
+        DeviceBuffer, DeviceVirtualMemory, Global, Graph, HIP_ERROR_NOT_SUPPORTED,
+        HIP_MEMCPY_DEVICE_TO_DEVICE, ManagedBuffer, MemAccessFlags, MemLocation, MemPool,
+        PinnedHostBuffer, Stream, current_device,
+    };
+    use std::ffi::c_void;
+
+    fn is_not_supported(err: &super::Error) -> bool {
+        err.code() == Some(HIP_ERROR_NOT_SUPPORTED)
+    }
 
     #[test]
     fn device_allocation_size_overflow_is_error() {
@@ -1598,6 +2575,225 @@ mod tests {
         assert_eq!(
             buffer.copy_to_vec().expect("download should work"),
             [0, 0, 0]
+        );
+    }
+
+    #[test]
+    fn explicit_graph_memset_and_copy_nodes_round_trip() {
+        let input = DeviceBuffer::from_slice(&[1u32, 2, 3, 4]).expect("input upload should work");
+        let scratch = DeviceBuffer::<u32>::new(4).expect("scratch allocation should work");
+        let output = DeviceBuffer::<u32>::new(4).expect("output allocation should work");
+        let stream = Stream::new().expect("stream should be created");
+        let graph = Graph::new().expect("graph should be created");
+        let bytes = std::mem::size_of::<u32>() * input.len();
+
+        let gate = graph.add_empty_node(&[]).expect("empty node should work");
+        let zero_output = unsafe {
+            graph.add_memset_node_1d(&[gate], output.as_mut_ptr().cast::<c_void>(), 0, bytes)
+        }
+        .expect("memset node should work");
+        let copy_to_scratch = unsafe {
+            graph.add_memcpy_node_1d(
+                &[zero_output],
+                scratch.as_mut_ptr().cast::<c_void>(),
+                input.as_ptr().cast::<c_void>(),
+                bytes,
+                HIP_MEMCPY_DEVICE_TO_DEVICE,
+            )
+        }
+        .expect("device-to-device memcpy node should work");
+        let copy_to_output = unsafe {
+            graph.add_memcpy_node_1d(
+                &[],
+                output.as_mut_ptr().cast::<c_void>(),
+                scratch.as_ptr().cast::<c_void>(),
+                bytes,
+                HIP_MEMCPY_DEVICE_TO_DEVICE,
+            )
+        }
+        .expect("dependent memcpy node should work");
+        graph
+            .add_dependency(copy_to_scratch, copy_to_output)
+            .expect("explicit dependency should work");
+
+        let exec = graph.instantiate().expect("graph instantiate should work");
+        exec.launch(&stream).expect("graph launch should work");
+        stream.synchronize().expect("graph stream should finish");
+        assert_eq!(
+            output.copy_to_vec().expect("download should work"),
+            [1, 2, 3, 4]
+        );
+    }
+
+    #[test]
+    fn explicit_graph_mem_alloc_and_free_nodes_round_trip_if_supported() {
+        let device_id = current_device().expect("current device should be visible");
+        let output = DeviceBuffer::<u8>::new(16).expect("output allocation should work");
+        let stream = Stream::new().expect("stream should be created");
+        let graph = Graph::new().expect("graph should be created");
+        let bytes = output.len();
+
+        let allocation = match graph.add_mem_alloc_node(&[], device_id, bytes) {
+            Ok(allocation) => allocation,
+            Err(err) if is_not_supported(&err) => return,
+            Err(err) => {
+                panic!("graph memory allocation nodes should work or be unsupported: {err}")
+            }
+        };
+        assert_eq!(allocation.bytes(), bytes);
+        assert!(!allocation.as_mut_ptr::<u8>().is_null());
+
+        let fill = unsafe {
+            graph.add_memset_node_1d(
+                &[allocation.allocation_node()],
+                allocation.as_mut_ptr::<u8>().cast::<c_void>(),
+                0x5a,
+                bytes,
+            )
+        }
+        .expect("graph memset on graph allocation should work");
+        let copy_to_output = unsafe {
+            graph.add_memcpy_node_1d(
+                &[fill],
+                output.as_mut_ptr().cast::<c_void>(),
+                allocation.as_ptr::<u8>().cast::<c_void>(),
+                bytes,
+                HIP_MEMCPY_DEVICE_TO_DEVICE,
+            )
+        }
+        .expect("graph copy from graph allocation should work");
+        unsafe {
+            allocation
+                .add_free_node(&graph, &[copy_to_output])
+                .expect("graph memory free node should work");
+        }
+
+        let exec = match graph.instantiate() {
+            Ok(exec) => exec,
+            Err(err) if is_not_supported(&err) => return,
+            Err(err) => panic!("graph memory allocation instantiate should work: {err}"),
+        };
+        exec.launch(&stream)
+            .expect("graph memory allocation launch should work");
+        stream
+            .synchronize()
+            .expect("graph memory allocation stream should finish");
+        assert_eq!(
+            output.copy_to_vec().expect("download should work"),
+            [0x5a; 16]
+        );
+    }
+
+    #[test]
+    fn graph_exec_update_retargets_memcpy_node() {
+        let input_a = DeviceBuffer::from_slice(&[5u32, 6, 7, 8]).expect("upload A should work");
+        let input_b = DeviceBuffer::from_slice(&[9u32, 10, 11, 12]).expect("upload B should work");
+        let output = DeviceBuffer::<u32>::new(4).expect("output allocation should work");
+        let stream = Stream::new().expect("stream should be created");
+        let bytes = std::mem::size_of::<u32>() * input_a.len();
+
+        let graph_a = Graph::new().expect("graph A should be created");
+        unsafe {
+            graph_a.add_memcpy_node_1d(
+                &[],
+                output.as_mut_ptr().cast::<c_void>(),
+                input_a.as_ptr().cast::<c_void>(),
+                bytes,
+                HIP_MEMCPY_DEVICE_TO_DEVICE,
+            )
+        }
+        .expect("graph A memcpy node should work");
+        let exec = graph_a
+            .instantiate()
+            .expect("graph A instantiate should work");
+        exec.launch(&stream).expect("graph A launch should work");
+        stream.synchronize().expect("graph A stream should finish");
+        assert_eq!(
+            output.copy_to_vec().expect("download A should work"),
+            [5, 6, 7, 8]
+        );
+
+        let graph_b = Graph::new().expect("graph B should be created");
+        unsafe {
+            graph_b.add_memcpy_node_1d(
+                &[],
+                output.as_mut_ptr().cast::<c_void>(),
+                input_b.as_ptr().cast::<c_void>(),
+                bytes,
+                HIP_MEMCPY_DEVICE_TO_DEVICE,
+            )
+        }
+        .expect("graph B memcpy node should work");
+        exec.update(&graph_b).expect("graph update should work");
+        exec.launch(&stream)
+            .expect("updated graph launch should work");
+        stream
+            .synchronize()
+            .expect("updated graph stream should finish");
+        assert_eq!(
+            output.copy_to_vec().expect("download B should work"),
+            [9, 10, 11, 12]
+        );
+    }
+
+    #[test]
+    fn owned_memory_pool_access_flags_round_trip_if_supported() {
+        let device_id = current_device().expect("current device should be visible");
+        let pool = match MemPool::create_for_device(device_id) {
+            Ok(pool) => pool,
+            Err(err) if is_not_supported(&err) => return,
+            Err(err) => panic!("custom pool creation should work or be unsupported: {err}"),
+        };
+        let pool = pool.as_pool();
+        pool.set_release_threshold(4096)
+            .expect("custom pool release threshold should be set");
+        assert_eq!(
+            pool.release_threshold()
+                .expect("custom pool release threshold should be queried"),
+            4096
+        );
+        pool.set_access(MemLocation::Device(device_id), MemAccessFlags::ReadWrite)
+            .expect("custom pool device access should be set");
+        assert_eq!(
+            pool.access(MemLocation::Device(device_id))
+                .expect("custom pool device access should be queried"),
+            MemAccessFlags::ReadWrite
+        );
+    }
+
+    #[test]
+    fn virtual_memory_round_trips_through_device_copies_if_supported() {
+        let device_id = current_device().expect("current device should be visible");
+        let bytes = std::mem::size_of::<u32>() * 4;
+        let memory = match DeviceVirtualMemory::new_for_device(device_id, bytes) {
+            Ok(memory) => memory,
+            Err(err) if is_not_supported(&err) => return,
+            Err(err) => panic!("device virtual memory should work or be unsupported: {err}"),
+        };
+        assert!(memory.size() >= bytes);
+        assert_eq!(memory.requested_size(), bytes);
+        assert_eq!(
+            memory
+                .access(MemLocation::Device(device_id))
+                .expect("virtual memory access should be queried"),
+            MemAccessFlags::ReadWrite
+        );
+
+        let input = DeviceBuffer::from_slice(&[13u32, 14, 15, 16]).expect("upload should work");
+        unsafe {
+            input
+                .copy_to_device_ptr(memory.as_mut_ptr::<u32>(), 4)
+                .expect("copy into virtual memory should work");
+        }
+        let output = DeviceBuffer::<u32>::new(4).expect("output allocation should work");
+        unsafe {
+            output
+                .copy_from_device_ptr(memory.as_ptr::<u32>(), 4)
+                .expect("copy from virtual memory should work");
+        }
+        assert_eq!(
+            output.copy_to_vec().expect("download should work"),
+            [13, 14, 15, 16]
         );
     }
 

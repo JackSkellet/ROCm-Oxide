@@ -33,3 +33,22 @@ Rules for using it safely:
 `Device::default_mem_pool` returns the device default pool. `Device::set_mem_pool`
 sets the current pool used by `hipMallocAsync`; `DeviceBuffer::new_from_pool_async`
 uses a specific pool directly.
+
+`Device::create_mem_pool` creates an owned HIP memory pool that destroys itself
+on drop. `MemPool::set_access` and `MemPool::access` expose HIP pool access
+descriptors for peer/multi-device policy work. The local root test verifies
+custom-pool release-threshold and access-policy round trips without using the
+known hard-faulting explicit-pool allocation path on this machine.
+
+Explicit HIP graph allocation nodes are available through
+`Graph::add_mem_alloc_node`, which returns a `GraphMemoryAllocation` carrying the
+allocation node, byte size, and graph-managed device pointer. Add a free node
+with `GraphMemoryAllocation::add_free_node` after the last graph node that uses
+the pointer. This gives generated operation pipelines a concrete allocation-plan
+object without depending on the explicit-pool allocation path that is currently
+fragile on the local `gfx1100` PCIe topology.
+
+`Device::reserve_virtual_memory` exposes a first HIP VMM path for device-local
+virtual memory: reserve address space, create an allocation handle, map it, set
+device read/write access, and clean up in reverse order on drop. It is intended
+as a low-level building block for future multi-device allocation-plan policies.

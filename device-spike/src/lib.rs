@@ -238,6 +238,43 @@ pub unsafe extern "C" fn scoped_atomics(
     }
 }
 
+// rocm-oxide: len(out)=12
+#[kernel]
+pub unsafe extern "C" fn cooperative_groups_probe(out: gpu::DeviceSliceMut<u32>) {
+    let block = gpu::this_thread_block();
+    let wave = gpu::this_wavefront();
+    let tile = gpu::tiled_partition::<32>(block);
+    let rank = block.thread_rank();
+    let wave_any_first = wave.any(rank == 0) as u32;
+    let wave_all_in_bounds = wave.all(wave.thread_rank() < wave.size()) as u32;
+    let wave_max_lane = wave.reduce_max_u32(wave.thread_rank());
+
+    if rank == 0 {
+        unsafe {
+            out.write_unchecked(0, block.size());
+            out.write_unchecked(1, block.group_index_x());
+            out.write_unchecked(2, rank);
+            out.write_unchecked(3, wave.size());
+            out.write_unchecked(4, tile.size());
+            out.write_unchecked(8, wave_any_first);
+            out.write_unchecked(9, wave_all_in_bounds);
+            out.write_unchecked(10, wave_max_lane);
+        }
+    }
+    if rank == 31 {
+        unsafe {
+            out.write_unchecked(5, tile.thread_rank());
+            out.write_unchecked(6, tile.meta_group_rank());
+        }
+    }
+    if rank == 32 {
+        unsafe {
+            out.write_unchecked(7, tile.meta_group_rank());
+            out.write_unchecked(11, wave.meta_group_rank());
+        }
+    }
+}
+
 #[kernel]
 pub unsafe extern "C" fn rainbow_geometry(
     frame: gpu::DeviceSliceMut<u32>,

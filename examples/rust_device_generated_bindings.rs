@@ -70,6 +70,34 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     assert_eq!(atomic_scope_out.copy_to_vec()?, vec![0, 1, 2, 0]);
     assert_eq!(atomic_counters.copy_to_vec()?, vec![256, 256, 256]);
 
+    let cooperative_out = DeviceBuffer::<u32>::new(12)?;
+    unsafe {
+        kernels.cooperative_groups_probe(
+            LaunchConfig::new(Dim3::x(1), Dim3::x(block_x)),
+            &cooperative_out,
+        )?;
+    }
+    rocm_oxide::hip::synchronize()?;
+    let cooperative = cooperative_out.copy_to_vec()?;
+    let wavefront_size = device.properties()?.warp_size;
+    assert_eq!(
+        cooperative,
+        vec![
+            block_x,
+            0,
+            0,
+            wavefront_size,
+            32,
+            31,
+            0,
+            1,
+            1,
+            1,
+            wavefront_size - 1,
+            1
+        ]
+    );
+
     let reduce_n = 1_000usize;
     let reduce_block_x = 128u32;
     let partial_count = reduce_n.div_ceil(reduce_block_x as usize);
@@ -218,6 +246,25 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             return Err(format!("mismatch at {index}: got {got}, expected {expected}").into());
         }
     }
+
+    let graph_out = DeviceBuffer::<f32>::new(n)?;
+    let graph = rocm_oxide::hip::Graph::new()?;
+    unsafe {
+        kernels.vector_add_graph_node(
+            &graph,
+            &[],
+            LaunchConfig::for_num_elems_with_block_size(n, block_x),
+            &graph_out,
+            &d_a,
+            &d_b,
+        )?;
+    }
+    let graph_exec = graph.instantiate()?;
+    let graph_stream = rocm_oxide::Stream::new()?;
+    graph_exec.launch(&graph_stream)?;
+    graph_stream.synchronize()?;
+    let graph_result = graph_out.copy_to_vec()?;
+    assert_eq!(graph_result[4096], a[4096] + b[4096]);
 
     let pool = StreamPool::new(&device, 2)?;
     let lazy_a = Arc::new(DeviceBuffer::from_slice(&a)?);

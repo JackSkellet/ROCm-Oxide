@@ -246,6 +246,15 @@ execution ergonomics on ROCm:
 - HIP stream-ordered `DeviceBuffer::new_async` and explicit `free_async`
 - `MemPool` controls for HIP default/current memory pools, release thresholds,
   reuse toggles, stats, trimming, and `DeviceBuffer::new_from_pool_async`
+- owned HIP memory pools with access-policy controls, plus
+  `DeviceVirtualMemory` for device-local HIP VMM reserve/map/access lifetimes
+- rocPRIM/hipCUB-backed `RocPrim` wrappers for `u32` sum reduction plus
+  inclusive/exclusive prefix scans over `DeviceBuffer`
+- matrix integration candidate reporting for hipBLASLt, Composable Kernel, and
+  rocWMMA, plus hipBLASLt handle/version loading
+- HIPRTC runtime compilation through a process-wide specialization cache keyed
+  by backend, architecture, source, options, and launch metadata, with COMGR
+  availability probing for a future COMGR compiler backend
 - `Device::properties`, `Device::all`, and peer-access probes for
   multi-device/host-memory launch validation
 - fallible allocation-size and copy-length validation instead of panics
@@ -254,6 +263,9 @@ execution ergonomics on ROCm:
   `.zip`
 - HIP stream-capture graph wrappers with `CapturedGraph::launch_on` and
   `launch_and_sync_on` replay
+- explicit HIP graph builder wrappers for empty/dependency/memcpy/memset/kernel
+  nodes, graph memory allocation/free nodes, node retargeting,
+  instantiate/replay, and exec update
 - `StreamPool` round-robin scheduling for operation pipelines
 - `DeviceFuture::wait` plus `Future` support; dropping the future does not
   cancel already submitted/started work
@@ -283,7 +295,9 @@ Generated bindings expose the same facts through `DEVICE_KERNEL_RESOURCES`,
 occupancy planning. Generated bindings also expose cached `Kernel` handles via
 `DeviceKernels::kernel(name)`, `recommend_1d_launch` for occupancy-guided 1D
 launch suggestions, checked direct stream launch methods, and unsafe unchecked
-launch methods for already-validated hot paths.
+launch methods for already-validated hot paths. Generated bindings also expose
+unsafe `*_graph_node` helpers for inserting validated kernel launches into
+explicit HIP graphs.
 
 `cargo run --example performance_probe -- --json target/performance_probe.json`
 reports HIP-event GPU time for generated Rust kernels and can write benchmark
@@ -305,6 +319,8 @@ The parity checklist against official `NVlabs/cuda-oxide` is tracked in
 [docs/cuda-oxide-parity-checklist.md](/home/kjwtil/Documents/ROCm-Oxide/docs/cuda-oxide-parity-checklist.md).
 Book-derived AMD adaptations are tracked in
 [docs/cuda-oxide-book-rocm-adaptation.md](/home/kjwtil/Documents/ROCm-Oxide/docs/cuda-oxide-book-rocm-adaptation.md).
+CUDA feature research and future ROCm-Oxide implementation order are tracked in
+[docs/cuda-future-work.md](/home/kjwtil/Documents/ROCm-Oxide/docs/cuda-future-work.md).
 
 There is also a cargo subcommand wrapper in
 [tools/cargo-rocm-oxide](/home/kjwtil/Documents/ROCm-Oxide/tools/cargo-rocm-oxide/src/main.rs):
@@ -400,7 +416,7 @@ This roadmap is grounded in the validated probe targets:
 - `gfx1201`, AMD Radeon RX 9070 XT: one device, managed memory, concurrent
   managed access, host-native atomics, host mapped memory, host registration,
   and memory pools were reported available. Current generated artifact on that
-  probe: 21 kernels, 33 buffer contracts, one linked object input, max VGPR 33,
+  probe: 22 kernels, 34 buffer contracts, one linked object input, max VGPR 33,
   max SGPR 28, max kernarg 368 bytes, max static LDS 1024 bytes, max private
   segment 260 bytes, two dynamic-LDS kernels, and no dynamic stack users.
 - `gfx1100`, AMD Radeon RX 7900 XT: one device, managed memory, concurrent
@@ -410,7 +426,7 @@ This roadmap is grounded in the validated probe targets:
   atomics are not reported on this topology. The upstream path for the RX 7900
   XT negotiates `8GT/s x4`, so full-frame CPU readback/present workloads such as
   the current `spectral_lattice` GUI can become PCIe/display-copy bound at high
-  resolutions. Current generated artifact on this probe: 21 kernels, 33 buffer
+  resolutions. Current generated artifact on this probe: 22 kernels, 34 buffer
   contracts, one linked object input, max VGPR 34, max SGPR 34, max kernarg 368
   bytes, max static LDS 1024 bytes, max private segment 260 bytes, two
   dynamic-LDS kernels, and no dynamic stack users.
@@ -445,11 +461,12 @@ This roadmap is grounded in the validated probe targets:
 
 ### P1: Runtime Orchestration
 
-- HIP graph capture for `DeviceOperation` pipelines: generated operations stay
-  stream-only, graph instantiate/launch wrappers are in place, and graph replay
-  is verified through generated kernel bindings.
+- HIP graph orchestration: `DeviceOperation` pipelines still support stream
+  capture, the runtime exposes explicit graph node builders and update wrappers,
+  and generated bindings can insert validated kernel nodes into explicit graphs.
 - Stream-ordered allocation maturity: memory-pool controls wrap
-  `hipMallocAsync`/`hipFreeAsync`, generated operations retain queued buffer
+  `hipMallocAsync`/`hipFreeAsync`, owned memory pools and VMM-backed device
+  virtual memory are available, generated operations retain queued buffer
   lifetimes, and async buffer ordering rules are documented.
 - Multi-device and host-memory coherence: device properties, peer probes,
   mapped pinned memory, and managed fine/coarse visibility are modeled and

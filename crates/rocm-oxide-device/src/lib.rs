@@ -345,6 +345,200 @@ pub use atomic::{
     AtomicOrdering, AtomicScope, DeviceAtomicU32, SystemAtomicU32, WorkgroupAtomicU32,
 };
 
+pub mod cooperative {
+    use super::{
+        ballot, block_dim_x, block_dim_y, block_dim_z, block_idx_x, block_idx_y, block_idx_z,
+        lane_id, read_first_lane_u32, thread_idx_x, thread_idx_y, thread_idx_z, wave_barrier,
+        wave_id_in_workgroup, wave_reduce_add_u32, wave_reduce_max_u32, wave_reduce_min_u32,
+        wavefront_size, workgroup_barrier,
+    };
+
+    #[derive(Clone, Copy)]
+    pub struct ThreadBlock;
+
+    #[derive(Clone, Copy)]
+    pub struct Wavefront;
+
+    #[derive(Clone, Copy)]
+    pub struct StaticTile<const N: u32>;
+
+    #[inline(always)]
+    pub const fn this_thread_block() -> ThreadBlock {
+        ThreadBlock
+    }
+
+    #[inline(always)]
+    pub const fn this_wavefront() -> Wavefront {
+        Wavefront
+    }
+
+    #[inline(always)]
+    pub const fn tiled_partition<const N: u32>(_group: ThreadBlock) -> StaticTile<N> {
+        StaticTile
+    }
+
+    impl ThreadBlock {
+        #[inline(always)]
+        pub fn size(self) -> u32 {
+            block_dim_x() * block_dim_y() * block_dim_z()
+        }
+
+        #[inline(always)]
+        pub fn thread_rank(self) -> u32 {
+            thread_idx_x()
+                + thread_idx_y() * block_dim_x()
+                + thread_idx_z() * block_dim_x() * block_dim_y()
+        }
+
+        #[inline(always)]
+        pub fn group_index_x(self) -> u32 {
+            block_idx_x()
+        }
+
+        #[inline(always)]
+        pub fn group_index_y(self) -> u32 {
+            block_idx_y()
+        }
+
+        #[inline(always)]
+        pub fn group_index_z(self) -> u32 {
+            block_idx_z()
+        }
+
+        #[inline(always)]
+        pub fn thread_index_x(self) -> u32 {
+            thread_idx_x()
+        }
+
+        #[inline(always)]
+        pub fn thread_index_y(self) -> u32 {
+            thread_idx_y()
+        }
+
+        #[inline(always)]
+        pub fn thread_index_z(self) -> u32 {
+            thread_idx_z()
+        }
+
+        #[inline(always)]
+        pub fn sync(self) {
+            workgroup_barrier()
+        }
+    }
+
+    impl Wavefront {
+        #[inline(always)]
+        pub fn size(self) -> u32 {
+            wavefront_size()
+        }
+
+        #[inline(always)]
+        pub fn thread_rank(self) -> u32 {
+            lane_id()
+        }
+
+        #[inline(always)]
+        pub fn meta_group_rank(self) -> u32 {
+            wave_id_in_workgroup()
+        }
+
+        #[inline(always)]
+        pub fn sync(self) {
+            wave_barrier()
+        }
+
+        #[inline(always)]
+        pub fn active_mask(self) -> u64 {
+            ballot(true)
+        }
+
+        #[inline(always)]
+        pub fn ballot(self, predicate: bool) -> u64 {
+            ballot(predicate)
+        }
+
+        #[inline(always)]
+        pub fn any(self, predicate: bool) -> bool {
+            self.ballot(predicate) != 0
+        }
+
+        #[inline(always)]
+        pub fn all(self, predicate: bool) -> bool {
+            self.ballot(predicate) == self.active_mask()
+        }
+
+        #[inline(always)]
+        pub fn read_first_u32(self, value: u32) -> u32 {
+            read_first_lane_u32(value)
+        }
+
+        #[inline(always)]
+        pub fn reduce_add_u32(self, value: u32) -> u32 {
+            wave_reduce_add_u32(value)
+        }
+
+        #[inline(always)]
+        pub fn reduce_min_u32(self, value: u32) -> u32 {
+            wave_reduce_min_u32(value)
+        }
+
+        #[inline(always)]
+        pub fn reduce_max_u32(self, value: u32) -> u32 {
+            wave_reduce_max_u32(value)
+        }
+    }
+
+    impl<const N: u32> StaticTile<N> {
+        #[inline(always)]
+        pub const fn size(self) -> u32 {
+            N
+        }
+
+        #[inline(always)]
+        pub fn thread_rank(self) -> u32 {
+            let size = self.size();
+            if size == 0 {
+                0
+            } else {
+                this_thread_block().thread_rank() % size
+            }
+        }
+
+        #[inline(always)]
+        pub fn meta_group_rank(self) -> u32 {
+            let size = self.size();
+            if size == 0 {
+                0
+            } else {
+                this_thread_block().thread_rank() / size
+            }
+        }
+
+        #[inline(always)]
+        pub fn meta_group_size(self) -> u32 {
+            let size = self.size();
+            if size == 0 {
+                0
+            } else {
+                this_thread_block().size().div_ceil(size)
+            }
+        }
+
+        #[inline(always)]
+        pub fn sync(self) {
+            if self.size() <= wavefront_size() {
+                wave_barrier();
+            } else {
+                workgroup_barrier();
+            }
+        }
+    }
+}
+
+pub use cooperative::{
+    StaticTile, ThreadBlock, Wavefront, this_thread_block, this_wavefront, tiled_partition,
+};
+
 #[inline(always)]
 pub fn thread_idx_x() -> u32 {
     amdgpu::workitem_id_x()
@@ -437,7 +631,10 @@ pub fn lane_id() -> u32 {
 
 #[inline(always)]
 pub fn wave_id_in_workgroup() -> u32 {
-    amdgpu::s_get_waveid_in_workgroup()
+    let xy_thread = thread_idx_x() + thread_idx_y() * block_dim_x();
+    let z_offset = thread_idx_z() * block_dim_x() * block_dim_y();
+    let linear_thread = xy_thread + z_offset;
+    linear_thread / wavefront_size()
 }
 
 #[inline(always)]

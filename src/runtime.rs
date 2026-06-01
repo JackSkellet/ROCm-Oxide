@@ -119,8 +119,23 @@ impl Device {
     }
 
     pub fn compile_hip_source(&self, source: &str) -> Result<Module> {
-        let code_object = hiprtc::compile_code_object(source, &self.arch)?;
-        self.load_code_object(&code_object)
+        let code_object = hiprtc::compile_code_object_cached(source, &self.arch)?;
+        self.load_code_object(code_object.as_ref())
+    }
+
+    pub fn compile_hip_source_specialized(
+        &self,
+        source: &str,
+        extra_options: &[&str],
+        launch_metadata: &str,
+    ) -> Result<Module> {
+        let code_object = hiprtc::compile_code_object_cached_with_metadata(
+            source,
+            &self.arch,
+            extra_options,
+            launch_metadata,
+        )?;
+        self.load_code_object(code_object.as_ref())
     }
 
     pub fn load_code_object(&self, code_object: &[u8]) -> Result<Module> {
@@ -150,6 +165,30 @@ impl Device {
 
     pub fn set_mem_pool(&self, pool: hip::MemPool) -> Result<()> {
         Ok(pool.set_current_for_device(self.ordinal)?)
+    }
+
+    pub fn create_mem_pool(&self) -> Result<hip::OwnedMemPool> {
+        Ok(hip::OwnedMemPool::new_for_device(self.ordinal)?)
+    }
+
+    pub fn virtual_memory_granularity(
+        &self,
+        granularity: hip::MemAllocationGranularity,
+    ) -> Result<usize> {
+        Ok(hip::DeviceVirtualMemory::allocation_granularity(
+            self.ordinal,
+            granularity,
+        )?)
+    }
+
+    pub fn reserve_virtual_memory(
+        &self,
+        requested_size: usize,
+    ) -> Result<hip::DeviceVirtualMemory> {
+        Ok(hip::DeviceVirtualMemory::new_for_device(
+            self.ordinal,
+            requested_size,
+        )?)
     }
 
     pub fn can_access_peer(&self, peer: &Device) -> Result<bool> {
@@ -884,6 +923,46 @@ impl Kernel {
                 config.shared_mem_bytes,
                 params,
             )?;
+        })
+    }
+
+    pub unsafe fn add_graph_node_raw(
+        &self,
+        graph: &hip::Graph,
+        dependencies: &[hip::GraphNode],
+        config: LaunchConfig,
+        params: &mut [*mut c_void],
+    ) -> Result<hip::GraphNode> {
+        self.validate_launch_config(config)?;
+        unsafe { self.add_graph_node_raw_unchecked(graph, dependencies, config, params) }
+    }
+
+    /// Adds this kernel to an explicit HIP graph without validating the launch
+    /// configuration.
+    ///
+    /// # Safety
+    ///
+    /// The caller must ensure `config` is valid for this kernel and device,
+    /// `params` contains exactly the ABI expected by the kernel, every buffer
+    /// or pointer referenced by those arguments remains valid until any graph
+    /// execution using this node completes, and the graph is associated with
+    /// the kernel's device/context.
+    pub unsafe fn add_graph_node_raw_unchecked(
+        &self,
+        graph: &hip::Graph,
+        dependencies: &[hip::GraphNode],
+        config: LaunchConfig,
+        params: &mut [*mut c_void],
+    ) -> Result<hip::GraphNode> {
+        Ok(unsafe {
+            graph.add_kernel_node(
+                dependencies,
+                &self.function,
+                config.grid.as_tuple(),
+                config.block.as_tuple(),
+                config.shared_mem_bytes,
+                params,
+            )?
         })
     }
 

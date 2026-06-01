@@ -28,14 +28,31 @@ not the product.
 - [x] Pinned host buffer wrapper.
 - [x] Stream-aware async H2D/D2H copies.
 - [x] Stream-aware raw kernel launch.
+- [x] Explicit HIP graph builder for empty nodes, dependencies, memcpy, memset,
+      kernel nodes, node retargeting, instantiate/replay, and exec update.
+- [x] HIP graph memory allocation/free nodes with a graph-managed allocation
+      plan object.
+- [x] Owned HIP memory pools with access-policy controls.
+- [x] HIP VMM-backed device virtual memory reserve/map/access wrapper.
+- [x] rocPRIM/hipCUB-backed `u32` sum reduction plus inclusive/exclusive scan
+      wrappers over `DeviceBuffer`.
+- [x] Matrix integration candidate reporting for hipBLASLt, Composable Kernel,
+      and rocWMMA, plus hipBLASLt handle/version loading.
+- [x] HIPRTC specialization cache keyed by backend, architecture, source,
+      options, and launch metadata, with COMGR availability probing for a future
+      code-object compiler backend.
 - [x] Lazy host-side `DeviceOperation` model.
 - [x] Stream-pool operation scheduling.
 - [x] Generated kernel bindings can return lazy `DeviceOperation` launch jobs.
+- [x] Generated kernel bindings can add validated kernel nodes to explicit HIP
+      graphs.
 - [x] HIP module global lookup.
 - [x] Typed host setters/getters for module globals.
 - [x] `rocm-oxide-device` no-std helper crate for AMDGPU intrinsics.
 - [x] Dispatch-packet-derived `block_dim_*`, `grid_dim_*`, and `global_id_*`
       helpers so kernels do not need a host-passed `block_x` scalar.
+- [x] CUDA-like cooperative group handles for thread blocks, wavefronts, and
+      static tiles over AMD workgroup/wavefront intrinsics.
 - [x] Dynamic launch-sized LDS pointer helper over Rust's GPU workgroup-memory
       intrinsic.
 - [x] Nightly `rust-toolchain.toml` with `rust-src` for building `core` on the
@@ -97,6 +114,7 @@ not the product.
   - [x] load-time size validation for typed host views
 - [ ] Device API surface:
   - [x] thread/block/grid helpers instead of raw `core::arch::amdgpu`
+  - [x] cooperative group handles
   - [x] warp/wavefront helpers
   - [x] barriers
   - [x] dynamic shared memory/LDS wrappers
@@ -115,6 +133,8 @@ not the product.
 
 ## Lower-Priority Or Vendor-Specific
 
+- [x] CUDA feature research and implementation order is tracked in
+      [cuda-future-work.md](/home/kjwtil/Documents/ROCm-Oxide/docs/cuda-future-work.md).
 - [x] CUDA-specific TMA/WGMMA equivalents need ROCm-specific replacements, not
       direct ports.
 - [x] cuBLASDx/cuFFTDx interop maps to rocBLAS/rocFFT or HIP library FFI and
