@@ -197,6 +197,16 @@ pub mod atomic {
         }
     }
 
+    #[inline(always)]
+    fn compare_exchange_failure_ordering(ordering: AtomicOrdering) -> Ordering {
+        match ordering.as_core() {
+            Ordering::Relaxed | Ordering::Release => Ordering::Relaxed,
+            Ordering::Acquire | Ordering::AcqRel => Ordering::Acquire,
+            Ordering::SeqCst => Ordering::SeqCst,
+            _ => Ordering::SeqCst,
+        }
+    }
+
     unsafe extern "C" {
         #[link_name = "__rocm_oxide_atomic_scope_workgroup"]
         fn mark_atomic_scope_workgroup(ptr: *const u32);
@@ -423,6 +433,124 @@ pub mod atomic {
     pub type DeviceAtomicI64 = AtomicI64Ref<Device>;
     pub type SystemAtomicI64 = AtomicI64Ref<System>;
 
+    #[repr(transparent)]
+    pub struct AtomicF32Ref<S: Scope> {
+        inner: AtomicU32,
+        _scope: PhantomData<S>,
+    }
+
+    impl<S: Scope> AtomicF32Ref<S> {
+        #[inline(always)]
+        pub unsafe fn from_ptr<'a>(ptr: *mut f32) -> &'a Self {
+            unsafe { &*ptr.cast::<Self>() }
+        }
+
+        #[inline(always)]
+        pub unsafe fn from_const_ptr<'a>(ptr: *const f32) -> &'a Self {
+            unsafe { &*ptr.cast::<Self>() }
+        }
+
+        #[inline(always)]
+        pub const fn scope() -> AtomicScope {
+            S::SCOPE
+        }
+
+        #[inline(always)]
+        pub fn load(&self, ordering: AtomicOrdering) -> f32 {
+            unsafe { S::mark_atomic_ptr(self as *const Self as *const f32) };
+            f32::from_bits(self.inner.load(ordering.as_core()))
+        }
+
+        #[inline(always)]
+        pub fn store(&self, value: f32, ordering: AtomicOrdering) {
+            unsafe { S::mark_atomic_ptr(self as *const Self as *const f32) };
+            self.inner.store(value.to_bits(), ordering.as_core());
+        }
+
+        #[inline(always)]
+        pub fn fetch_add(&self, value: f32, ordering: AtomicOrdering) -> f32 {
+            unsafe { S::mark_atomic_ptr(self as *const Self as *const f32) };
+            let mut current = self.inner.load(ordering.as_core());
+            let failure_ordering = compare_exchange_failure_ordering(ordering);
+            loop {
+                let next = (f32::from_bits(current) + value).to_bits();
+                unsafe { S::mark_atomic_ptr(self as *const Self as *const f32) };
+                match self.inner.compare_exchange_weak(
+                    current,
+                    next,
+                    ordering.as_core(),
+                    failure_ordering,
+                ) {
+                    Ok(previous) => return f32::from_bits(previous),
+                    Err(observed) => current = observed,
+                }
+            }
+        }
+    }
+
+    pub type WorkgroupAtomicF32 = AtomicF32Ref<Workgroup>;
+    pub type DeviceAtomicF32 = AtomicF32Ref<Device>;
+    pub type SystemAtomicF32 = AtomicF32Ref<System>;
+
+    #[repr(transparent)]
+    pub struct AtomicF64Ref<S: Scope> {
+        inner: AtomicU64,
+        _scope: PhantomData<S>,
+    }
+
+    impl<S: Scope> AtomicF64Ref<S> {
+        #[inline(always)]
+        pub unsafe fn from_ptr<'a>(ptr: *mut f64) -> &'a Self {
+            unsafe { &*ptr.cast::<Self>() }
+        }
+
+        #[inline(always)]
+        pub unsafe fn from_const_ptr<'a>(ptr: *const f64) -> &'a Self {
+            unsafe { &*ptr.cast::<Self>() }
+        }
+
+        #[inline(always)]
+        pub const fn scope() -> AtomicScope {
+            S::SCOPE
+        }
+
+        #[inline(always)]
+        pub fn load(&self, ordering: AtomicOrdering) -> f64 {
+            unsafe { S::mark_atomic_ptr(self as *const Self as *const f64) };
+            f64::from_bits(self.inner.load(ordering.as_core()))
+        }
+
+        #[inline(always)]
+        pub fn store(&self, value: f64, ordering: AtomicOrdering) {
+            unsafe { S::mark_atomic_ptr(self as *const Self as *const f64) };
+            self.inner.store(value.to_bits(), ordering.as_core());
+        }
+
+        #[inline(always)]
+        pub fn fetch_add(&self, value: f64, ordering: AtomicOrdering) -> f64 {
+            unsafe { S::mark_atomic_ptr(self as *const Self as *const f64) };
+            let mut current = self.inner.load(ordering.as_core());
+            let failure_ordering = compare_exchange_failure_ordering(ordering);
+            loop {
+                let next = (f64::from_bits(current) + value).to_bits();
+                unsafe { S::mark_atomic_ptr(self as *const Self as *const f64) };
+                match self.inner.compare_exchange_weak(
+                    current,
+                    next,
+                    ordering.as_core(),
+                    failure_ordering,
+                ) {
+                    Ok(previous) => return f64::from_bits(previous),
+                    Err(observed) => current = observed,
+                }
+            }
+        }
+    }
+
+    pub type WorkgroupAtomicF64 = AtomicF64Ref<Workgroup>;
+    pub type DeviceAtomicF64 = AtomicF64Ref<Device>;
+    pub type SystemAtomicF64 = AtomicF64Ref<System>;
+
     #[inline(always)]
     pub unsafe fn atomic_add_u32_scoped(
         ptr: *mut u32,
@@ -630,23 +758,133 @@ pub mod atomic {
                 .load(ordering),
         }
     }
+
+    #[inline(always)]
+    pub unsafe fn atomic_add_f32_scoped(
+        ptr: *mut f32,
+        value: f32,
+        scope: AtomicScope,
+        ordering: AtomicOrdering,
+    ) -> f32 {
+        match scope {
+            AtomicScope::Workgroup => {
+                unsafe { WorkgroupAtomicF32::from_ptr(ptr) }.fetch_add(value, ordering)
+            }
+            AtomicScope::Device => unsafe { DeviceAtomicF32::from_ptr(ptr) }
+                .fetch_add(value, ordering),
+            AtomicScope::System => unsafe { SystemAtomicF32::from_ptr(ptr) }
+                .fetch_add(value, ordering),
+        }
+    }
+
+    #[inline(always)]
+    pub unsafe fn atomic_store_f32_scoped(
+        ptr: *mut f32,
+        value: f32,
+        scope: AtomicScope,
+        ordering: AtomicOrdering,
+    ) {
+        match scope {
+            AtomicScope::Workgroup => {
+                unsafe { WorkgroupAtomicF32::from_ptr(ptr) }.store(value, ordering)
+            }
+            AtomicScope::Device => unsafe { DeviceAtomicF32::from_ptr(ptr) }
+                .store(value, ordering),
+            AtomicScope::System => unsafe { SystemAtomicF32::from_ptr(ptr) }
+                .store(value, ordering),
+        }
+    }
+
+    #[inline(always)]
+    pub unsafe fn atomic_load_f32_scoped(
+        ptr: *const f32,
+        scope: AtomicScope,
+        ordering: AtomicOrdering,
+    ) -> f32 {
+        match scope {
+            AtomicScope::Workgroup => unsafe { WorkgroupAtomicF32::from_const_ptr(ptr) }
+                .load(ordering),
+            AtomicScope::Device => unsafe { DeviceAtomicF32::from_const_ptr(ptr) }
+                .load(ordering),
+            AtomicScope::System => unsafe { SystemAtomicF32::from_const_ptr(ptr) }
+                .load(ordering),
+        }
+    }
+
+    #[inline(always)]
+    pub unsafe fn atomic_add_f64_scoped(
+        ptr: *mut f64,
+        value: f64,
+        scope: AtomicScope,
+        ordering: AtomicOrdering,
+    ) -> f64 {
+        match scope {
+            AtomicScope::Workgroup => {
+                unsafe { WorkgroupAtomicF64::from_ptr(ptr) }.fetch_add(value, ordering)
+            }
+            AtomicScope::Device => unsafe { DeviceAtomicF64::from_ptr(ptr) }
+                .fetch_add(value, ordering),
+            AtomicScope::System => unsafe { SystemAtomicF64::from_ptr(ptr) }
+                .fetch_add(value, ordering),
+        }
+    }
+
+    #[inline(always)]
+    pub unsafe fn atomic_store_f64_scoped(
+        ptr: *mut f64,
+        value: f64,
+        scope: AtomicScope,
+        ordering: AtomicOrdering,
+    ) {
+        match scope {
+            AtomicScope::Workgroup => {
+                unsafe { WorkgroupAtomicF64::from_ptr(ptr) }.store(value, ordering)
+            }
+            AtomicScope::Device => unsafe { DeviceAtomicF64::from_ptr(ptr) }
+                .store(value, ordering),
+            AtomicScope::System => unsafe { SystemAtomicF64::from_ptr(ptr) }
+                .store(value, ordering),
+        }
+    }
+
+    #[inline(always)]
+    pub unsafe fn atomic_load_f64_scoped(
+        ptr: *const f64,
+        scope: AtomicScope,
+        ordering: AtomicOrdering,
+    ) -> f64 {
+        match scope {
+            AtomicScope::Workgroup => unsafe { WorkgroupAtomicF64::from_const_ptr(ptr) }
+                .load(ordering),
+            AtomicScope::Device => unsafe { DeviceAtomicF64::from_const_ptr(ptr) }
+                .load(ordering),
+            AtomicScope::System => unsafe { SystemAtomicF64::from_const_ptr(ptr) }
+                .load(ordering),
+        }
+    }
 }
 
 pub use atomic::{
-    AtomicOrdering, AtomicScope, DeviceAtomicI32, DeviceAtomicI64, DeviceAtomicU32,
-    DeviceAtomicU64, SystemAtomicI32, SystemAtomicI64, SystemAtomicU32, SystemAtomicU64,
-    WorkgroupAtomicI32, WorkgroupAtomicI64, WorkgroupAtomicU32, WorkgroupAtomicU64,
+    AtomicOrdering, AtomicScope, DeviceAtomicF32, DeviceAtomicF64, DeviceAtomicI32,
+    DeviceAtomicI64, DeviceAtomicU32, DeviceAtomicU64, SystemAtomicF32, SystemAtomicF64,
+    SystemAtomicI32, SystemAtomicI64, SystemAtomicU32, SystemAtomicU64, WorkgroupAtomicF32,
+    WorkgroupAtomicF64, WorkgroupAtomicI32, WorkgroupAtomicI64, WorkgroupAtomicU32,
+    WorkgroupAtomicU64,
 };
 
 pub mod cooperative {
     use super::{
         ballot, block_dim_x, block_dim_y, block_dim_z, block_idx_x, block_idx_y, block_idx_z,
-        inverse_ballot, lane_id, read_first_lane_u32, thread_idx_x, thread_idx_y, thread_idx_z,
-        wave_barrier, wave_id_in_workgroup, wave_match_any_u32, wave_reduce_add_i32,
-        wave_reduce_add_u32, wave_reduce_and_u32, wave_reduce_max_i32, wave_reduce_max_u32,
-        wave_reduce_min_i32, wave_reduce_min_u32, wave_reduce_or_u32, wave_reduce_xor_u32,
-        wave_shuffle_down_u32, wave_shuffle_f32, wave_shuffle_i32, wave_shuffle_u32,
-        wave_shuffle_up_u32, wave_shuffle_xor_u32, wavefront_size, workgroup_barrier,
+        block_reduce_add_f32, block_reduce_add_i32, block_reduce_add_u32,
+        block_scan_exclusive_add_f32, block_scan_exclusive_add_i32,
+        block_scan_exclusive_add_u32, block_scan_inclusive_add_f32,
+        block_scan_inclusive_add_i32, block_scan_inclusive_add_u32, inverse_ballot, lane_id,
+        read_first_lane_u32, thread_idx_x, thread_idx_y, thread_idx_z, wave_barrier,
+        wave_id_in_workgroup, wave_match_any_u32, wave_reduce_add_i32, wave_reduce_add_u32,
+        wave_reduce_and_u32, wave_reduce_max_i32, wave_reduce_max_u32, wave_reduce_min_i32,
+        wave_reduce_min_u32, wave_reduce_or_u32, wave_reduce_xor_u32, wave_shuffle_down_u32,
+        wave_shuffle_f32, wave_shuffle_i32, wave_shuffle_u32, wave_shuffle_up_u32,
+        wave_shuffle_xor_u32, wavefront_size, workgroup_barrier,
     };
 
     #[derive(Clone, Copy)]
@@ -719,6 +957,51 @@ pub mod cooperative {
         #[inline(always)]
         pub fn sync(self) {
             workgroup_barrier()
+        }
+
+        #[inline(always)]
+        pub unsafe fn reduce_add_u32(self, scratch: *mut u32, value: u32) -> u32 {
+            unsafe { block_reduce_add_u32(scratch, value) }
+        }
+
+        #[inline(always)]
+        pub unsafe fn reduce_add_i32(self, scratch: *mut i32, value: i32) -> i32 {
+            unsafe { block_reduce_add_i32(scratch, value) }
+        }
+
+        #[inline(always)]
+        pub unsafe fn reduce_add_f32(self, scratch: *mut f32, value: f32) -> f32 {
+            unsafe { block_reduce_add_f32(scratch, value) }
+        }
+
+        #[inline(always)]
+        pub unsafe fn scan_inclusive_add_u32(self, scratch: *mut u32, value: u32) -> u32 {
+            unsafe { block_scan_inclusive_add_u32(scratch, value) }
+        }
+
+        #[inline(always)]
+        pub unsafe fn scan_inclusive_add_i32(self, scratch: *mut i32, value: i32) -> i32 {
+            unsafe { block_scan_inclusive_add_i32(scratch, value) }
+        }
+
+        #[inline(always)]
+        pub unsafe fn scan_inclusive_add_f32(self, scratch: *mut f32, value: f32) -> f32 {
+            unsafe { block_scan_inclusive_add_f32(scratch, value) }
+        }
+
+        #[inline(always)]
+        pub unsafe fn scan_exclusive_add_u32(self, scratch: *mut u32, value: u32) -> u32 {
+            unsafe { block_scan_exclusive_add_u32(scratch, value) }
+        }
+
+        #[inline(always)]
+        pub unsafe fn scan_exclusive_add_i32(self, scratch: *mut i32, value: i32) -> i32 {
+            unsafe { block_scan_exclusive_add_i32(scratch, value) }
+        }
+
+        #[inline(always)]
+        pub unsafe fn scan_exclusive_add_f32(self, scratch: *mut f32, value: f32) -> f32 {
+            unsafe { block_scan_exclusive_add_f32(scratch, value) }
         }
     }
 
@@ -1143,6 +1426,198 @@ pub fn wave_match_any_u32(value: u32) -> u64 {
         lane = lane.wrapping_add(1);
     }
     mask
+}
+
+#[inline(always)]
+pub unsafe fn block_reduce_add_u32(scratch: *mut u32, value: u32) -> u32 {
+    let rank = this_thread_block().thread_rank();
+    let size = this_thread_block().size();
+    unsafe { scratch.add(rank as usize).write(value) };
+    workgroup_barrier();
+
+    let mut stride = 1u32;
+    while stride < size {
+        stride <<= 1;
+    }
+    stride >>= 1;
+
+    while stride > 0 {
+        if rank < stride {
+            let other = rank + stride;
+            if other < size {
+                let slot = unsafe { scratch.add(rank as usize) };
+                let rhs = unsafe { scratch.add(other as usize).read() };
+                unsafe { slot.write(slot.read().wrapping_add(rhs)) };
+            }
+        }
+        workgroup_barrier();
+        stride >>= 1;
+    }
+
+    let result = unsafe { scratch.read() };
+    workgroup_barrier();
+    result
+}
+
+#[inline(always)]
+pub unsafe fn block_reduce_add_i32(scratch: *mut i32, value: i32) -> i32 {
+    let rank = this_thread_block().thread_rank();
+    let size = this_thread_block().size();
+    unsafe { scratch.add(rank as usize).write(value) };
+    workgroup_barrier();
+
+    let mut stride = 1u32;
+    while stride < size {
+        stride <<= 1;
+    }
+    stride >>= 1;
+
+    while stride > 0 {
+        if rank < stride {
+            let other = rank + stride;
+            if other < size {
+                let slot = unsafe { scratch.add(rank as usize) };
+                let rhs = unsafe { scratch.add(other as usize).read() };
+                unsafe { slot.write(slot.read().wrapping_add(rhs)) };
+            }
+        }
+        workgroup_barrier();
+        stride >>= 1;
+    }
+
+    let result = unsafe { scratch.read() };
+    workgroup_barrier();
+    result
+}
+
+#[inline(always)]
+pub unsafe fn block_reduce_add_f32(scratch: *mut f32, value: f32) -> f32 {
+    let rank = this_thread_block().thread_rank();
+    let size = this_thread_block().size();
+    unsafe { scratch.add(rank as usize).write(value) };
+    workgroup_barrier();
+
+    let mut stride = 1u32;
+    while stride < size {
+        stride <<= 1;
+    }
+    stride >>= 1;
+
+    while stride > 0 {
+        if rank < stride {
+            let other = rank + stride;
+            if other < size {
+                let slot = unsafe { scratch.add(rank as usize) };
+                let rhs = unsafe { scratch.add(other as usize).read() };
+                unsafe { slot.write(slot.read() + rhs) };
+            }
+        }
+        workgroup_barrier();
+        stride >>= 1;
+    }
+
+    let result = unsafe { scratch.read() };
+    workgroup_barrier();
+    result
+}
+
+#[inline(always)]
+pub unsafe fn block_scan_inclusive_add_u32(scratch: *mut u32, value: u32) -> u32 {
+    let rank = this_thread_block().thread_rank();
+    let size = this_thread_block().size();
+    unsafe { scratch.add(rank as usize).write(value) };
+    workgroup_barrier();
+
+    let mut offset = 1u32;
+    while offset < size {
+        let addend = if rank >= offset {
+            unsafe { scratch.add((rank - offset) as usize).read() }
+        } else {
+            0
+        };
+        workgroup_barrier();
+        if rank >= offset {
+            let slot = unsafe { scratch.add(rank as usize) };
+            unsafe { slot.write(slot.read().wrapping_add(addend)) };
+        }
+        workgroup_barrier();
+        offset <<= 1;
+    }
+
+    let result = unsafe { scratch.add(rank as usize).read() };
+    workgroup_barrier();
+    result
+}
+
+#[inline(always)]
+pub unsafe fn block_scan_inclusive_add_i32(scratch: *mut i32, value: i32) -> i32 {
+    let rank = this_thread_block().thread_rank();
+    let size = this_thread_block().size();
+    unsafe { scratch.add(rank as usize).write(value) };
+    workgroup_barrier();
+
+    let mut offset = 1u32;
+    while offset < size {
+        let addend = if rank >= offset {
+            unsafe { scratch.add((rank - offset) as usize).read() }
+        } else {
+            0
+        };
+        workgroup_barrier();
+        if rank >= offset {
+            let slot = unsafe { scratch.add(rank as usize) };
+            unsafe { slot.write(slot.read().wrapping_add(addend)) };
+        }
+        workgroup_barrier();
+        offset <<= 1;
+    }
+
+    let result = unsafe { scratch.add(rank as usize).read() };
+    workgroup_barrier();
+    result
+}
+
+#[inline(always)]
+pub unsafe fn block_scan_inclusive_add_f32(scratch: *mut f32, value: f32) -> f32 {
+    let rank = this_thread_block().thread_rank();
+    let size = this_thread_block().size();
+    unsafe { scratch.add(rank as usize).write(value) };
+    workgroup_barrier();
+
+    let mut offset = 1u32;
+    while offset < size {
+        let addend = if rank >= offset {
+            unsafe { scratch.add((rank - offset) as usize).read() }
+        } else {
+            0.0
+        };
+        workgroup_barrier();
+        if rank >= offset {
+            let slot = unsafe { scratch.add(rank as usize) };
+            unsafe { slot.write(slot.read() + addend) };
+        }
+        workgroup_barrier();
+        offset <<= 1;
+    }
+
+    let result = unsafe { scratch.add(rank as usize).read() };
+    workgroup_barrier();
+    result
+}
+
+#[inline(always)]
+pub unsafe fn block_scan_exclusive_add_u32(scratch: *mut u32, value: u32) -> u32 {
+    unsafe { block_scan_inclusive_add_u32(scratch, value).wrapping_sub(value) }
+}
+
+#[inline(always)]
+pub unsafe fn block_scan_exclusive_add_i32(scratch: *mut i32, value: i32) -> i32 {
+    unsafe { block_scan_inclusive_add_i32(scratch, value).wrapping_sub(value) }
+}
+
+#[inline(always)]
+pub unsafe fn block_scan_exclusive_add_f32(scratch: *mut f32, value: f32) -> f32 {
+    unsafe { block_scan_inclusive_add_f32(scratch, value) - value }
 }
 
 #[inline(always)]

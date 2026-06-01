@@ -536,9 +536,10 @@ This roadmap is grounded in the validated probe targets:
   generated-binding smoke path. Next is tightening them into compile-time or
   generated-binding checks where possible, and runtime validation where the
   information only exists at launch.
-- Device API breadth: the first broader typed atomic matrix, wavefront
-  shuffle/vote/match helpers, and wavefront reductions are live. Remaining work
-  is supported float atomics, block reductions/scans, more scalar types, and
+- Device API breadth: the first broader typed atomic matrix, scoped float
+  atomic add/load/store wrappers, wavefront shuffle/vote/match helpers,
+  wavefront reductions, and scratch-backed block add reductions/scans are live.
+  Remaining work is broader block collective operations, more scalar types, and
   debug helpers such as printf/assert, clock, trap, and breakpoint equivalents
   where ROCm exposes them.
 - COMGR/code-object backend: turn the current COMGR availability probe into a

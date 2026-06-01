@@ -70,6 +70,40 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     assert_eq!(atomic_scope_out.copy_to_vec()?, vec![0, 1, 2, 0]);
     assert_eq!(atomic_counters.copy_to_vec()?, vec![256, 256, 256]);
 
+    let float_atomic_out = DeviceBuffer::<u32>::new(6)?;
+    let f32_counters = DeviceBuffer::from_slice(&[0.0f32; 3])?;
+    let f64_counters = DeviceBuffer::from_slice(&[0.0f64; 3])?;
+    unsafe {
+        kernels.float_scoped_atomics(
+            LaunchConfig::new(Dim3::x(1), Dim3::x(64)),
+            &float_atomic_out,
+            &f32_counters,
+            &f64_counters,
+        )?;
+    }
+    rocm_oxide::hip::synchronize()?;
+    let float_atomic = float_atomic_out.copy_to_vec()?;
+    assert_eq!(&float_atomic[..4], &[0, 1, 2, 1]);
+    assert_eq!(float_atomic[4], 80.0f32.to_bits());
+    let f32_values = f32_counters.copy_to_vec()?;
+    let f64_values = f64_counters.copy_to_vec()?;
+    for (label, got, expected) in [
+        ("f32 workgroup atomic", f32_values[0], 32.0),
+        ("f32 device atomic", f32_values[1], 80.0),
+        ("f32 system atomic", f32_values[2], -16.0),
+    ] {
+        assert_close(label, got, expected, 0.0001)?;
+    }
+    for (label, got, expected) in [
+        ("f64 workgroup atomic", f64_values[0], 32.0),
+        ("f64 device atomic", f64_values[1], 80.0),
+        ("f64 system atomic", f64_values[2], -16.0),
+    ] {
+        if (got - expected).abs() > 0.0001 {
+            return Err(format!("{label}: got {got}, expected {expected}").into());
+        }
+    }
+
     let cooperative_out = DeviceBuffer::<u32>::new(12)?;
     unsafe {
         kernels.cooperative_groups_probe(
@@ -151,6 +185,40 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     assert_eq!(
         api_i64_counter.copy_to_vec()?,
         vec![-((active_lanes * 2) as i64)]
+    );
+
+    let collective_block_x = 32u32;
+    let collective_n = collective_block_x as usize;
+    let collective_out = DeviceBuffer::<u32>::new(8)?;
+    let collective_scan = DeviceBuffer::<u32>::new(collective_n)?;
+    unsafe {
+        kernels.block_collectives_probe(
+            LaunchConfig::for_num_elems_with_block_size(collective_n, collective_block_x)
+                .with_shared_mem_bytes(collective_block_x * 12),
+            &collective_out,
+            &collective_scan,
+            collective_n,
+            collective_block_x,
+        )?;
+    }
+    rocm_oxide::hip::synchronize()?;
+    let collective = collective_out.copy_to_vec()?;
+    assert_eq!(collective[0], 528);
+    assert_eq!(collective[1], 464);
+    assert_eq!(f32::from_bits(collective[2]), 264.0);
+    assert_eq!(collective[3], collective_block_x);
+    assert_eq!(collective[4], 36);
+    assert_eq!(collective[5], 28);
+    assert_eq!(collective[6], 528);
+    assert_eq!(collective[7], 496);
+    assert_eq!(
+        collective_scan.copy_to_vec()?,
+        (1..=collective_block_x)
+            .scan(0u32, |sum, value| {
+                *sum += value;
+                Some(*sum)
+            })
+            .collect::<Vec<_>>()
     );
 
     let control_input = vec![0u32, 1, 2, 3, 7, 12, 15, 31];

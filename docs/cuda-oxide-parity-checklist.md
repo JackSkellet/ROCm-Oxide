@@ -178,11 +178,12 @@ Primary upstream reference:
   - [x] math intrinsic lowering
   - [x] broader typed atomics for signed integer and 64-bit integer operations by
         memory scope
-  - [ ] supported float atomics by memory scope
+  - [x] supported float atomic add/load/store operations by memory scope
   - [x] wavefront shuffle up/down/xor and typed `i32`/`f32` variants
   - [x] match helpers and broader vote operations
   - [x] wavefront reductions over sum/min/max and bitwise ops
-  - [ ] block reductions/scans and broader scalar-type coverage
+  - [x] scratch-backed block add reductions/scans over `u32`, `i32`, and `f32`
+  - [ ] broader block collective min/max/bitwise operations and scalar-type coverage
   - [ ] debug helpers for printf/assert, clock, trap, breakpoint, and profiler
         triggers where ROCm exposes a stable path
 - [ ] Compiler completeness:

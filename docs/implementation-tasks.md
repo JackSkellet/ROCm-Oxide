@@ -48,12 +48,15 @@ features on top of stronger contracts.
   - [ ] Device API parity:
     - [x] expand scoped atomics beyond `u32` to signed integer and 64-bit integer
           operations by memory scope
-    - [ ] add supported float atomic operations by memory scope
+    - [x] add supported float atomic add/load/store operations by memory scope
     - [x] add wavefront shuffle up/down/xor and typed `i32`/`f32` variants
     - [x] add vote and match helpers beyond the current ballot/any/all surface
     - [x] add wavefront reductions for sum/min/max and bitwise operations over
           `u32`/`i32`
-    - [ ] add block reductions/scans and broaden scalar-type coverage
+    - [x] add scratch-backed block add reductions/scans for `u32`, `i32`, and
+          `f32`
+    - [ ] broaden block collectives to min/max/bitwise operations and additional
+          scalar types
     - [ ] add debug helpers for GPU printf/assert, clock, trap, breakpoint, and
           profiler trigger equivalents where ROCm exposes a stable path
   - [ ] ROCm-native interop/backends:

@@ -2851,15 +2851,27 @@ fn rewrite_atomic_syncscope(line: &str, scope: AtomicSyncScope) -> String {
     let Some(scope_name) = scope.llvm_name() else {
         return line.to_string();
     };
-
-    for ordering in [
+    let orderings = [
         "unordered",
         "monotonic",
         "acquire",
         "release",
         "acq_rel",
         "seq_cst",
-    ] {
+    ];
+
+    if line.contains(" cmpxchg ") || line.trim_start().starts_with("cmpxchg ") {
+        for ordering in orderings {
+            let needle = format!(" {ordering} ");
+            if let Some(pos) = line.find(&needle) {
+                let mut rewritten = line.to_string();
+                rewritten.insert_str(pos, &format!(" syncscope(\"{scope_name}\")"));
+                return rewritten;
+            }
+        }
+    }
+
+    for ordering in orderings {
         for needle in [format!(" {ordering},"), format!(" {ordering} ")] {
             if let Some(pos) = line.find(&needle) {
                 let mut rewritten = line.to_string();
@@ -5203,6 +5215,8 @@ start:
   %wg = atomicrmw add ptr %counters, i32 1 monotonic, align 4
   call void @__rocm_oxide_atomic_scope_device(ptr %counters)
   %dev = atomicrmw add ptr %counters, i32 1 monotonic, align 4
+  call void @__rocm_oxide_atomic_scope_device(ptr %counters)
+  %cas = cmpxchg ptr %counters, i32 0, i32 1 monotonic monotonic, align 4
   call void @__rocm_oxide_atomic_scope_system(ptr %counters)
   %sys = load atomic i32, ptr %counters acquire, align 4
   ret void
@@ -5228,6 +5242,9 @@ pub unsafe extern "C" fn scoped(counters: *mut u32) {}
         ));
         assert!(output.contains(
             "%dev = atomicrmw add ptr addrspace(1) %counters, i32 1 syncscope(\"agent\") monotonic, align 4"
+        ));
+        assert!(output.contains(
+            "%cas = cmpxchg ptr addrspace(1) %counters, i32 0, i32 1 syncscope(\"agent\") monotonic monotonic, align 4"
         ));
         assert!(
             output.contains("%sys = load atomic i32, ptr addrspace(1) %counters acquire, align 4")

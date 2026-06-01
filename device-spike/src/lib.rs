@@ -297,6 +297,146 @@ pub unsafe extern "C" fn scoped_atomics(
     }
 }
 
+// rocm-oxide: len(out)=6
+// rocm-oxide: len(f32_counters)=3
+// rocm-oxide: len(f64_counters)=3
+#[kernel]
+pub unsafe extern "C" fn float_scoped_atomics(
+    out: gpu::DeviceSliceMut<u32>,
+    f32_counters: gpu::DeviceSliceMut<f32>,
+    f64_counters: gpu::DeviceSliceMut<f64>,
+) {
+    let i = gpu::global_id_x();
+    if i >= 64 {
+        return;
+    }
+
+    let f32_ptr = f32_counters.as_mut_ptr();
+    let f64_ptr = f64_counters.as_mut_ptr();
+    unsafe {
+        gpu::atomic::atomic_add_f32_scoped(
+            f32_ptr.add(0),
+            0.5,
+            gpu::AtomicScope::Workgroup,
+            gpu::AtomicOrdering::Relaxed,
+        );
+        gpu::atomic::atomic_add_f32_scoped(
+            f32_ptr.add(1),
+            1.25,
+            gpu::AtomicScope::Device,
+            gpu::AtomicOrdering::Relaxed,
+        );
+        gpu::atomic::atomic_add_f32_scoped(
+            f32_ptr.add(2),
+            -0.25,
+            gpu::AtomicScope::System,
+            gpu::AtomicOrdering::Relaxed,
+        );
+        gpu::atomic::atomic_add_f64_scoped(
+            f64_ptr.add(0),
+            0.5,
+            gpu::AtomicScope::Workgroup,
+            gpu::AtomicOrdering::Relaxed,
+        );
+        gpu::atomic::atomic_add_f64_scoped(
+            f64_ptr.add(1),
+            1.25,
+            gpu::AtomicScope::Device,
+            gpu::AtomicOrdering::Relaxed,
+        );
+        gpu::atomic::atomic_add_f64_scoped(
+            f64_ptr.add(2),
+            -0.25,
+            gpu::AtomicScope::System,
+            gpu::AtomicOrdering::Relaxed,
+        );
+    }
+
+    gpu::workgroup_barrier();
+    if i == 0 {
+        let loaded_device = unsafe {
+            gpu::atomic::atomic_load_f32_scoped(
+                f32_ptr.add(1),
+                gpu::AtomicScope::Device,
+                gpu::AtomicOrdering::Relaxed,
+            )
+        };
+        let loaded_system = unsafe {
+            gpu::atomic::atomic_load_f64_scoped(
+                f64_ptr.add(2),
+                gpu::AtomicScope::System,
+                gpu::AtomicOrdering::Relaxed,
+            )
+        };
+        unsafe {
+            out.write_unchecked(0, gpu::WorkgroupAtomicF32::scope() as u32);
+            out.write_unchecked(1, gpu::DeviceAtomicF32::scope() as u32);
+            out.write_unchecked(2, gpu::SystemAtomicF32::scope() as u32);
+            out.write_unchecked(3, gpu::DeviceAtomicF64::scope() as u32);
+            out.write_unchecked(4, loaded_device.to_bits());
+            out.write_unchecked(5, loaded_system.to_bits() as u32);
+        }
+    }
+}
+
+// rocm-oxide: len(out)=8
+// rocm-oxide: len(scan_out)=n
+#[kernel]
+pub unsafe extern "C" fn block_collectives_probe(
+    out: gpu::DeviceSliceMut<u32>,
+    scan_out: gpu::DeviceSliceMut<u32>,
+    n: usize,
+    block_x: u32,
+) {
+    let block = gpu::this_thread_block();
+    let rank = block.thread_rank();
+    let i = gpu::global_id_x();
+    let active = i < n;
+    let value = if active { rank + 1 } else { 0 };
+    let scratch_u32 = unsafe { gpu::DynamicSharedMem::<u8>::offset(0).cast::<u32>() };
+    let scratch_i32 = unsafe {
+        gpu::DynamicSharedMem::<u8>::offset(block_x as usize * core::mem::size_of::<u32>())
+            .cast::<i32>()
+    };
+    let scratch_f32 = unsafe {
+        gpu::DynamicSharedMem::<u8>::offset(
+            block_x as usize * (core::mem::size_of::<u32>() + core::mem::size_of::<i32>()),
+        )
+        .cast::<f32>()
+    };
+
+    let block_sum = unsafe { block.reduce_add_u32(scratch_u32, value) };
+    let block_i32_sum =
+        unsafe { block.reduce_add_i32(scratch_i32, if active { value as i32 - 2 } else { 0 }) };
+    let block_f32_sum = unsafe { block.reduce_add_f32(scratch_f32, value as f32 * 0.5) };
+    let inclusive = unsafe { block.scan_inclusive_add_u32(scratch_u32, value) };
+    let exclusive = unsafe { block.scan_exclusive_add_u32(scratch_u32, value) };
+    if active {
+        unsafe { scan_out.write_unchecked(i, inclusive) };
+    }
+
+    if rank == 0 {
+        unsafe {
+            out.write_unchecked(0, block_sum);
+            out.write_unchecked(1, block_i32_sum as u32);
+            out.write_unchecked(2, block_f32_sum.to_bits());
+            out.write_unchecked(3, block.size());
+        }
+    }
+    if rank == 7 {
+        unsafe {
+            out.write_unchecked(4, inclusive);
+            out.write_unchecked(5, exclusive);
+        }
+    }
+    if rank == block_x - 1 {
+        unsafe {
+            out.write_unchecked(6, inclusive);
+            out.write_unchecked(7, exclusive);
+        }
+    }
+}
+
 // rocm-oxide: len(out)=12
 #[kernel]
 pub unsafe extern "C" fn cooperative_groups_probe(out: gpu::DeviceSliceMut<u32>) {
