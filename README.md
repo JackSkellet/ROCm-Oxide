@@ -92,11 +92,15 @@ or press `M` in the live demo to keep the render buffer smaller while presenting
 a larger window; for example, `--resolution 720p --present-scale 2` opens a
 1440p-sized window with one quarter of the native 1440p readback traffic.
 
-`compiler_feature_lab` is a separate GUI focused on the compiler/runtime parity
-work. It runs the generated return-by-value, arithmetic/cast, host-reference,
-scoped-atomic, and debug-info probes, then shows each feature in its own visual
-panel. Mouse hit testing uses framebuffer-scaled minifb coordinates, so buttons
-and sliders stay aligned when the window is resized.
+`compiler_feature_lab` is a separate GUI focused on the full compiler/runtime
+stack. It runs live probes for runtime basics and device globals, generated
+launch contracts, sampled visual kernels, rustc layout facts, closures, math
+intrinsics, return-by-value packets, arithmetic/cast matrices, host-reference
+memory policy, scoped atomics, LDS and block collectives, wavefront/device APIs,
+HIP graphs, lazy `DeviceOperation` scheduling, ROCm library availability, and
+debug artifact state. Each feature has its own visual panel. Mouse hit testing
+uses framebuffer-scaled minifb coordinates, and panel text is fitted, wrapped,
+and clipped so resizing does not hide labels behind adjacent UI.
 
 The root [build.rs](/home/kjwtil/Documents/ROCm-Oxide/build.rs)
 generates device artifacts before the host crate compiles. It exposes these
