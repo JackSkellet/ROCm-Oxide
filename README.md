@@ -538,10 +538,12 @@ This roadmap is grounded in the validated probe targets:
   information only exists at launch.
 - Device API breadth: the first broader typed atomic matrix, scoped float
   atomic add/load/store wrappers, wavefront shuffle/vote/match helpers,
-  wavefront reductions, and scratch-backed block add reductions/scans are live.
-  Remaining work is broader block collective operations, more scalar types, and
-  debug helpers such as printf/assert, clock, trap, and breakpoint equivalents
-  where ROCm exposes them.
+  wavefront reductions, scratch-backed block add/min/max/bitwise reductions,
+  block add scans, and smoke-safe debug helpers for dispatch id, program
+  counter, sleep, assert/trap, and breakpoint entry points are live. Remaining
+  work is additional block scalar types and scan operators, GPU printf,
+  selectable clock counters, and profiler trigger equivalents where ROCm exposes
+  them.
 - COMGR/code-object backend: turn the current COMGR availability probe into a
   real compile/link path, then use it for persistent code-object caching and
   ROCm library/device-object interop where HIPRTC is too narrow.

@@ -379,7 +379,7 @@ pub unsafe extern "C" fn float_scoped_atomics(
     }
 }
 
-// rocm-oxide: len(out)=8
+// rocm-oxide: len(out)=18
 // rocm-oxide: len(scan_out)=n
 #[kernel]
 pub unsafe extern "C" fn block_collectives_probe(
@@ -409,6 +409,26 @@ pub unsafe extern "C" fn block_collectives_probe(
     let block_i32_sum =
         unsafe { block.reduce_add_i32(scratch_i32, if active { value as i32 - 2 } else { 0 }) };
     let block_f32_sum = unsafe { block.reduce_add_f32(scratch_f32, value as f32 * 0.5) };
+    let min_u32 = unsafe { block.reduce_min_u32(scratch_u32, if active { value } else { u32::MAX }) };
+    let max_u32 = unsafe { block.reduce_max_u32(scratch_u32, value) };
+    let min_i32 = unsafe {
+        block.reduce_min_i32(scratch_i32, if active { value as i32 - 2 } else { i32::MAX })
+    };
+    let max_i32 = unsafe { block.reduce_max_i32(scratch_i32, if active { value as i32 - 2 } else { i32::MIN }) };
+    let min_f32 = unsafe {
+        block.reduce_min_f32(
+            scratch_f32,
+            if active {
+                value as f32 * 0.5
+            } else {
+                f32::INFINITY
+            },
+        )
+    };
+    let max_f32 = unsafe { block.reduce_max_f32(scratch_f32, value as f32 * 0.5) };
+    let and_bits = unsafe { block.reduce_and_u32(scratch_u32, if active { value } else { u32::MAX }) };
+    let or_bits = unsafe { block.reduce_or_u32(scratch_u32, value) };
+    let xor_bits = unsafe { block.reduce_xor_u32(scratch_u32, value) };
     let inclusive = unsafe { block.scan_inclusive_add_u32(scratch_u32, value) };
     let exclusive = unsafe { block.scan_exclusive_add_u32(scratch_u32, value) };
     if active {
@@ -421,6 +441,16 @@ pub unsafe extern "C" fn block_collectives_probe(
             out.write_unchecked(1, block_i32_sum as u32);
             out.write_unchecked(2, block_f32_sum.to_bits());
             out.write_unchecked(3, block.size());
+            out.write_unchecked(8, min_u32);
+            out.write_unchecked(9, max_u32);
+            out.write_unchecked(10, min_i32 as u32);
+            out.write_unchecked(11, max_i32 as u32);
+            out.write_unchecked(12, min_f32.to_bits());
+            out.write_unchecked(13, max_f32.to_bits());
+            out.write_unchecked(14, and_bits);
+            out.write_unchecked(15, or_bits);
+            out.write_unchecked(16, xor_bits);
+            out.write_unchecked(17, 1);
         }
     }
     if rank == 7 {
@@ -434,6 +464,28 @@ pub unsafe extern "C" fn block_collectives_probe(
             out.write_unchecked(6, inclusive);
             out.write_unchecked(7, exclusive);
         }
+    }
+}
+
+// rocm-oxide: len(out)=6
+#[kernel]
+pub unsafe extern "C" fn debug_helpers_probe(out: gpu::DeviceSliceMut<u32>) {
+    let i = gpu::global_id_x();
+    if i != 0 {
+        return;
+    }
+
+    let dispatch = gpu::debug::dispatch_id();
+    gpu::debug::sleep::<0>();
+    let pc = gpu::debug::program_counter();
+    gpu::debug::assert_or_trap(pc != 0);
+    unsafe {
+        out.write_unchecked(0, dispatch as u32);
+        out.write_unchecked(1, (dispatch >> 32) as u32);
+        out.write_unchecked(2, 1);
+        out.write_unchecked(3, (pc != 0) as u32);
+        out.write_unchecked(4, pc as u32);
+        out.write_unchecked(5, (pc >> 32) as u32);
     }
 }
 

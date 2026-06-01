@@ -55,10 +55,14 @@ features on top of stronger contracts.
           `u32`/`i32`
     - [x] add scratch-backed block add reductions/scans for `u32`, `i32`, and
           `f32`
-    - [ ] broaden block collectives to min/max/bitwise operations and additional
-          scalar types
-    - [ ] add debug helpers for GPU printf/assert, clock, trap, breakpoint, and
-          profiler trigger equivalents where ROCm exposes a stable path
+    - [x] broaden block collectives to min/max/bitwise reductions over the
+          current `u32`/`i32`/`f32` scalar matrix
+    - [ ] broaden block collectives to `u64`/`i64`/`f64` and additional scan
+          operators
+    - [x] add smoke-safe debug helpers for dispatch id, program counter, sleep,
+          assert/trap, and breakpoint entry points
+    - [ ] add GPU printf, selectable clock counter, and profiler trigger
+          equivalents where ROCm exposes a stable path
   - [ ] ROCm-native interop/backends:
     - [ ] turn COMGR probing into a real compile/link backend and persistent
           code-object cache path

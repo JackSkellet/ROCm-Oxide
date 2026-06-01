@@ -183,9 +183,14 @@ Primary upstream reference:
   - [x] match helpers and broader vote operations
   - [x] wavefront reductions over sum/min/max and bitwise ops
   - [x] scratch-backed block add reductions/scans over `u32`, `i32`, and `f32`
-  - [ ] broader block collective min/max/bitwise operations and scalar-type coverage
-  - [ ] debug helpers for printf/assert, clock, trap, breakpoint, and profiler
-        triggers where ROCm exposes a stable path
+  - [x] broader block collective min/max/bitwise reductions over the current
+        `u32`/`i32`/`f32` scalar matrix
+  - [ ] broader block collective `u64`/`i64`/`f64` support and additional scan
+        operators
+  - [x] smoke-safe debug helpers for dispatch id, program counter, sleep,
+        assert/trap, and breakpoint entry points
+  - [ ] GPU printf, selectable clock counter, and profiler triggers where ROCm
+        exposes a stable path
 - [ ] Compiler completeness:
   - [x] support more pointer-producing IR ops beyond `getelementptr`
   - [x] preserve source signature and contract spans in diagnostics

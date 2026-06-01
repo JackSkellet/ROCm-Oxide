@@ -148,6 +148,49 @@ pub mod math {
     }
 }
 
+pub mod debug {
+    use super::amdgpu;
+
+    #[inline(always)]
+    pub fn dispatch_id() -> u64 {
+        super::dispatch_id()
+    }
+
+    #[inline(always)]
+    pub fn program_counter() -> u64 {
+        amdgpu::s_getpc() as u64
+    }
+
+    #[inline(always)]
+    pub fn sleep<const COUNT: u32>() {
+        amdgpu::s_sleep::<COUNT>()
+    }
+
+    #[inline(always)]
+    pub fn trap<const CODE: u32>() -> ! {
+        amdgpu::s_sethalt::<CODE>()
+    }
+
+    #[inline(always)]
+    pub fn breakpoint() -> ! {
+        trap::<2>()
+    }
+
+    #[inline(always)]
+    pub fn assert_or_trap(condition: bool) {
+        if !condition {
+            trap::<1>();
+        }
+    }
+}
+
+#[macro_export]
+macro_rules! gpu_assert {
+    ($condition:expr $(,)?) => {
+        $crate::debug::assert_or_trap($condition)
+    };
+}
+
 pub mod atomic {
     use core::marker::PhantomData;
     use core::sync::atomic::{AtomicI32, AtomicI64, AtomicU32, AtomicU64, Ordering};
@@ -875,7 +918,9 @@ pub use atomic::{
 pub mod cooperative {
     use super::{
         ballot, block_dim_x, block_dim_y, block_dim_z, block_idx_x, block_idx_y, block_idx_z,
-        block_reduce_add_f32, block_reduce_add_i32, block_reduce_add_u32,
+        block_reduce_add_f32, block_reduce_add_i32, block_reduce_add_u32, block_reduce_and_u32,
+        block_reduce_max_f32, block_reduce_max_i32, block_reduce_max_u32, block_reduce_min_f32,
+        block_reduce_min_i32, block_reduce_min_u32, block_reduce_or_u32, block_reduce_xor_u32,
         block_scan_exclusive_add_f32, block_scan_exclusive_add_i32,
         block_scan_exclusive_add_u32, block_scan_inclusive_add_f32,
         block_scan_inclusive_add_i32, block_scan_inclusive_add_u32, inverse_ballot, lane_id,
@@ -972,6 +1017,51 @@ pub mod cooperative {
         #[inline(always)]
         pub unsafe fn reduce_add_f32(self, scratch: *mut f32, value: f32) -> f32 {
             unsafe { block_reduce_add_f32(scratch, value) }
+        }
+
+        #[inline(always)]
+        pub unsafe fn reduce_min_u32(self, scratch: *mut u32, value: u32) -> u32 {
+            unsafe { block_reduce_min_u32(scratch, value) }
+        }
+
+        #[inline(always)]
+        pub unsafe fn reduce_min_i32(self, scratch: *mut i32, value: i32) -> i32 {
+            unsafe { block_reduce_min_i32(scratch, value) }
+        }
+
+        #[inline(always)]
+        pub unsafe fn reduce_min_f32(self, scratch: *mut f32, value: f32) -> f32 {
+            unsafe { block_reduce_min_f32(scratch, value) }
+        }
+
+        #[inline(always)]
+        pub unsafe fn reduce_max_u32(self, scratch: *mut u32, value: u32) -> u32 {
+            unsafe { block_reduce_max_u32(scratch, value) }
+        }
+
+        #[inline(always)]
+        pub unsafe fn reduce_max_i32(self, scratch: *mut i32, value: i32) -> i32 {
+            unsafe { block_reduce_max_i32(scratch, value) }
+        }
+
+        #[inline(always)]
+        pub unsafe fn reduce_max_f32(self, scratch: *mut f32, value: f32) -> f32 {
+            unsafe { block_reduce_max_f32(scratch, value) }
+        }
+
+        #[inline(always)]
+        pub unsafe fn reduce_and_u32(self, scratch: *mut u32, value: u32) -> u32 {
+            unsafe { block_reduce_and_u32(scratch, value) }
+        }
+
+        #[inline(always)]
+        pub unsafe fn reduce_or_u32(self, scratch: *mut u32, value: u32) -> u32 {
+            unsafe { block_reduce_or_u32(scratch, value) }
+        }
+
+        #[inline(always)]
+        pub unsafe fn reduce_xor_u32(self, scratch: *mut u32, value: u32) -> u32 {
+            unsafe { block_reduce_xor_u32(scratch, value) }
         }
 
         #[inline(always)]
@@ -1520,6 +1610,88 @@ pub unsafe fn block_reduce_add_f32(scratch: *mut f32, value: f32) -> f32 {
     workgroup_barrier();
     result
 }
+
+macro_rules! define_block_reduce {
+    ($name:ident, $ty:ty, $lhs:ident, $rhs:ident, $combine:expr) => {
+        #[inline(always)]
+        pub unsafe fn $name(scratch: *mut $ty, value: $ty) -> $ty {
+            let rank = this_thread_block().thread_rank();
+            let size = this_thread_block().size();
+            unsafe { scratch.add(rank as usize).write(value) };
+            workgroup_barrier();
+
+            let mut stride = 1u32;
+            while stride < size {
+                stride <<= 1;
+            }
+            stride >>= 1;
+
+            while stride > 0 {
+                if rank < stride {
+                    let other = rank + stride;
+                    if other < size {
+                        let slot = unsafe { scratch.add(rank as usize) };
+                        let $lhs = unsafe { slot.read() };
+                        let $rhs = unsafe { scratch.add(other as usize).read() };
+                        unsafe { slot.write($combine) };
+                    }
+                }
+                workgroup_barrier();
+                stride >>= 1;
+            }
+
+            let result = unsafe { scratch.read() };
+            workgroup_barrier();
+            result
+        }
+    };
+}
+
+define_block_reduce!(
+    block_reduce_min_u32,
+    u32,
+    lhs,
+    rhs,
+    if lhs < rhs { lhs } else { rhs }
+);
+define_block_reduce!(
+    block_reduce_min_i32,
+    i32,
+    lhs,
+    rhs,
+    if lhs < rhs { lhs } else { rhs }
+);
+define_block_reduce!(
+    block_reduce_min_f32,
+    f32,
+    lhs,
+    rhs,
+    if lhs < rhs { lhs } else { rhs }
+);
+define_block_reduce!(
+    block_reduce_max_u32,
+    u32,
+    lhs,
+    rhs,
+    if lhs > rhs { lhs } else { rhs }
+);
+define_block_reduce!(
+    block_reduce_max_i32,
+    i32,
+    lhs,
+    rhs,
+    if lhs > rhs { lhs } else { rhs }
+);
+define_block_reduce!(
+    block_reduce_max_f32,
+    f32,
+    lhs,
+    rhs,
+    if lhs > rhs { lhs } else { rhs }
+);
+define_block_reduce!(block_reduce_and_u32, u32, lhs, rhs, lhs & rhs);
+define_block_reduce!(block_reduce_or_u32, u32, lhs, rhs, lhs | rhs);
+define_block_reduce!(block_reduce_xor_u32, u32, lhs, rhs, lhs ^ rhs);
 
 #[inline(always)]
 pub unsafe fn block_scan_inclusive_add_u32(scratch: *mut u32, value: u32) -> u32 {

@@ -189,7 +189,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     let collective_block_x = 32u32;
     let collective_n = collective_block_x as usize;
-    let collective_out = DeviceBuffer::<u32>::new(8)?;
+    let collective_out = DeviceBuffer::<u32>::new(18)?;
     let collective_scan = DeviceBuffer::<u32>::new(collective_n)?;
     unsafe {
         kernels.block_collectives_probe(
@@ -211,6 +211,16 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     assert_eq!(collective[5], 28);
     assert_eq!(collective[6], 528);
     assert_eq!(collective[7], 496);
+    assert_eq!(collective[8], 1);
+    assert_eq!(collective[9], 32);
+    assert_eq!(collective[10], (-1i32) as u32);
+    assert_eq!(collective[11], 30);
+    assert_eq!(f32::from_bits(collective[12]), 0.5);
+    assert_eq!(f32::from_bits(collective[13]), 16.0);
+    assert_eq!(collective[14], 0);
+    assert_eq!(collective[15], 63);
+    assert_eq!(collective[16], 32);
+    assert_eq!(collective[17], 1);
     assert_eq!(
         collective_scan.copy_to_vec()?,
         (1..=collective_block_x)
@@ -219,6 +229,26 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 Some(*sum)
             })
             .collect::<Vec<_>>()
+    );
+
+    let debug_out = DeviceBuffer::<u32>::new(6)?;
+    unsafe {
+        kernels.debug_helpers_probe(LaunchConfig::for_num_elems(1), &debug_out)?;
+    }
+    rocm_oxide::hip::synchronize()?;
+    let debug = debug_out.copy_to_vec()?;
+    assert_eq!(
+        debug[2], 1,
+        "debug sleep helper should return to the kernel"
+    );
+    assert_eq!(
+        debug[3], 1,
+        "debug assert helper should allow true predicates"
+    );
+    assert_ne!(
+        (debug[5] as u64) << 32 | debug[4] as u64,
+        0,
+        "program counter should produce a nonzero debug token"
     );
 
     let control_input = vec![0u32, 1, 2, 3, 7, 12, 15, 31];
