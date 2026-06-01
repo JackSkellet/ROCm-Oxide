@@ -506,11 +506,13 @@ This roadmap is grounded in the validated probe targets:
   enums and pattern matching, array construction/indexing, integer/float/pointer
   casts, loops and iterator desugaring, struct construction/return/pass-by-value,
   and default `repr(Rust)` host/device layout matching.
-- Closure coverage: move beyond the current mirrored `repr(C)` environment path
 - Closure coverage: `compiler_move_closure_probe_RustLayoutParams` now validates
   a generic device kernel that builds a `move` closure from a by-value captured
-  environment and passes it through a device helper; reference captures and
-  host-to-device closure argument APIs remain open.
+  environment and passes it through a device helper.
+  `compiler_host_closure_arg_probe_HostAffineClosure` validates a host-provided
+  closure environment implementing `FnOnce` through ROCm metadata-driven
+  global-buffer kernargs; reference-capture safety gating is the remaining open
+  closure-parity item.
 - ABI and layout parity: generated metadata now records rustc AMDGPU struct
   layout facts, including field offsets, padding, ABI size, and alignment;
   generated host bindings assert matching host layout and reject unsupported

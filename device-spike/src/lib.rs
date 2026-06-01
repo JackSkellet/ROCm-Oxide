@@ -1,5 +1,7 @@
 #![no_std]
+#![feature(fn_traits)]
 #![feature(stdarch_amdgpu)]
+#![feature(unboxed_closures)]
 #![allow(improper_ctypes_definitions)]
 
 use rocm_oxide_device as gpu;
@@ -38,6 +40,13 @@ pub struct RustLayoutParams {
     pub stride: u32,
 }
 
+#[derive(Clone, Copy)]
+pub struct HostAffineClosure {
+    pub base: u32,
+    pub stride: u32,
+    pub xor_mask: u32,
+}
+
 pub trait ClosureCaptureParams: Copy {
     fn apply(self, value: u32) -> u32;
 }
@@ -45,6 +54,17 @@ pub trait ClosureCaptureParams: Copy {
 impl ClosureCaptureParams for RustLayoutParams {
     fn apply(self, value: u32) -> u32 {
         value.wrapping_mul(self.stride).wrapping_add(self.base)
+    }
+}
+
+impl core::ops::FnOnce<(u32,)> for HostAffineClosure {
+    type Output = u32;
+
+    extern "rust-call" fn call_once(self, args: (u32,)) -> Self::Output {
+        args.0
+            .wrapping_mul(self.stride)
+            .wrapping_add(self.base)
+            ^ self.xor_mask
     }
 }
 
@@ -380,6 +400,27 @@ pub unsafe extern "C" fn compiler_move_closure_probe<P: ClosureCaptureParams>(
     let transform = move |value: u32| captured.apply(value).wrapping_add((i as u32) & 1);
     let value = unsafe { input.read_unchecked(i) };
     let result = apply_device_closure(value, transform);
+    let disjoint_out = unsafe { gpu::DisjointSliceMut::new_unchecked(out) };
+    disjoint_out.write_for_thread(thread, result);
+}
+
+// rocm-oxide: len(out)=n
+// rocm-oxide: len(input)=n
+#[kernel(monomorphize(HostAffineClosure))]
+pub unsafe extern "C" fn compiler_host_closure_arg_probe<F: FnOnce(u32) -> u32 + Copy>(
+    out: gpu::DeviceSliceMut<u32>,
+    input: gpu::DeviceSlice<u32>,
+    f: F,
+    n: usize,
+) {
+    let thread = gpu::thread_index_x_witness();
+    let i = thread.get();
+    if i >= n {
+        return;
+    }
+
+    let value = unsafe { input.read_unchecked(i) };
+    let result = apply_device_closure(value.wrapping_add((i as u32) & 3), f);
     let disjoint_out = unsafe { gpu::DisjointSliceMut::new_unchecked(out) };
     disjoint_out.write_for_thread(thread, result);
 }

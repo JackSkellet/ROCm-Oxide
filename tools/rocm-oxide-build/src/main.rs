@@ -4124,12 +4124,13 @@ fn to_snake_case(name: &str) -> String {
 fn generate_kernel_binding(
     kernel: &KernelDecl,
     device_structs: &BTreeMap<String, DeviceStruct>,
-    _metadata: Option<&KernelObjectMetadata>,
+    metadata: Option<&KernelObjectMetadata>,
 ) -> Result<String, String> {
     let mut params = vec!["config: rocm_oxide::LaunchConfig".to_string()];
     let mut operation_params = vec!["config: rocm_oxide::LaunchConfig".to_string()];
     let mut launch_args = Vec::new();
     let mut buffer_arg_names = Vec::new();
+    let mut indirect_scalar_buffer_arg_names = Vec::new();
     let mut keep_alive_arg_names = Vec::new();
     let has_len_arg = kernel
         .args
@@ -4197,13 +4198,30 @@ fn generate_kernel_binding(
                 keep_alive_arg_names.push(arg.name.clone());
             }
             ArgKind::Scalar => {
-                params.push(format!("{}: {}", arg.name, arg.ty));
-                operation_params.push(format!("{}: {}", arg.name, arg.ty));
                 if let Some(device_struct) = device_structs.get(type_leaf_name(&arg.ty)) {
-                    for field in &device_struct.layout.fields {
-                        launch_args.push(format!("{}.{}", arg.name, field.name));
+                    if scalar_arg_is_indirect_global_buffer(metadata, &arg.name) {
+                        params.push(format!(
+                            "{}: &rocm_oxide::DeviceBuffer<{}>",
+                            arg.name, device_struct.name
+                        ));
+                        operation_params.push(format!(
+                            "{}: std::sync::Arc<rocm_oxide::DeviceBuffer<{}>>",
+                            arg.name, device_struct.name
+                        ));
+                        launch_args.push(format!("{}.as_ptr()", arg.name));
+                        buffer_arg_names.push((arg.name.clone(), false));
+                        indirect_scalar_buffer_arg_names.push(arg.name.clone());
+                        keep_alive_arg_names.push(arg.name.clone());
+                    } else {
+                        params.push(format!("{}: {}", arg.name, arg.ty));
+                        operation_params.push(format!("{}: {}", arg.name, arg.ty));
+                        for field in &device_struct.layout.fields {
+                            launch_args.push(format!("{}.{}", arg.name, field.name));
+                        }
                     }
                 } else if primitive_abi_size(&arg.ty).is_some() {
+                    params.push(format!("{}: {}", arg.name, arg.ty));
+                    operation_params.push(format!("{}: {}", arg.name, arg.ty));
                     launch_args.push(arg.name.clone());
                 } else {
                     return Err(format!(
@@ -4226,6 +4244,7 @@ fn generate_kernel_binding(
     out.push_str(&generate_kernel_validation_lines(
         kernel,
         &buffer_arg_names,
+        &indirect_scalar_buffer_arg_names,
         has_len_arg,
         has_block_x_arg,
         false,
@@ -4249,6 +4268,7 @@ fn generate_kernel_binding(
     out.push_str(&generate_kernel_validation_lines(
         kernel,
         &buffer_arg_names,
+        &indirect_scalar_buffer_arg_names,
         has_len_arg,
         has_block_x_arg,
         false,
@@ -4318,6 +4338,7 @@ fn generate_kernel_binding(
     out.push_str(&generate_kernel_validation_lines(
         kernel,
         &buffer_arg_names,
+        &indirect_scalar_buffer_arg_names,
         has_len_arg,
         has_block_x_arg,
         false,
@@ -4339,6 +4360,7 @@ fn generate_kernel_binding(
     out.push_str(&generate_kernel_validation_lines(
         kernel,
         &buffer_arg_names,
+        &indirect_scalar_buffer_arg_names,
         has_len_arg,
         has_block_x_arg,
         true,
@@ -4368,6 +4390,19 @@ fn generate_kernel_binding(
     out.push_str("        })\n");
     out.push_str("    }\n");
     Ok(out)
+}
+
+fn scalar_arg_is_indirect_global_buffer(
+    metadata: Option<&KernelObjectMetadata>,
+    arg_name: &str,
+) -> bool {
+    metadata
+        .and_then(|metadata| metadata.args.get(arg_name))
+        .map(|arg_metadata| {
+            arg_metadata.value_kind.as_deref() == Some("global_buffer")
+                && arg_metadata.address_space.as_deref() == Some("global")
+        })
+        .unwrap_or(false)
 }
 
 fn kernel_field_name(name: &str) -> String {
@@ -4432,21 +4467,30 @@ fn generated_option_bool(value: Option<bool>) -> String {
 fn generate_kernel_validation_lines(
     kernel: &KernelDecl,
     buffer_arg_names: &[(String, bool)],
+    indirect_scalar_buffer_arg_names: &[String],
     has_len_arg: bool,
     has_block_x_arg: bool,
     operation_args: bool,
 ) -> String {
     let mut out = String::new();
     out.push_str("        rocm_oxide::validate_launch_config(config)?;\n");
+    let length_buffer_arg_names = buffer_arg_names
+        .iter()
+        .filter(|(name, _)| {
+            !indirect_scalar_buffer_arg_names
+                .iter()
+                .any(|indirect_name| indirect_name == name)
+        })
+        .collect::<Vec<_>>();
     if kernel.contracts.is_empty() && has_len_arg {
-        for (arg_name, _) in buffer_arg_names {
+        for (arg_name, _) in length_buffer_arg_names {
             out.push_str(&format!(
                 "        rocm_oxide::validate_buffer_len(\"{arg_name}\", {arg_name}.len(), n)?;\n"
             ));
         }
-    } else if kernel.contracts.is_empty() && buffer_arg_names.len() > 1 {
-        let (reference, _) = &buffer_arg_names[0];
-        for (arg_name, _) in buffer_arg_names.iter().skip(1) {
+    } else if kernel.contracts.is_empty() && length_buffer_arg_names.len() > 1 {
+        let (reference, _) = length_buffer_arg_names[0];
+        for (arg_name, _) in length_buffer_arg_names.iter().skip(1) {
             out.push_str(&format!(
                 "        rocm_oxide::validate_buffer_len(\"{arg_name}\", {arg_name}.len(), {reference}.len())?;\n"
             ));
@@ -4458,6 +4502,11 @@ fn generate_kernel_validation_lines(
             contract.buffer,
             contract.buffer,
             contract.required_len.as_rust()
+        ));
+    }
+    for arg_name in indirect_scalar_buffer_arg_names {
+        out.push_str(&format!(
+            "        rocm_oxide::validate_buffer_len(\"{arg_name}\", {arg_name}.len(), 1)?;\n"
         ));
     }
     if has_block_x_arg {
@@ -4588,7 +4637,8 @@ where
 #[cfg(test)]
 mod tests {
     use super::{
-        ArgKind, CodeObjectMetadata, DeviceGlobalKind, KernelObjectMetadata,
+        ArgKind, CodeObjectMetadata, DeviceGlobalKind, KernelArgObjectMetadata,
+        KernelObjectMetadata,
         annotate_dynamic_shared_mem_from_ir, compiler_step, discover_device_crate_bundle,
         discover_device_globals_in_source, discover_device_structs_in_source,
         discover_kernels_in_source, generate_device_global_binding, generate_device_struct_binding,
@@ -5395,6 +5445,53 @@ pub unsafe extern "C" fn apply_closure<F: FnOnce(u32) -> u32>(
         assert_eq!(kernels[0].name, "apply_closure_ClosureEnv");
         assert_eq!(kernels[0].args[2].ty, "ClosureEnv");
         assert_eq!(kernels[0].args[2].kind, ArgKind::Scalar);
+    }
+
+    #[test]
+    fn lowers_indirect_host_to_device_closure_argument_envs() {
+        let source = r#"
+#[derive(Clone, Copy)]
+pub struct HostAffineClosure {
+    pub base: u32,
+    pub stride: u32,
+    pub xor_mask: u32,
+}
+
+#[kernel(monomorphize(HostAffineClosure))]
+pub unsafe extern "C" fn apply_closure<F: FnOnce(u32) -> u32 + Copy>(
+    out: gpu::DeviceSliceMut<u32>,
+    input: gpu::DeviceSlice<u32>,
+    f: F,
+    n: usize,
+) {}
+"#;
+        let kernels = discover_kernels_in_source(source).expect("source should parse");
+        let device_structs = discover_device_structs_in_source(source)
+            .expect("closure environment struct should parse")
+            .into_iter()
+            .map(|device_struct| (device_struct.name.clone(), device_struct))
+            .collect::<BTreeMap<_, _>>();
+
+        assert_eq!(kernels[0].name, "apply_closure_HostAffineClosure");
+        assert_eq!(kernels[0].args[2].ty, "HostAffineClosure");
+        let mut metadata = KernelObjectMetadata::default();
+        metadata.args.insert(
+            "f".to_string(),
+            KernelArgObjectMetadata {
+                address_space: Some("global".to_string()),
+                offset: Some(32),
+                size: Some(8),
+                value_kind: Some("global_buffer".to_string()),
+            },
+        );
+        let binding = generate_kernel_binding(&kernels[0], &device_structs, Some(&metadata))
+            .expect("binding should generate");
+        assert!(binding.contains("pub unsafe fn apply_closure_host_affine_closure"));
+        assert!(binding.contains("f: &rocm_oxide::DeviceBuffer<HostAffineClosure>"));
+        assert!(binding.contains("rocm_oxide::validate_buffer_len(\"f\", f.len(), 1)?;"));
+        assert!(binding.contains("let mut __arg4 = f.as_ptr();"));
+        assert!(binding.contains("let mut __arg5 = n;"));
+        assert!(!binding.contains("f.base"));
     }
 
     #[test]

@@ -35,7 +35,8 @@ features on top of stronger contracts.
     - [x] support move closures captured by value for generic device kernels
     - [ ] support reference captures only when the chosen ROCm memory kind can
           safely back the host-visible access pattern
-    - [ ] add host-to-device closure argument examples and tests
+    - [x] add host-to-device closure argument examples and tests, including
+          metadata-driven indirect closure environment buffers
     - [x] add device-internal closure creation and device-function call tests
   - [ ] Runtime safety parity:
     - [x] add a `DisjointSlice`-style output wrapper for bounds-checked

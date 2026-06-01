@@ -103,7 +103,8 @@ Primary upstream reference:
 - [ ] Closure parity:
   - [x] move closures captured by value
   - [ ] reference closures gated by safe ROCm host-visible memory semantics
-  - [ ] host-to-device closure arguments
+  - [x] host-to-device closure arguments via metadata-driven closure
+        environment buffers
   - [x] device-internal closures passed to device functions
 - [ ] Control-flow, arithmetic, and casting parity:
   - [x] integer and enum `match` lowering smoke coverage

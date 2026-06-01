@@ -237,6 +237,40 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             .collect::<Vec<_>>()
     );
 
+    let host_closure_input = vec![0u32, 2, 4, 8, 16, 32, 64, 128];
+    let host_closure_values = DeviceBuffer::from_slice(&host_closure_input)?;
+    let host_closure_out = DeviceBuffer::<u32>::new(host_closure_input.len())?;
+    let host_closure = generated::HostAffineClosure {
+        base: 19,
+        stride: 3,
+        xor_mask: 0x55aa,
+    };
+    let host_closure_arg = DeviceBuffer::from_slice(&[host_closure])?;
+    unsafe {
+        kernels.compiler_host_closure_arg_probe_host_affine_closure(
+            LaunchConfig::for_num_elems_with_block_size(host_closure_input.len(), 32),
+            &host_closure_out,
+            &host_closure_values,
+            &host_closure_arg,
+            host_closure_input.len(),
+        )?;
+    }
+    rocm_oxide::hip::synchronize()?;
+    assert_eq!(
+        host_closure_out.copy_to_vec()?,
+        host_closure_input
+            .iter()
+            .enumerate()
+            .map(|(index, value)| {
+                value
+                    .wrapping_add((index as u32) & 3)
+                    .wrapping_mul(host_closure.stride)
+                    .wrapping_add(host_closure.base)
+                    ^ host_closure.xor_mask
+            })
+            .collect::<Vec<_>>()
+    );
+
     let flow_input = vec![0u32, 1, 2, 3, 4, 7, 9, 12, 15, 31, 42, 63];
     let flow_values = DeviceBuffer::from_slice(&flow_input)?;
     let flow_out = DeviceBuffer::<u32>::new(flow_input.len())?;
