@@ -559,11 +559,11 @@ This roadmap is grounded in the validated probe targets:
   and heuristic API; full execution, epilogues, grouped GEMM, and Composable
   Kernel integration remain later expansion points.
 - CUDA-only advanced hardware mapping: keep TMA, WGMMA, DSMEM clusters, and
-  nvJitLink/LTOIR as source-level rewrite targets. Use stream-ordered copies
-  plus LDS staging for TMA-like flows, rocWMMA/hipBLASLt/Composable Kernel for
-  matrix/tensor paths, HIP cooperative launch or graph-scheduled tiling for
-  cluster-style work, and AMDGPU IR plus COMGR/clang/HSACO/HIP modules for
-  CUDA artifact-link flows.
+  nvJitLink/LTOIR as source-level rewrite targets, never ABI promises. The
+  exported rewrite-boundary plan marks CUDA cluster launch, DSMEM, TMA, and
+  WGMMA as `abi_compatible=false` and routes them to stream-ordered copies plus
+  LDS staging, rocWMMA/hipBLASLt/Composable Kernel matrix paths, HIP cooperative
+  launch or graph-scheduled tiling, and generated validation contracts.
 - ROCm-specific replacements for CUDA cluster launch, TMA, and WGMMA concepts:
   cooperative module-launch wrappers, device capability flags, and a parity
   planner now map these CUDA-only concepts to HIP cooperative grids,

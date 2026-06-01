@@ -26,6 +26,9 @@ uses HIP capabilities where they exist.
   `grid * block < 2^32` cooperative-launch limit explicit before launch.
 - `rocm_feature_parity_for_device()` turns a probed device into a
   `RocmFeatureSet` for code generators and examples.
+- `rocm_advanced_hardware_rewrite_plan()` makes CUDA thread-block clusters,
+  DSMEM, TMA, and WGMMA explicit source-level rewrite targets with
+  `abi_compatible=false`.
 - `rocm_code_object_interop_plan()` defines the AMD artifact replacement for
   NVIDIA NVVM/LTOIR and nvJitLink flows: AMDGPU IR, COMGR/clang code-object
   linking, HIP module loading, optional ROCm library FFI, and cache keys over
@@ -35,8 +38,9 @@ The important boundary is still explicit: CUDA DSMEM clusters, Hopper TMA, and
 NVIDIA WGMMA are not promised as ABI-compatible concepts. NVVM, LTOIR, PTX,
 cubin, and nvJitLink artifacts are not accepted as ROCm binary contracts.
 Ports should use the replacement plan as a source-level rewrite target, then
-let generated bindings validate buffer ownership, LDS sizing, artifact metadata,
-and launch shape before the HIP call.
+let generated bindings validate cooperative-launch support, rendezvous buffers,
+async-copy/lifetime contracts, LDS sizing, matrix-layout/workspace requirements,
+artifact metadata, and launch shape before the HIP or ROCm-library call.
 
 Primary references:
 [HIP device attributes](https://rocm.docs.amd.com/projects/HIP/en/latest/reference/hip_runtime_api/modules/device_management.html),

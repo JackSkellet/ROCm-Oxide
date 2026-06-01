@@ -45,6 +45,8 @@ Primary upstream reference:
       and rocWMMA, plus hipBLASLt handle/version loading.
 - [x] Checked hipBLASLt FP32 column-major SGEMM descriptor and heuristic query
       wrapper.
+- [x] Explicit rewrite-only boundary for CUDA thread-block clusters, DSMEM, TMA,
+      and WGMMA with ROCm source-level targets and `abi_compatible=false`.
 - [x] HIPRTC specialization cache keyed by backend, architecture, source,
       options, and launch metadata.
 - [x] COMGR HIP source compile/link backend with a persistent code-object cache
@@ -216,12 +218,12 @@ Primary upstream reference:
       direct ports.
 - [x] cuBLASDx/cuFFTDx interop maps to rocBLAS/rocFFT or HIP library FFI and
       should be a separate integration layer.
-- [ ] TMA-style async tensor copies should map to stream-ordered HIP copies,
+- [x] TMA-style async tensor copies should map to stream-ordered HIP copies,
       explicit LDS staging, and pipeline tokens only after synchronization
       semantics are validated on AMD hardware.
 - [x] WGMMA-style matrix operations should map to rocWMMA, hipBLASLt,
       Composable Kernel, rocBLAS, or tiled Rust kernels.
-- [ ] DSMEM and CUDA cluster launch should map to HIP cooperative launch where
+- [x] DSMEM and CUDA cluster launch should map to HIP cooperative launch where
       available, otherwise graph/stream-scheduled tiling plus global-memory
       rendezvous.
 - [x] NVVM/LTOIR and nvJitLink concepts map to AMDGPU LLVM IR or HIP source,

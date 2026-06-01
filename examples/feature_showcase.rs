@@ -2,8 +2,8 @@ use rocm_oxide::{
     AtomicMemoryKind, Comgr, Device, DeviceBuffer, DeviceOperation, Dim3, ExecutionContext,
     HipBlasLt, HipBlasLtHeuristicSummary, HipBlasLtMatmulProblem, LaunchConfig, ManagedBuffer,
     ManagedMemoryKind, MatrixIntegrationReport, PinnedHostBuffer, Result, RocBlas, RocPrim, RocTx,
-    RocmLibraryReport, SgemmLayout, StreamPool, hiprtc, rocm_code_object_interop_plan,
-    rocm_feature_parity_for_device,
+    RocmLibraryReport, SgemmLayout, StreamPool, hiprtc, rocm_advanced_hardware_rewrite_plan,
+    rocm_code_object_interop_plan, rocm_feature_parity_for_device,
 };
 use std::sync::{Arc, mpsc};
 use std::time::Duration;
@@ -187,6 +187,16 @@ fn main() -> Result<()> {
     assert!(artifact_plan.compile_link_backend.contains("COMGR"));
     println!(
         "ok: ROCm artifact interop planner mapped NVVM/LTOIR and nvJitLink to AMDGPU IR, COMGR, HSACO, HIP modules, and ROCm libraries"
+    );
+    let advanced_rewrite_plan = rocm_advanced_hardware_rewrite_plan();
+    assert!(
+        advanced_rewrite_plan
+            .boundaries()
+            .iter()
+            .all(|boundary| boundary.source_level_rewrite && !boundary.abi_compatible)
+    );
+    println!(
+        "ok: CUDA-only TMA/WGMMA/DSMEM/cluster features are source-level ROCm rewrites, not ABI promises"
     );
     let libraries = RocmLibraryReport::query();
     println!(

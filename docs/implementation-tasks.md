@@ -7,7 +7,7 @@ features on top of stronger contracts.
 
 ## Active Sequence
 
-- [ ] ASAP cuda-oxide feature parity sequence from
+- [x] ASAP cuda-oxide feature parity sequence from
       [NVIDIA's supported features matrix](https://nvlabs.github.io/cuda-oxide/appendix/supported-features.html):
   - [x] Compiler type/control-flow parity:
     - [x] add a GPU smoke kernel and generated-binding assertions for enums,
@@ -64,7 +64,7 @@ features on top of stronger contracts.
     - [x] add stable ROCm debug/profiling equivalents: rocTX host profiler
           markers and ranges, HIP clock-rate metadata, and documented ROCm
           limits for GPU printf plus selectable device clock counters
-  - [ ] ROCm-native interop/backends:
+  - [x] ROCm-native interop/backends:
     - [x] turn COMGR probing into a real compile/link backend and persistent
           code-object cache path
     - [x] define the ROCm replacement for NVIDIA LTOIR/nvJitLink interop using
@@ -73,7 +73,7 @@ features on top of stronger contracts.
           scalar types
     - [x] promote hipBLASLt or Composable Kernel from availability probes to a
           checked matmul descriptor and heuristic API
-    - [ ] keep TMA, WGMMA, DSMEM clusters, and CUDA cluster launch as
+    - [x] keep TMA, WGMMA, DSMEM clusters, and CUDA cluster launch as
           source-level rewrite targets, not ABI promises
 - [x] CUDA-like feature follow-up sequence from
       [cuda-future-work.md](/home/kjwtil/Documents/ROCm-Oxide/docs/cuda-future-work.md):

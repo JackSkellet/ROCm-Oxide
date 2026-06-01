@@ -3,6 +3,7 @@ use crate::{DeviceProperties, Error, Result};
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum CudaPortingConcept {
     ThreadBlockCluster,
+    DistributedSharedMemory,
     TensorMemoryAccelerator,
     WarpGroupMma,
     NvvmLtoIr,
@@ -69,6 +70,24 @@ pub struct RocmCodeObjectInteropPlan {
     pub cuda_binary_compatible: bool,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct RocmSourceRewriteBoundary {
+    pub concept: CudaPortingConcept,
+    pub cuda_name: &'static str,
+    pub rocm_source_rewrite: &'static str,
+    pub validation_contract: &'static str,
+    pub source_level_rewrite: bool,
+    pub abi_compatible: bool,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct RocmAdvancedHardwareRewritePlan {
+    pub thread_block_clusters: RocmSourceRewriteBoundary,
+    pub distributed_shared_memory: RocmSourceRewriteBoundary,
+    pub tensor_memory_accelerator: RocmSourceRewriteBoundary,
+    pub warp_group_mma: RocmSourceRewriteBoundary,
+}
+
 pub fn rocm_feature_parity_for_device(properties: DeviceProperties) -> RocmFeatureSet {
     RocmFeatureSet {
         cluster_launch: RocmFeaturePlan {
@@ -116,6 +135,43 @@ pub const fn rocm_code_object_interop_plan() -> RocmCodeObjectInteropPlan {
         library_backend: "optional ROCm library FFI such as rocBLAS, rocFFT, rocPRIM/hipCUB, hipBLASLt, and Composable Kernel",
         cache_key: "backend + architecture + source/object inputs + options + launch metadata",
         cuda_binary_compatible: false,
+    }
+}
+
+pub const fn rocm_advanced_hardware_rewrite_plan() -> RocmAdvancedHardwareRewritePlan {
+    RocmAdvancedHardwareRewritePlan {
+        thread_block_clusters: RocmSourceRewriteBoundary {
+            concept: CudaPortingConcept::ThreadBlockCluster,
+            cuda_name: "CUDA thread-block clusters / cluster launch",
+            rocm_source_rewrite: "HIP cooperative grid launch when supported, otherwise graph- or stream-scheduled workgroup tiles",
+            validation_contract: "validate cooperative-launch support, grid/block limits, explicit rendezvous buffers, and stream/graph dependencies",
+            source_level_rewrite: true,
+            abi_compatible: false,
+        },
+        distributed_shared_memory: RocmSourceRewriteBoundary {
+            concept: CudaPortingConcept::DistributedSharedMemory,
+            cuda_name: "CUDA distributed shared memory clusters",
+            rocm_source_rewrite: "explicit global-memory rendezvous plus per-workgroup LDS staging; no cross-workgroup LDS address-space promise",
+            validation_contract: "validate buffer ownership, rendezvous ordering, LDS byte counts, and memory-scope requirements before launch",
+            source_level_rewrite: true,
+            abi_compatible: false,
+        },
+        tensor_memory_accelerator: RocmSourceRewriteBoundary {
+            concept: CudaPortingConcept::TensorMemoryAccelerator,
+            cuda_name: "Hopper Tensor Memory Accelerator",
+            rocm_source_rewrite: "stream-ordered HIP copies into device buffers plus explicit LDS tile staging and generated pipeline tokens where synchronization semantics are proven",
+            validation_contract: "validate async-copy capability, source/destination lifetimes, tile dimensions, staged LDS bytes, and synchronization boundaries",
+            source_level_rewrite: true,
+            abi_compatible: false,
+        },
+        warp_group_mma: RocmSourceRewriteBoundary {
+            concept: CudaPortingConcept::WarpGroupMma,
+            cuda_name: "NVIDIA WGMMA",
+            rocm_source_rewrite: "hipBLASLt/rocBLAS/Composable Kernel or rocWMMA-style fragments, with tiled Rust kernels as the portable fallback",
+            validation_contract: "validate library availability, matrix layouts, workspace limits, wavefront size, and fallback kernel resource metadata",
+            source_level_rewrite: true,
+            abi_compatible: false,
+        },
     }
 }
 
@@ -208,6 +264,17 @@ impl RocmMatrixMathPlan {
     }
 }
 
+impl RocmAdvancedHardwareRewritePlan {
+    pub const fn boundaries(self) -> [RocmSourceRewriteBoundary; 4] {
+        [
+            self.thread_block_clusters,
+            self.distributed_shared_memory,
+            self.tensor_memory_accelerator,
+            self.warp_group_mma,
+        ]
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -278,5 +345,20 @@ mod tests {
         assert!(plan.compile_link_backend.contains("COMGR"));
         assert!(plan.load_backend.contains("hipModuleLoadData"));
         assert!(!plan.cuda_binary_compatible);
+    }
+
+    #[test]
+    fn cuda_only_advanced_hardware_is_source_rewrite_only() {
+        let plan = rocm_advanced_hardware_rewrite_plan();
+        assert_eq!(
+            plan.distributed_shared_memory.concept,
+            CudaPortingConcept::DistributedSharedMemory
+        );
+        for boundary in plan.boundaries() {
+            assert!(boundary.source_level_rewrite);
+            assert!(!boundary.abi_compatible);
+            assert!(!boundary.rocm_source_rewrite.is_empty());
+            assert!(!boundary.validation_contract.is_empty());
+        }
     }
 }

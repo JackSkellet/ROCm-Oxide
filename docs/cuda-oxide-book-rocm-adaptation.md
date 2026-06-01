@@ -98,5 +98,8 @@ They need AMD equivalents or separate abstractions:
 - TMA/WGMMA map through ROCm-specific abstractions: stream-ordered transfers
   plus LDS tile staging for memory movement, and rocWMMA/rocBLAS/tiled Rust
   kernels for matrix math.
+- `rocm_advanced_hardware_rewrite_plan()` records these as source-level rewrite
+  targets with `abi_compatible=false` so bindings never promise NVIDIA hardware
+  ABI compatibility.
 - NVVM/LTOIR/nvJitLink should become a generic artifact/link layer over HSACO
   and ROCm code objects.
