@@ -69,6 +69,8 @@ Primary upstream reference:
       match AMDGPU kernel ABI lowering.
 - [x] GPU-smoked compiler parity kernel for enums, custom discriminants,
       `Option`, `Result`, match lowering, arrays, loops, and scalar casts.
+- [x] GPU-smoked nested branches, range loops, iterator-like `DeviceSlice`
+      traversal, pointer casts, and unsupported pointer/integer cast diagnostics.
 - [x] Device-side `DisjointSliceMut`, thread-index witness, and workgroup
       barrier token helpers for safer per-thread writes and block sync.
 - [x] Scoped `i32`, `u64`, and `i64` atomics plus wavefront shuffle, match,
@@ -105,9 +107,10 @@ Primary upstream reference:
 - [ ] Control-flow, arithmetic, and casting parity:
   - [x] integer and enum `match` lowering smoke coverage
   - [x] `while`, `loop`, `break`, and `continue` smoke coverage
-  - [ ] nested loops, range loops, and iterator-like slice loops
+  - [x] nested loops, range loops, and iterator-like slice loops
   - [ ] 64-bit integer arithmetic audit across generated kernels
-  - [ ] integer, float, pointer, and bitcast conversion test matrix
+  - [x] pointer-cast smoke coverage and unsupported pointer/integer cast diagnostics
+  - [ ] broader integer, float, pointer, and bitcast conversion test matrix
 - [ ] Interop and compilation pipeline parity:
   - [x] cross-crate kernel discovery and bundling
   - [x] cargo subcommand and pipeline inspection equivalents

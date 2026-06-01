@@ -431,10 +431,10 @@ This roadmap is grounded in the validated probe targets:
 - `gfx1201`, AMD Radeon RX 9070 XT: one device, managed memory, concurrent
   managed access, host-native atomics, host mapped memory, host registration,
   and memory pools were reported available. Current generated artifact after
-  the first sprint slice on that probe: 24 kernels, 41 buffer contracts, one
-  linked object input, max VGPR 33, max SGPR 54, max kernarg 368 bytes, max
-  static LDS 32768 bytes, max private segment 260 bytes, two dynamic-LDS
-  kernels, and no dynamic stack users.
+  the control-flow/cast sprint slice on that probe: 25 kernels, 43 buffer
+  contracts, one linked object input, max VGPR 33, max SGPR 54, max kernarg 368
+  bytes, max static LDS 32768 bytes, max private segment 260 bytes, two
+  dynamic-LDS kernels, and no dynamic stack users.
 - `gfx1100`, AMD Radeon RX 7900 XT: one device, managed memory, concurrent
   managed access, host mapped memory, host registration, and memory pools are
   reported available; direct host access to device-resident managed memory,
@@ -462,12 +462,14 @@ This roadmap is grounded in the validated probe targets:
 
 - ASAP cuda-oxide parity sprint: make the current prototype comparable category
   by category against NVIDIA's matrix. The first compiler/type, runtime-safety,
-  and device-API breadth slice is live: `compiler_parity_matrix` now smokes
-  enums, `Option`, `Result`, custom discriminants, match, arrays, loops, casts,
-  by-value `repr(C)` struct ABI scalarization, `DisjointSliceMut`,
-  thread-index witnesses, barrier tokens, typed integer atomics, wavefront
-  shuffle/match/vote helpers, and wavefront reductions through generated
-  bindings.
+  and device-API breadth slice is live: `compiler_parity_matrix` and
+  `compiler_flow_cast_probe` now smoke enums, `Option`, `Result`, custom
+  discriminants, match, arrays, nested/range loops, iterator-like slice walks,
+  pointer casts, by-value `repr(C)` struct ABI scalarization,
+  `DisjointSliceMut`, thread-index witnesses, barrier tokens, typed integer
+  atomics, wavefront shuffle/match/vote helpers, and wavefront reductions
+  through generated bindings. Unsupported pointer/integer casts now fail with a
+  source-linked build diagnostic instead of leaking into backend lowering.
 - Scope-specific atomic verification: implemented workgroup/device
   `syncscope` lowering, keep the system-scope backend default documented, verify
   the transformed IR plus disassembled ISA, and keep runtime coverage across

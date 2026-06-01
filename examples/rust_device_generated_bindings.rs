@@ -185,6 +185,29 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         );
     }
 
+    let flow_input = vec![0u32, 1, 2, 3, 4, 7, 9, 12, 15, 31, 42, 63];
+    let flow_values = DeviceBuffer::from_slice(&flow_input)?;
+    let flow_out = DeviceBuffer::<u32>::new(flow_input.len())?;
+    unsafe {
+        kernels.compiler_flow_cast_probe(
+            LaunchConfig::for_num_elems_with_block_size(flow_input.len(), 32),
+            &flow_out,
+            &flow_values,
+            flow_input.len(),
+        )?;
+    }
+    rocm_oxide::hip::synchronize()?;
+    let flow_scores = flow_out.copy_to_vec()?;
+    let expected_flow = flow_input
+        .iter()
+        .enumerate()
+        .map(|(index, _)| flow_cast_score_host(&flow_input, index))
+        .collect::<Vec<_>>();
+    assert_eq!(
+        flow_scores, expected_flow,
+        "compiler_flow_cast_probe should match the host control-flow mirror"
+    );
+
     let reduce_n = 1_000usize;
     let reduce_block_x = 128u32;
     let partial_count = reduce_n.div_ceil(reduce_block_x as usize);
@@ -505,4 +528,50 @@ fn control_score_host(
         .wrapping_add(float_score)
         .wrapping_add(bitcast_score)
         .wrapping_add((pair.left ^ pair.right) & 31)
+}
+
+fn flow_cast_score_host(input: &[u32], index: usize) -> u32 {
+    let value = input[index];
+    let mut score = 0u32;
+
+    if (value & 1) == 0 {
+        if (value & 4) == 0 {
+            score = score.wrapping_add(11);
+        } else {
+            score = score.wrapping_add(17);
+        }
+    } else if value % 3 == 0 {
+        score = score.wrapping_add(23);
+    } else if value > 10 {
+        score = score.wrapping_add(31);
+    } else {
+        score = score.wrapping_add(37);
+    }
+
+    for outer in 0u32..3 {
+        for inner in 0u32..4 {
+            let candidate = value.wrapping_add(outer * 7 + inner);
+            if (candidate & 1) == 0 {
+                continue;
+            }
+            if inner == 3 && (value & 2) != 0 {
+                break;
+            }
+            score = score.wrapping_add(candidate & 15);
+        }
+    }
+
+    for step in 0..((value & 3) + 1) {
+        score = score.wrapping_add((step + 1) * 3);
+    }
+
+    let mut offset = 0usize;
+    while offset < 4 && index + offset < input.len() {
+        let lane = input[index + offset];
+        score = score.wrapping_add((lane & 7).wrapping_mul(offset as u32 + 1));
+        offset += 1;
+    }
+
+    let signed = (score as i32).wrapping_sub(value as i32);
+    score.wrapping_add((signed as u32) & 31)
 }

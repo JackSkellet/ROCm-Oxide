@@ -19,7 +19,7 @@ features on top of stronger contracts.
     - [x] add integer, float, and bitcast conversion coverage in the parity
           smoke kernel
     - [x] add loop coverage for `while`, `loop`, `break`, and `continue`
-    - [ ] add nested-branch, range-loop, iterator-like slice traversal, pointer
+    - [x] add nested-branch, range-loop, iterator-like slice traversal, pointer
           cast, and unsupported-cast diagnostic coverage
   - [ ] ABI/layout parity:
     - [ ] query rustc layout facts for host/device structs and record field
@@ -119,10 +119,10 @@ Local probes:
   HIP/runtime `7.2.53211-364a905`; AMD LLVM/clang `22.0.0git`. HIP reported
   managed memory, concurrent managed access, host-native atomics, host mapped
   memory, host registration, and memory pools. Current generated artifact on
-  that probe after the first sprint slice: 24 kernels, 41 buffer contracts,
-  one linked object input, max VGPR 33, max SGPR 54, max kernarg 368 bytes,
-  max static LDS 32768 bytes, max private segment 260 bytes, two dynamic-LDS
-  kernels, and no dynamic stack users.
+  that probe after the control-flow/cast sprint slice: 25 kernels, 43 buffer
+  contracts, one linked object input, max VGPR 33, max SGPR 54, max kernarg 368
+  bytes, max static LDS 32768 bytes, max private segment 260 bytes, two
+  dynamic-LDS kernels, and no dynamic stack users.
 - 2026-06-01 local workstation: `gfx1100`, AMD Radeon RX 7900 XT. HIP/runtime
   `7.2.53211-364a905`; AMD LLVM/clang `22.0.0git`. HIP reported managed memory,
   concurrent managed access, host mapped memory, host registration, and memory

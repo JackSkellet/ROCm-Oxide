@@ -2111,11 +2111,15 @@ fn transform_ir(
                     break;
                 }
             }
+            let declaration = kernels
+                .get(&kernel.name)
+                .ok_or_else(|| format!("kernel `{}` missing from source map", kernel.name))?;
             output.extend(rewrite_kernel_body(
                 body,
+                declaration,
                 kernel.pointer_addrspaces,
                 device_globals,
-            ));
+            )?);
         } else {
             if atomic_scope_marker(line).is_some() || is_atomic_scope_marker_declaration(line) {
                 continue;
@@ -2244,14 +2248,23 @@ fn argument_name(arg: &str) -> Option<String> {
 
 fn rewrite_kernel_body(
     lines: Vec<String>,
+    kernel: &KernelDecl,
     mut pointer_addrspaces: BTreeMap<String, String>,
     device_globals: &BTreeMap<String, DeviceGlobal>,
-) -> Vec<String> {
+) -> Result<Vec<String>, String> {
     let mut rewritten = Vec::with_capacity(lines.len());
     let mut pending_atomic_scope = None;
 
     for line in lines {
         let mut current = rewrite_marked_globals(&line, device_globals);
+        if let Some(op) = unsupported_pointer_integer_cast(&current) {
+            return Err(format!(
+                "{}: unsupported pointer/integer cast `{op}` in kernel `{}`; ROCm-Oxide cannot prove address-space-preserving semantics for this cast yet\n  LLVM IR: {}",
+                kernel.span,
+                kernel.name,
+                current.trim()
+            ));
+        }
         for (name, address_space) in &pointer_addrspaces {
             current = rewrite_pointer_operand(&current, name, address_space);
         }
@@ -2298,7 +2311,17 @@ fn rewrite_kernel_body(
         rewritten.push(rewrite_kernel_attributes(&current));
     }
 
-    rewritten
+    Ok(rewritten)
+}
+
+fn unsupported_pointer_integer_cast(line: &str) -> Option<&'static str> {
+    if line.contains(" inttoptr ") || line.contains("= inttoptr ") {
+        Some("inttoptr")
+    } else if line.contains(" ptrtoint ") || line.contains("= ptrtoint ") {
+        Some("ptrtoint")
+    } else {
+        None
+    }
 }
 
 #[derive(Clone, Copy)]
@@ -4512,6 +4535,36 @@ pub unsafe extern "C" fn pointer_ops(out: *mut u32, fallback: *mut u32, cond: bo
             output.contains("%phi = phi ptr addrspace(1) [ %selected, %start ], [ %gep, %start ]")
         );
         assert!(output.contains("store i32 7, ptr addrspace(1) %phi"));
+    }
+
+    #[test]
+    fn rejects_unsupported_pointer_integer_casts_with_source_span() {
+        let input = r#"; ModuleID = 'sample'
+target triple = "amdgcn-amd-amdhsa"
+
+define void @bad_cast(ptr noundef %out, i64 noundef %addr) unnamed_addr #0 {
+start:
+  %raw = inttoptr i64 %addr to ptr
+  %roundtrip = ptrtoint ptr %out to i64
+  store i32 7, ptr %raw, align 4
+  ret void
+}
+
+attributes #0 = { nounwind "target-cpu"="gfx1201" }
+"#;
+        let decls = kernel_map(
+            r#"
+#[kernel]
+pub unsafe extern "C" fn bad_cast(out: *mut u32, addr: usize) {}
+"#,
+        );
+        let kernels = decls.keys().cloned().collect::<BTreeSet<_>>();
+        let err = transform_ir(input, &kernels, &decls, &BTreeMap::new())
+            .expect_err("pointer/integer casts should be rejected");
+        assert!(err.contains("<source>:2"));
+        assert!(err.contains("bad_cast"));
+        assert!(err.contains("unsupported pointer/integer cast `inttoptr`"));
+        assert!(err.contains("%raw = inttoptr i64 %addr to ptr"));
     }
 
     #[test]

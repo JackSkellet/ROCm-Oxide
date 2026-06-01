@@ -324,6 +324,26 @@ pub unsafe extern "C" fn compiler_parity_matrix(
     disjoint_pairs.write_for_thread(thread, pair);
 }
 
+// rocm-oxide: len(out)=n
+// rocm-oxide: len(input)=n
+#[kernel]
+pub unsafe extern "C" fn compiler_flow_cast_probe(
+    out: gpu::DeviceSliceMut<u32>,
+    input: gpu::DeviceSlice<u32>,
+    n: usize,
+) {
+    let thread = gpu::thread_index_x_witness();
+    let i = thread.get();
+    if i >= n {
+        return;
+    }
+
+    let result = flow_cast_score(input, n, i);
+    let byte_offset = i * core::mem::size_of::<u32>();
+    let slot = unsafe { out.as_mut_ptr().cast::<u8>().add(byte_offset).cast::<u32>() };
+    unsafe { core::ptr::write(slot, result) };
+}
+
 // rocm-oxide: len(out)=24
 // rocm-oxide: len(i32_counter)=1
 // rocm-oxide: len(u64_counter)=1
@@ -1976,6 +1996,58 @@ fn control_score(value: u32, params: ControlParams, pair: ControlPair) -> u32 {
         .wrapping_add(float_score)
         .wrapping_add(bitcast_score)
         .wrapping_add((pair.left ^ pair.right) & 31)
+}
+
+fn read_input_by_byte_cast(input: gpu::DeviceSlice<u32>, index: usize) -> u32 {
+    let byte_offset = index * core::mem::size_of::<u32>();
+    let slot = unsafe { input.as_ptr().cast::<u8>().add(byte_offset).cast::<u32>() };
+    unsafe { core::ptr::read(slot) }
+}
+
+fn flow_cast_score(input: gpu::DeviceSlice<u32>, len: usize, index: usize) -> u32 {
+    let value = read_input_by_byte_cast(input, index);
+    let mut score = 0u32;
+
+    if (value & 1) == 0 {
+        if (value & 4) == 0 {
+            score = score.wrapping_add(11);
+        } else {
+            score = score.wrapping_add(17);
+        }
+    } else if value % 3 == 0 {
+        score = score.wrapping_add(23);
+    } else if value > 10 {
+        score = score.wrapping_add(31);
+    } else {
+        score = score.wrapping_add(37);
+    }
+
+    for outer in 0u32..3 {
+        for inner in 0u32..4 {
+            let candidate = value.wrapping_add(outer * 7 + inner);
+            if (candidate & 1) == 0 {
+                continue;
+            }
+            if inner == 3 && (value & 2) != 0 {
+                break;
+            }
+            score = score.wrapping_add(candidate & 15);
+        }
+    }
+
+    for step in 0..((value & 3) + 1) {
+        score = score.wrapping_add((step + 1) * 3);
+    }
+
+    let mut offset = 0usize;
+    while offset < 4 && index + offset < len {
+        let lane = read_input_by_byte_cast(input, index + offset);
+        score = score.wrapping_add((lane & 7).wrapping_mul(offset as u32 + 1));
+        offset += 1;
+    }
+
+    let signed = (score as i32).wrapping_sub(value as i32);
+    score.wrapping_add((signed as u32) & 31)
 }
 
 fn abs_i32(value: i32) -> i32 {
