@@ -3375,23 +3375,51 @@ fn write_bindings(
     out.push_str("#[allow(dead_code)]\n");
     out.push_str("pub struct DeviceKernels {\n");
     out.push_str("    module: std::sync::Arc<rocm_oxide::Module>,\n");
+    for kernel in kernels.values() {
+        out.push_str(&format!(
+            "    {}: std::sync::Arc<rocm_oxide::Kernel>,\n",
+            kernel_field_name(&kernel.name)
+        ));
+    }
     out.push_str("}\n\n");
     out.push_str("#[allow(dead_code)]\n");
     out.push_str("impl DeviceKernels {\n");
     out.push_str("    pub fn load(device: &rocm_oxide::Device, hsaco: impl AsRef<Path>) -> rocm_oxide::Result<Self> {\n");
-    out.push_str(
-        "        Ok(Self { module: std::sync::Arc::new(device.load_code_object_file(hsaco)?) })\n",
-    );
+    out.push_str("        Self::from_module(std::sync::Arc::new(device.load_code_object_file(hsaco)?))\n");
     out.push_str("    }\n\n");
     out.push_str(
         "    pub fn load_embedded(device: &rocm_oxide::Device) -> rocm_oxide::Result<Self> {\n",
     );
-    out.push_str(
-        "        Ok(Self { module: std::sync::Arc::new(device.load_code_object(DEVICE_HSACO_BYTES)?) })\n",
-    );
+    out.push_str("        Self::from_module(std::sync::Arc::new(device.load_code_object(DEVICE_HSACO_BYTES)?))\n");
+    out.push_str("    }\n\n");
+    out.push_str("    fn from_module(module: std::sync::Arc<rocm_oxide::Module>) -> rocm_oxide::Result<Self> {\n");
+    out.push_str("        Ok(Self {\n");
+    out.push_str("            module: std::sync::Arc::clone(&module),\n");
+    for kernel in kernels.values() {
+        let kernel_metadata =
+            generated_kernel_metadata(code_object_metadata.kernels.get(&kernel.name));
+        out.push_str(&format!(
+            "            {}: std::sync::Arc::new(module.kernel_with_metadata(c\"{}\", {kernel_metadata})?),\n",
+            kernel_field_name(&kernel.name),
+            kernel.name
+        ));
+    }
+    out.push_str("        })\n");
     out.push_str("    }\n\n");
     out.push_str("    pub fn module(&self) -> &rocm_oxide::Module {\n");
     out.push_str("        self.module.as_ref()\n");
+    out.push_str("    }\n\n");
+    out.push_str("    pub fn kernel(&self, name: &str) -> Option<&rocm_oxide::Kernel> {\n");
+    out.push_str("        match name {\n");
+    for kernel in kernels.values() {
+        out.push_str(&format!(
+            "            \"{}\" => Some(self.{}.as_ref()),\n",
+            kernel.name,
+            kernel_field_name(&kernel.name)
+        ));
+    }
+    out.push_str("            _ => None,\n");
+    out.push_str("        }\n");
     out.push_str("    }\n\n");
     out.push_str("    pub const fn resources(&self) -> &'static [rocm_oxide::KernelResource] {\n");
     out.push_str("        DEVICE_KERNEL_RESOURCES\n");
@@ -3402,9 +3430,7 @@ fn write_bindings(
     out.push_str("        DEVICE_KERNEL_RESOURCES.iter().find(|resource| resource.name == name)\n");
     out.push_str("    }\n\n");
     out.push_str("    pub fn recommend_1d_launch(&self, name: &str, num_elems: usize, dynamic_shared_mem_bytes: u32, block_size_limit: u32) -> rocm_oxide::Result<rocm_oxide::LaunchRecommendation> {\n");
-    out.push_str("        let resource = self.resource(name).ok_or_else(|| rocm_oxide::Error::InvalidLaunch(format!(\"unknown generated kernel `{name}`\")))?;\n");
-    out.push_str("        let c_name = std::ffi::CString::new(name).map_err(|_| rocm_oxide::Error::InvalidLaunch(format!(\"kernel name `{name}` contains a NUL byte\")))?;\n");
-    out.push_str("        let kernel = self.module.kernel_with_metadata(c_name.as_c_str(), resource.launch_metadata())?;\n");
+    out.push_str("        let kernel = self.kernel(name).ok_or_else(|| rocm_oxide::Error::InvalidLaunch(format!(\"unknown generated kernel `{name}`\")))?;\n");
     out.push_str("        kernel.recommend_1d_launch(num_elems, dynamic_shared_mem_bytes, block_size_limit)\n");
     out.push_str("    }\n\n");
 
@@ -3508,7 +3534,7 @@ fn to_snake_case(name: &str) -> String {
 
 fn generate_kernel_binding(
     kernel: &KernelDecl,
-    metadata: Option<&KernelObjectMetadata>,
+    _metadata: Option<&KernelObjectMetadata>,
 ) -> Result<String, String> {
     let mut params = vec!["config: rocm_oxide::LaunchConfig".to_string()];
     let mut operation_params = vec!["config: rocm_oxide::LaunchConfig".to_string()];
@@ -3589,6 +3615,7 @@ fn generate_kernel_binding(
     }
 
     let mut out = String::new();
+    let field_name = kernel_field_name(&kernel.name);
     out.push_str(&format!(
         "    pub unsafe fn {}(&self, {}) -> rocm_oxide::Result<()> {{\n",
         kernel.name,
@@ -3601,20 +3628,72 @@ fn generate_kernel_binding(
         has_block_x_arg,
         false,
     ));
-    let kernel_metadata = generated_kernel_metadata(metadata);
-    out.push_str(&format!(
-        "        let kernel = self.module.kernel_with_metadata(c\"{}\", {kernel_metadata})?;\n",
-        kernel.name
-    ));
+    out.push_str(&generate_kernel_param_setup(&launch_args, "        "));
     out.push_str("        unsafe {\n");
-    out.push_str("            rocm_oxide::launch!(\n");
-    out.push_str("                kernel,\n");
-    out.push_str("                config");
-    for arg in &launch_args {
-        out.push_str(",\n                ");
-        out.push_str(&arg);
-    }
-    out.push_str(",\n            )\n");
+    out.push_str(&format!(
+        "            self.{field_name}.launch_raw(config, &mut __params)\n"
+    ));
+    out.push_str("        }\n");
+    out.push_str("    }\n");
+
+    out.push('\n');
+    let mut stream_params = vec!["stream: &rocm_oxide::Stream".to_string()];
+    stream_params.extend(params.clone());
+    out.push_str(&format!(
+        "    pub unsafe fn {}_on_stream(&self, {}) -> rocm_oxide::Result<()> {{\n",
+        kernel.name,
+        stream_params.join(", ")
+    ));
+    out.push_str(&generate_kernel_validation_lines(
+        kernel,
+        &buffer_arg_names,
+        has_len_arg,
+        has_block_x_arg,
+        false,
+    ));
+    out.push_str(&generate_kernel_param_setup(&launch_args, "        "));
+    out.push_str("        unsafe {\n");
+    out.push_str(&format!(
+        "            self.{field_name}.launch_raw_on_stream(stream, config, &mut __params)\n"
+    ));
+    out.push_str("        }\n");
+    out.push_str("    }\n");
+
+    out.push('\n');
+    out.push_str("    /// Launches without generated buffer, alias, or launch validation.\n");
+    out.push_str("    ///\n");
+    out.push_str("    /// # Safety\n");
+    out.push_str("    /// The caller must prevalidate the launch config, buffer lengths, aliasing,\n");
+    out.push_str("    /// argument ABI, and all pointer lifetimes for the launched work.\n");
+    out.push_str(&format!(
+        "    pub unsafe fn {}_unchecked(&self, {}) -> rocm_oxide::Result<()> {{\n",
+        kernel.name,
+        params.join(", ")
+    ));
+    out.push_str(&generate_kernel_param_setup(&launch_args, "        "));
+    out.push_str("        unsafe {\n");
+    out.push_str(&format!(
+        "            self.{field_name}.launch_raw_unchecked(config, &mut __params)\n"
+    ));
+    out.push_str("        }\n");
+    out.push_str("    }\n");
+
+    out.push('\n');
+    out.push_str("    /// Launches on a stream without generated buffer, alias, or launch validation.\n");
+    out.push_str("    ///\n");
+    out.push_str("    /// # Safety\n");
+    out.push_str("    /// The caller must prevalidate the launch config, buffer lengths, aliasing,\n");
+    out.push_str("    /// argument ABI, pointer lifetimes, and stream/device association.\n");
+    out.push_str(&format!(
+        "    pub unsafe fn {}_on_stream_unchecked(&self, {}) -> rocm_oxide::Result<()> {{\n",
+        kernel.name,
+        stream_params.join(", ")
+    ));
+    out.push_str(&generate_kernel_param_setup(&launch_args, "        "));
+    out.push_str("        unsafe {\n");
+    out.push_str(&format!(
+        "            self.{field_name}.launch_raw_on_stream_unchecked(stream, config, &mut __params)\n"
+    ));
     out.push_str("        }\n");
     out.push_str("    }\n");
 
@@ -3633,23 +3712,12 @@ fn generate_kernel_binding(
     ));
     out.push_str("        let module = std::sync::Arc::clone(&self.module);\n");
     out.push_str(&format!(
-        "        Ok(move |context: &rocm_oxide::ExecutionContext| -> rocm_oxide::Result<rocm_oxide::KernelLaunchCompletion> {{\n            let kernel = module.kernel_with_metadata(c\"{}\", {kernel_metadata})?;\n",
-        kernel.name
+        "        let kernel = std::sync::Arc::clone(&self.{field_name});\n"
     ));
-    if launch_args.is_empty() {
-        out.push_str("            let mut __params: [*mut std::ffi::c_void; 0] = [];\n");
-    } else {
-        for (index, arg) in launch_args.iter().enumerate() {
-            out.push_str(&format!("            let mut __arg{index} = {arg};\n"));
-        }
-        out.push_str("            let mut __params = [\n");
-        for index in 0..launch_args.len() {
-            out.push_str(&format!(
-                "                rocm_oxide::__private::arg_ptr(&mut __arg{index}),\n"
-            ));
-        }
-        out.push_str("            ];\n");
-    }
+    out.push_str(
+        "        Ok(move |context: &rocm_oxide::ExecutionContext| -> rocm_oxide::Result<rocm_oxide::KernelLaunchCompletion> {\n",
+    );
+    out.push_str(&generate_kernel_param_setup(&launch_args, "            "));
     out.push_str("            unsafe {\n");
     out.push_str(
         "                kernel.launch_raw_on_stream(context.stream(), config, &mut __params)?;\n",
@@ -3657,6 +3725,7 @@ fn generate_kernel_binding(
     out.push_str("            }\n");
     out.push_str("            let mut __completion = rocm_oxide::KernelLaunchCompletion::new();\n");
     out.push_str("            __completion.keep_alive(module);\n");
+    out.push_str("            __completion.keep_alive(kernel);\n");
     for arg_name in &keep_alive_arg_names {
         out.push_str(&format!(
             "            __completion.keep_alive({arg_name});\n"
@@ -3666,6 +3735,34 @@ fn generate_kernel_binding(
     out.push_str("        })\n");
     out.push_str("    }\n");
     Ok(out)
+}
+
+fn kernel_field_name(name: &str) -> String {
+    format!("__kernel_{}", to_snake_case(name))
+}
+
+fn generate_kernel_param_setup(launch_args: &[String], indent: &str) -> String {
+    let mut out = String::new();
+    if launch_args.is_empty() {
+        out.push_str(indent);
+        out.push_str("let mut __params: [*mut std::ffi::c_void; 0] = [];\n");
+    } else {
+        for (index, arg) in launch_args.iter().enumerate() {
+            out.push_str(indent);
+            out.push_str(&format!("let mut __arg{index} = {arg};\n"));
+        }
+        out.push_str(indent);
+        out.push_str("let mut __params = [\n");
+        for index in 0..launch_args.len() {
+            out.push_str(indent);
+            out.push_str(&format!(
+                "    rocm_oxide::__private::arg_ptr(&mut __arg{index}),\n"
+            ));
+        }
+        out.push_str(indent);
+        out.push_str("];\n");
+    }
+    out
 }
 
 fn generated_kernel_metadata(metadata: Option<&KernelObjectMetadata>) -> String {
@@ -4114,6 +4211,7 @@ pub unsafe extern "C" fn vector_add(
         assert!(binding.contains("Output = rocm_oxide::KernelLaunchCompletion"));
         assert!(binding.contains("launch_raw_on_stream(context.stream(), config, &mut __params)?"));
         assert!(binding.contains("__completion.keep_alive(module);"));
+        assert!(binding.contains("__completion.keep_alive(kernel);"));
         assert!(binding.contains("__completion.keep_alive(out);"));
         assert!(binding.contains("__completion.keep_alive(a);"));
     }

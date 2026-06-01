@@ -746,7 +746,22 @@ pub struct Kernel {
     metadata: KernelMetadata,
 }
 
+unsafe impl Send for Kernel {}
+unsafe impl Sync for Kernel {}
+
 impl Kernel {
+    pub const fn metadata(&self) -> KernelMetadata {
+        self.metadata
+    }
+
+    pub const fn limits(&self) -> DeviceLimits {
+        self.limits
+    }
+
+    pub fn validate_launch_config(&self, config: LaunchConfig) -> Result<()> {
+        validate_launch_config_for_limits(config, self.limits, self.metadata)
+    }
+
     pub fn occupancy_max_potential_block_size(
         &self,
         dynamic_shared_mem_per_block: u32,
@@ -846,7 +861,22 @@ impl Kernel {
         config: LaunchConfig,
         params: &mut [*mut c_void],
     ) -> Result<()> {
-        validate_launch_config_for_limits(config, self.limits, self.metadata)?;
+        self.validate_launch_config(config)?;
+        unsafe { self.launch_raw_unchecked(config, params) }
+    }
+
+    /// Launches this kernel without validating the launch configuration.
+    ///
+    /// # Safety
+    ///
+    /// The caller must ensure `config` is valid for this kernel and device,
+    /// `params` contains exactly the ABI expected by the kernel, and every
+    /// pointer in `params` remains valid until the launch has completed.
+    pub unsafe fn launch_raw_unchecked(
+        &self,
+        config: LaunchConfig,
+        params: &mut [*mut c_void],
+    ) -> Result<()> {
         Ok(unsafe {
             self.function.launch(
                 config.grid.as_tuple(),
@@ -863,7 +893,25 @@ impl Kernel {
         config: LaunchConfig,
         params: &mut [*mut c_void],
     ) -> Result<()> {
-        validate_launch_config_for_limits(config, self.limits, self.metadata)?;
+        self.validate_launch_config(config)?;
+        unsafe { self.launch_raw_on_stream_unchecked(stream, config, params) }
+    }
+
+    /// Launches this kernel on `stream` without validating the launch
+    /// configuration.
+    ///
+    /// # Safety
+    ///
+    /// The caller must ensure `config` is valid for this kernel and device,
+    /// `params` contains exactly the ABI expected by the kernel, every pointer
+    /// in `params` remains valid until `stream` reaches the launch, and the
+    /// stream is associated with the kernel's device/context.
+    pub unsafe fn launch_raw_on_stream_unchecked(
+        &self,
+        stream: &hip::Stream,
+        config: LaunchConfig,
+        params: &mut [*mut c_void],
+    ) -> Result<()> {
         Ok(unsafe {
             self.function.launch_on_stream(
                 config.grid.as_tuple(),

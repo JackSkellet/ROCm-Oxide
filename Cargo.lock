@@ -2265,8 +2265,10 @@ name = "rocm-oxide"
 version = "0.1.0"
 dependencies = [
  "font8x8",
+ "gl",
  "image",
  "minifb",
+ "sdl2",
  "xcap",
 ]
 

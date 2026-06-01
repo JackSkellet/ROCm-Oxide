@@ -105,6 +105,10 @@ Local probes:
   - [x] add memory-pool controls around `hipMallocAsync`/`hipFreeAsync`
   - [x] preserve allocation lifetimes across queued generated operations
   - [x] document stream-ordering requirements for async buffers
+- [x] Device-resident memory movement:
+  - [x] expose synchronous and stream-ordered device-to-device `DeviceBuffer` copies
+  - [x] expose synchronous and stream-ordered byte-pattern memset plus `set_zero`
+  - [x] remove the `spectral_lattice` atomic histogram reset's per-frame host zero upload
 - [x] Multi-device and host-memory coherence:
   - [x] model coarse/fine-grained memory pools and host visibility
   - [x] add pinned, managed, and peer-memory contract tests
@@ -137,9 +141,14 @@ Local probes:
   - [x] dynamically load rocBLAS/rocFFT so missing optional libraries do not break the core runtime
   - [x] expose a checked rocBLAS SGEMM wrapper for `DeviceBuffer<f32>`
   - [x] expose first rocFFT setup/plan/execute wrappers for in-place complex `f32` buffers
-- [ ] ROCm Compute Profiler integration for achieved occupancy and memory behavior.
+- [x] ROCm profiler integration for achieved occupancy and memory behavior:
+  - [x] add `cargo rocm-oxide profile` to run the default performance probe under `rocprof-compute profile`
+  - [x] fall back to local or system `rocprofv3 --pmc Wavefronts` when ROCm Compute Profiler is unavailable
+  - [x] add `cargo rocm-oxide profile --trace` for `rocprofv3 --sys-trace --stats` HIP/HSA/runtime trace collection
+  - [x] detect missing profiler binaries cleanly and allow `ROCM_OXIDE_PROFILER` overrides
 - [ ] GPU-native presentation path for `spectral_lattice`:
   - [x] add a scaled minifb presentation mode so `720p` can present as a 1440p-sized window and `1080p` can present as a 4K-sized window without native-resolution readback
-  - [ ] replace the live `minifb` CPU framebuffer path with Vulkan/OpenGL texture presentation or ROCm graphics interop
-  - [ ] avoid full-frame VRAM-to-host readback every frame for 1440p and 4K interactive runs
-  - [ ] keep the existing CPU readback path for headless PNG export and simple compatibility smoke tests
+  - [x] add an optional `--present gl` path that copies the selected device buffer into a HIP-registered OpenGL PBO and presents it through a texture
+  - [x] avoid full-frame VRAM-to-host readback every frame for GL-backed 1440p and 4K interactive runs
+  - [x] keep the existing CPU readback path for headless PNG export and simple compatibility smoke tests
+  - [ ] fold the CPU-drawn overlay controls into the GL path or replace them with GPU/textured controls

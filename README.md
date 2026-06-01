@@ -66,6 +66,7 @@ cargo run --example spectral_lattice -- --frames 3
 cargo run --example spectral_lattice -- --frames 3 --mode atomic
 cargo run --example spectral_lattice -- --frames 1 --resolution 4k --fps-limit 120 --gpu-work 256
 cargo run --example spectral_lattice -- --resolution 720p --present-scale 2 --fps-limit uncapped
+cargo run --example spectral_lattice -- --present gl --resolution 1440p --fps-limit uncapped
 ```
 
 `spectral_lattice` is an interactive visual workbench with clickable mode tabs
@@ -77,14 +78,17 @@ library availability, runtime FPS-limit and resolution controls up to 4K, and a
 headless `--frames` path for CI/preview PNGs. The `--gpu-work` CLI flag and
 matching GUI slider increase per-pixel ALU work inside the Rust-authored kernel,
 while the overlay reports GPU event time separately from the host readback path.
-The live GUI currently presents through a CPU framebuffer, so high-resolution
+The default live GUI presents through a CPU framebuffer, so high-resolution
 interactive FPS can be limited by full-frame VRAM-to-host readback and the
 windowing copy rather than by kernel throughput. The local `gfx1100` workstation
 is especially sensitive to this because the RX 7900 XT path negotiates an
-upstream `8GT/s x4` PCIe link. Use `--present-scale 2` or press `M` in the
-live demo to keep the render buffer smaller while presenting a larger window;
-for example, `--resolution 720p --present-scale 2` opens a 1440p-sized window
-with one quarter of the native 1440p readback traffic.
+upstream `8GT/s x4` PCIe link. Use `--present gl` to route the final device
+buffer through a HIP-registered OpenGL pixel buffer and texture instead of
+reading every live frame back through the CPU. The minifb path remains the
+compatibility default and the headless PNG export path. Use `--present-scale 2`
+or press `M` in the live demo to keep the render buffer smaller while presenting
+a larger window; for example, `--resolution 720p --present-scale 2` opens a
+1440p-sized window with one quarter of the native 1440p readback traffic.
 
 The root [build.rs](/home/kjwtil/Documents/ROCm-Oxide/build.rs)
 generates device artifacts before the host crate compiles. It exposes these
@@ -231,6 +235,8 @@ execution ergonomics on ROCm:
 - `Stream` for explicit HIP stream ownership
 - `Event` for GPU-side elapsed-time measurement
 - stream-aware async host/device copies
+- device-to-device `DeviceBuffer` copies plus sync/async GPU-side memset and
+  `set_zero` helpers for avoiding host staging on hot reset/copy paths
 - stream-aware raw kernel launch
 - synchronous pinned-buffer copies
 - explicit fine-grained device allocation through `DeviceBuffer::new_fine_grained`
@@ -259,6 +265,10 @@ execution ergonomics on ROCm:
 - `Kernel::recommend_1d_launch` and generated
   `DeviceKernels::recommend_1d_launch` helpers that turn occupancy plus
   generated resource metadata into a concrete 1D launch shape
+- generated `DeviceKernels` cache `Kernel` handles at load time, expose checked
+  direct `*_on_stream` launches, and expose unsafe `*_unchecked` /
+  `*_on_stream_unchecked` hot-loop launches for callers that prevalidate config,
+  buffer lengths, aliasing, and stream/device association
 - `#[device_global]`, `#[constant]`, and `#[shared]` markers for Rust-authored
   device globals, with generated typed host accessors where host-visible and
   ROCm address-space lowering
@@ -270,10 +280,10 @@ wavefront size, and dynamic-stack usage.
 Generated bindings expose the same facts through `DEVICE_KERNEL_RESOURCES`,
 `DeviceKernels::resources()`, `DeviceKernels::resource(name)`, and a
 `DeviceKernels::module()` accessor for lower-level runtime queries such as HIP
-occupancy planning. Generated bindings also expose `recommend_1d_launch` for
-occupancy-guided 1D launch suggestions; callers still pass the result through
-the normal launch validators for kernel-specific buffer, block, and LDS
-contracts.
+occupancy planning. Generated bindings also expose cached `Kernel` handles via
+`DeviceKernels::kernel(name)`, `recommend_1d_launch` for occupancy-guided 1D
+launch suggestions, checked direct stream launch methods, and unsafe unchecked
+launch methods for already-validated hot paths.
 
 `cargo run --example performance_probe -- --json target/performance_probe.json`
 reports HIP-event GPU time for generated Rust kernels and can write benchmark
@@ -305,9 +315,16 @@ cargo run --manifest-path tools/cargo-rocm-oxide/Cargo.toml -- rocm-oxide build
 cargo run --manifest-path tools/cargo-rocm-oxide/Cargo.toml -- rocm-oxide inspect
 cargo run --manifest-path tools/cargo-rocm-oxide/Cargo.toml -- rocm-oxide run --example rust_device_generated_bindings
 cargo run --manifest-path tools/cargo-rocm-oxide/Cargo.toml -- rocm-oxide pipeline
+cargo run --manifest-path tools/cargo-rocm-oxide/Cargo.toml -- rocm-oxide profile
 ```
 
 When installed as `cargo-rocm-oxide`, those become `cargo rocm-oxide ...`.
+`profile` prefers ROCm Compute Profiler (`rocprof-compute profile`) and falls
+back to `rocprofv3 --pmc Wavefronts` when only ROCprofiler-SDK is available.
+Use `--pmc COUNTER[,COUNTER...]` to override the fallback counters, and use
+`--trace` for `rocprofv3 --sys-trace --stats`; set `ROCM_OXIDE_PROFILER` when
+the profiler binary is outside `PATH`, `/opt/rocm/bin`, or the locally extracted
+`target/rocm-packages/root/opt/rocm/bin`.
 
 ## Device Kernel Shape
 
@@ -462,7 +479,12 @@ This roadmap is grounded in the validated probe targets:
   runtime buildable without every ROCm library installed, while rocBLAS SGEMM
   and first rocFFT in-place complex-plan wrappers operate on `DeviceBuffer`
   values.
-- ROCm Compute Profiler integration for achieved occupancy and memory behavior.
+- ROCm profiler integration: `cargo rocm-oxide profile` builds the default
+  performance probe, runs it under `rocprof-compute profile` when installed,
+  and falls back to `rocprofv3 --pmc Wavefronts` from `PATH`, `/opt/rocm/bin`,
+  or `target/rocm-packages/root/opt/rocm/bin`. `--trace` uses
+  `rocprofv3 --sys-trace --stats` for HIP/HSA dispatch, memory, and runtime
+  traces.
 
 Roadmap source docs:
 [HIP runtime API](https://rocm.docs.amd.com/projects/HIP/en/latest/reference/hip_runtime_api_reference.html),
@@ -478,8 +500,9 @@ Roadmap source docs:
 [AMDGPU LLVM backend](https://rocm.docs.amd.com/projects/llvm-project/en/latest/LLVM/llvm/html/AMDGPUUsage.html),
 [rocBLAS](https://rocm.docs.amd.com/projects/rocBLAS/en/latest/),
 [rocFFT](https://rocm.docs.amd.com/projects/rocFFT/en/latest/),
+[ROCm Compute Profiler](https://rocm.docs.amd.com/projects/rocprofiler-compute/en/develop/how-to/use.html),
 and
-[ROCm Compute Profiler occupancy examples](https://rocm.docs.amd.com/projects/rocprofiler-compute/en/docs-7.2.0/tutorial/profiling-by-example.html).
+[rocprofv3](https://rocm.docs.amd.com/projects/rocprofiler-sdk/en/docs-7.0.1/how-to/using-rocprofv3.html).
 
 ## Verification
 

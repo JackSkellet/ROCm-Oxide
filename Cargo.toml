@@ -9,6 +9,8 @@ license = "MIT OR Apache-2.0"
 
 [dependencies]
 font8x8 = "0.3"
+gl = "0.14"
 image = "0.25"
 minifb = "0.28"
+sdl2 = "0.38"
 xcap = "0.9"

@@ -233,7 +233,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     }
     .async_in(&pool)
     .wait()?;
-    assert_eq!(lazy_completion.retained_count(), 4);
+    assert_eq!(lazy_completion.retained_count(), 5);
     let lazy = lazy_out.copy_to_vec()?;
     assert_eq!(lazy[4096], a[4096] + b[4096]);
 

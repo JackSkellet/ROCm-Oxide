@@ -1,11 +1,16 @@
 use font8x8::{BASIC_FONTS, UnicodeFonts};
+use gl::types::{GLchar, GLenum, GLint, GLsizei, GLuint};
 use image::{Rgb, RgbImage};
 use minifb::{Key, KeyRepeat, MouseButton, MouseMode, Scale, Window, WindowOptions};
 use rocm_oxide::{
     Device, DeviceBuffer, Event, LaunchConfig, PinnedHostBuffer, RocBlas, RocmLibraryReport,
     SgemmLayout, Stream, rocm_feature_parity_for_device,
 };
+use sdl2::event::Event as SdlEvent;
+use sdl2::keyboard::Keycode;
+use std::ffi::{CString, c_uint, c_void};
 use std::path::{Path, PathBuf};
+use std::ptr;
 use std::time::{Duration, Instant};
 
 mod generated {
@@ -20,6 +25,8 @@ const FPS_LIMITS: [usize; 7] = [30, 60, 90, 120, 144, 240, 0];
 const PRESENT_SCALES: [usize; 3] = [1, 2, 4];
 const GPU_WORK_PRESETS: [usize; 11] = [1, 2, 4, 8, 16, 32, 64, 128, 256, 512, 1024];
 const DEFAULT_GPU_WORK: usize = 64;
+const HIP_GL_DEVICE_LIST_ALL: c_uint = 1;
+const HIP_GRAPHICS_REGISTER_FLAGS_WRITE_DISCARD: c_uint = 2;
 const RESOLUTION_PRESETS: [ResolutionPreset; 5] = [
     ResolutionPreset::new("540p", 960, 540),
     ResolutionPreset::new("720p", 1280, 720),
@@ -27,6 +34,38 @@ const RESOLUTION_PRESETS: [ResolutionPreset; 5] = [
     ResolutionPreset::new("1440p", 2560, 1440),
     ResolutionPreset::new("4K", 3840, 2160),
 ];
+
+type HipGraphicsResource = *mut c_void;
+
+unsafe extern "C" {
+    fn hipGLGetDevices(
+        device_count_out: *mut c_uint,
+        devices: *mut i32,
+        device_count: c_uint,
+        device_list: c_uint,
+    ) -> rocm_oxide::hip::HipError;
+    fn hipGraphicsGLRegisterBuffer(
+        resource: *mut HipGraphicsResource,
+        buffer: c_uint,
+        flags: c_uint,
+    ) -> rocm_oxide::hip::HipError;
+    fn hipGraphicsMapResources(
+        count: i32,
+        resources: *mut HipGraphicsResource,
+        stream: rocm_oxide::hip::HipStream,
+    ) -> rocm_oxide::hip::HipError;
+    fn hipGraphicsResourceGetMappedPointer(
+        dev_ptr: *mut *mut c_void,
+        size: *mut usize,
+        resource: HipGraphicsResource,
+    ) -> rocm_oxide::hip::HipError;
+    fn hipGraphicsUnmapResources(
+        count: i32,
+        resources: *mut HipGraphicsResource,
+        stream: rocm_oxide::hip::HipStream,
+    ) -> rocm_oxide::hip::HipError;
+    fn hipGraphicsUnregisterResource(resource: HipGraphicsResource) -> rocm_oxide::hip::HipError;
+}
 
 struct DemoArgs {
     frames: Option<u32>,
@@ -36,6 +75,13 @@ struct DemoArgs {
     fps_limit: usize,
     gpu_work: usize,
     present_scale: usize,
+    present_backend: PresentBackend,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum PresentBackend {
+    Cpu,
+    Gl,
 }
 
 struct PaletteSeed {
@@ -82,8 +128,24 @@ struct DemoBuffers {
     short: DeviceBuffer<u32>,
     tile_stats: DeviceBuffer<u32>,
     histogram: DeviceBuffer<u32>,
-    histogram_zero: Vec<u32>,
     tile_count: usize,
+}
+
+struct GlPresenter {
+    window: sdl2::video::Window,
+    _context: sdl2::video::GLContext,
+    size: RenderSize,
+    present_scale: usize,
+    texture: GLuint,
+    pbo: GLuint,
+    vao: GLuint,
+    program: GLuint,
+    resource: HipGraphicsResource,
+}
+
+struct MappedGlBuffer {
+    ptr: *mut u32,
+    len: usize,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -145,8 +207,28 @@ impl Rect {
     }
 }
 
+fn prefer_x11_for_rocm_gl_interop(present_backend: PresentBackend) {
+    if present_backend != PresentBackend::Gl || std::env::var_os("SDL_VIDEODRIVER").is_some() {
+        return;
+    }
+
+    #[cfg(target_os = "linux")]
+    {
+        if std::env::var_os("DISPLAY").is_some() {
+            // ROCm 7.2's Mesa GL interop path recognizes this machine's GLX
+            // context, while the Wayland/EGL path can abort inside rocclr.
+            let _ = sdl2::hint::set_with_priority(
+                "SDL_VIDEODRIVER",
+                "x11",
+                &sdl2::hint::Hint::Override,
+            );
+        }
+    }
+}
+
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     let args = parse_args()?;
+    prefer_x11_for_rocm_gl_interop(args.present_backend);
     let device = Device::first()?;
     let kernels = generated::DeviceKernels::load_embedded(&device)?;
     let mut buffers = DemoBuffers::new(args.size)?;
@@ -179,6 +261,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     };
     if let Some(mode) = args.mode {
         set_mode(&mut state, mode);
+    }
+
+    if args.present_backend == PresentBackend::Gl {
+        return run_gl_present(&args, &kernels, buffers, state);
     }
 
     if let Some(frames) = args.frames {
@@ -313,6 +399,181 @@ fn create_window(
     Ok(window)
 }
 
+fn run_gl_present(
+    args: &DemoArgs,
+    kernels: &generated::DeviceKernels,
+    mut buffers: DemoBuffers,
+    mut state: DemoState,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let sdl = sdl2::init().map_err(other_error)?;
+    let mut presenter = GlPresenter::new(&sdl, buffers.size, state.present_scale, state.fps_limit)?;
+    let mut events = sdl.event_pump().map_err(other_error)?;
+    let start = Instant::now();
+    let run_start = Instant::now();
+    let mut last_fps = Instant::now();
+    let mut frames_since_fps = 0u32;
+    let mut presented_frames = 0u32;
+    let mut last_use_post = false;
+    let mut frame_budget = args.frames.map(|frames| frames.max(1));
+
+    while frame_budget != Some(0) {
+        let frame_start = Instant::now();
+        for event in events.poll_iter() {
+            if !handle_sdl_event(event, &mut state, kernels, &buffers.short) {
+                frame_budget = Some(0);
+                break;
+            }
+        }
+        if frame_budget == Some(0) {
+            break;
+        }
+
+        if state.render_size != buffers.size {
+            buffers = DemoBuffers::new(state.render_size)?;
+            presenter.recreate_frame_resources(buffers.size, state.present_scale)?;
+            state.status = format!("resolution set to {}", display_label(&state));
+        } else if state.present_scale != presenter.present_scale {
+            presenter.recreate_frame_resources(buffers.size, state.present_scale)?;
+            state.status = format!("present scale set to {}x", state.present_scale);
+        }
+
+        if !state.paused {
+            state.frame_index = (start.elapsed().as_secs_f32() * 60.0 * state.speed) as u32;
+            if state.auto_cycle {
+                state.mode = ((state.frame_index / 180) as usize) % MODES.len();
+            }
+        }
+
+        let (use_post, gpu_ms) = render_workload_timed(kernels, &buffers, &state)?;
+        last_use_post = use_post;
+        state.gpu_ms = gpu_ms;
+        let source = display_source(&buffers, use_post);
+        let (interop_ms, present_ms) = presenter.present_device_frame(source)?;
+        state.copy_ms = interop_ms;
+        state.draw_ms = 0.0;
+        state.present_ms = present_ms;
+
+        if state.save_requested {
+            let mut host_frame = PinnedHostBuffer::<u32>::new_zeroed(buffers.size.pixel_count())?;
+            let copy_start = Instant::now();
+            copy_display_frame(&buffers, use_post, &mut host_frame)?;
+            state.copy_ms = copy_start.elapsed().as_secs_f64() * 1000.0;
+            save_png(&args.output, host_frame.as_slice(), buffers.size)?;
+            state.status = format!("saved {}", args.output.display());
+            state.save_requested = false;
+        }
+
+        state.frame_ms = frame_start.elapsed().as_secs_f64() * 1000.0;
+        presented_frames = presented_frames.saturating_add(1);
+        frames_since_fps = frames_since_fps.saturating_add(1);
+        if last_fps.elapsed() >= Duration::from_millis(500) {
+            state.fps = frames_since_fps as f64 / last_fps.elapsed().as_secs_f64();
+            frames_since_fps = 0;
+            last_fps = Instant::now();
+            presenter.window.set_title(&format!(
+                "ROCm-Oxide Spectral Lattice GL | {} | {:.1} FPS | gpu {:.2} copy {:.2} present {:.2} | limit {} | {}",
+                display_label(&state),
+                state.fps,
+                state.gpu_ms,
+                state.copy_ms,
+                state.present_ms,
+                fps_label(state.fps_limit),
+                MODES[state.mode],
+            ))?;
+        }
+
+        if let Some(frames) = frame_budget.as_mut() {
+            *frames = frames.saturating_sub(1);
+        }
+        pace_frame(frame_start, state.fps_limit);
+    }
+
+    if let Some(frames) = args.frames {
+        let elapsed = run_start.elapsed().as_secs_f64().max(f64::EPSILON);
+        let mut host_frame = PinnedHostBuffer::<u32>::new_zeroed(buffers.size.pixel_count())?;
+        copy_display_frame(&buffers, last_use_post, &mut host_frame)?;
+        save_png(&args.output, host_frame.as_slice(), buffers.size)?;
+        println!(
+            "saved Spectral Lattice GL preview after {} frame(s): {}",
+            frames.max(1),
+            args.output.display()
+        );
+        println!(
+            "GL-present summary: {:.1} FPS over {} rendered frame(s), last gpu {:.2} ms, interop {:.2} ms, present {:.2} ms, frame {:.2} ms",
+            presented_frames as f64 / elapsed,
+            presented_frames,
+            state.gpu_ms,
+            state.copy_ms,
+            state.present_ms,
+            state.frame_ms,
+        );
+    }
+
+    Ok(())
+}
+
+fn handle_sdl_event(
+    event: SdlEvent,
+    state: &mut DemoState,
+    kernels: &generated::DeviceKernels,
+    short_frame: &DeviceBuffer<u32>,
+) -> bool {
+    match event {
+        SdlEvent::Quit { .. } => false,
+        SdlEvent::KeyDown {
+            keycode: Some(key),
+            repeat: false,
+            ..
+        } => handle_sdl_key(key, state, kernels, short_frame),
+        _ => true,
+    }
+}
+
+fn handle_sdl_key(
+    key: Keycode,
+    state: &mut DemoState,
+    kernels: &generated::DeviceKernels,
+    short_frame: &DeviceBuffer<u32>,
+) -> bool {
+    match key {
+        Keycode::Escape | Keycode::Q => return false,
+        Keycode::Num1 => set_mode(state, 0),
+        Keycode::Num2 => set_mode(state, 1),
+        Keycode::Num3 => set_mode(state, 2),
+        Keycode::Num4 => set_mode(state, 3),
+        Keycode::Left => set_mode(state, (state.mode + MODES.len() - 1) % MODES.len()),
+        Keycode::Right => set_mode(state, (state.mode + 1) % MODES.len()),
+        Keycode::Up => state.warp = clamp_f32(state.warp + 0.08, 0.05, 2.25),
+        Keycode::Down => state.warp = clamp_f32(state.warp - 0.08, 0.05, 2.25),
+        Keycode::PageUp => state.speed = clamp_f32(state.speed + 0.15, 0.1, 3.0),
+        Keycode::PageDown => state.speed = clamp_f32(state.speed - 0.15, 0.1, 3.0),
+        Keycode::Minus => step_fps_limit(state, -1),
+        Keycode::Equals => step_fps_limit(state, 1),
+        Keycode::Comma => cycle_resolution(state, -1),
+        Keycode::Period => cycle_resolution(state, 1),
+        Keycode::M => cycle_present_scale(state),
+        Keycode::LeftBracket => step_gpu_work(state, -1),
+        Keycode::RightBracket => step_gpu_work(state, 1),
+        Keycode::Space => state.paused = !state.paused,
+        Keycode::A => state.auto_cycle = !state.auto_cycle,
+        Keycode::R => reseed_palette(state),
+        Keycode::C => run_contract_check(state, kernels, short_frame),
+        Keycode::S => state.save_requested = true,
+        _ => {}
+    }
+    true
+}
+
+fn pace_frame(frame_start: Instant, fps_limit: usize) {
+    if fps_limit == 0 {
+        return;
+    }
+    let target = Duration::from_secs_f64(1.0 / fps_limit as f64);
+    if let Some(remaining) = target.checked_sub(frame_start.elapsed()) {
+        std::thread::sleep(remaining);
+    }
+}
+
 fn copy_display_frame(
     buffers: &DemoBuffers,
     use_post: bool,
@@ -324,6 +585,492 @@ fn copy_display_frame(
         buffers.base.copy_to_pinned_host(host_frame)?;
     }
     Ok(())
+}
+
+fn display_source(buffers: &DemoBuffers, use_post: bool) -> &DeviceBuffer<u32> {
+    if use_post {
+        &buffers.post
+    } else {
+        &buffers.base
+    }
+}
+
+impl GlPresenter {
+    fn new(
+        sdl: &sdl2::Sdl,
+        size: RenderSize,
+        present_scale: usize,
+        fps_limit: usize,
+    ) -> Result<Self, Box<dyn std::error::Error>> {
+        let video = sdl.video().map_err(other_error)?;
+        {
+            let attrs = video.gl_attr();
+            attrs.set_context_profile(sdl2::video::GLProfile::Core);
+            attrs.set_context_version(3, 3);
+            attrs.set_double_buffer(true);
+        }
+        let window = video
+            .window(
+                "ROCm-Oxide Spectral Lattice GL",
+                checked_window_dim(size.width, present_scale)?,
+                checked_window_dim(size.height, present_scale)?,
+            )
+            .opengl()
+            .resizable()
+            .position_centered()
+            .build()
+            .map_err(|err| other_error(err.to_string()))?;
+        let context = window.gl_create_context().map_err(other_error)?;
+        window.gl_make_current(&context).map_err(other_error)?;
+        gl::load_with(|symbol| video.gl_get_proc_address(symbol).cast());
+        let _ = video.gl_set_swap_interval(0);
+        println!(
+            "OpenGL renderer: {} ({})",
+            gl_string(gl::RENDERER),
+            gl_string(gl::VENDOR)
+        );
+        let gl_devices = hip_gl_devices().map_err(|err| {
+            other_error(format!(
+                "HIP/OpenGL interop is unavailable for this SDL context: {err}. Try SDL_VIDEODRIVER=x11 if it was overridden."
+            ))
+        })?;
+        if gl_devices.is_empty() {
+            return Err(other_error(
+                "HIP/OpenGL interop did not report any devices for the current GL context",
+            ));
+        }
+        println!("HIP devices visible to current GL context: {gl_devices:?}");
+
+        let program = create_present_program()?;
+        let mut vao = 0;
+        unsafe {
+            gl::GenVertexArrays(1, &mut vao);
+            gl::BindVertexArray(vao);
+            gl::UseProgram(program);
+            let sampler = CString::new("u_frame")?;
+            let location = gl::GetUniformLocation(program, sampler.as_ptr());
+            if location >= 0 {
+                gl::Uniform1i(location, 0);
+            }
+        }
+        check_gl("create GL presenter")?;
+
+        let mut presenter = Self {
+            window,
+            _context: context,
+            size,
+            present_scale,
+            texture: 0,
+            pbo: 0,
+            vao,
+            program,
+            resource: ptr::null_mut(),
+        };
+        presenter.recreate_frame_resources(size, present_scale)?;
+        presenter.window.set_title(&format!(
+            "ROCm-Oxide Spectral Lattice GL | {} | limit {}",
+            display_label_for(size, present_scale),
+            fps_label(fps_limit)
+        ))?;
+        Ok(presenter)
+    }
+
+    fn recreate_frame_resources(
+        &mut self,
+        size: RenderSize,
+        present_scale: usize,
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        self.destroy_frame_resources();
+        self.window
+            .set_size(
+                checked_window_dim(size.width, present_scale)?,
+                checked_window_dim(size.height, present_scale)?,
+            )
+            .map_err(|err| other_error(err.to_string()))?;
+
+        let byte_len = gl_frame_byte_len(size)?;
+        let width = gl_size(size.width, "frame width")?;
+        let height = gl_size(size.height, "frame height")?;
+        let mut texture = 0;
+        let mut pbo = 0;
+        unsafe {
+            gl::GenTextures(1, &mut texture);
+            gl::BindTexture(gl::TEXTURE_2D, texture);
+            gl::TexParameteri(gl::TEXTURE_2D, gl::TEXTURE_MIN_FILTER, gl::LINEAR as GLint);
+            gl::TexParameteri(gl::TEXTURE_2D, gl::TEXTURE_MAG_FILTER, gl::LINEAR as GLint);
+            gl::TexParameteri(
+                gl::TEXTURE_2D,
+                gl::TEXTURE_WRAP_S,
+                gl::CLAMP_TO_EDGE as GLint,
+            );
+            gl::TexParameteri(
+                gl::TEXTURE_2D,
+                gl::TEXTURE_WRAP_T,
+                gl::CLAMP_TO_EDGE as GLint,
+            );
+            gl::PixelStorei(gl::UNPACK_ALIGNMENT, 4);
+            gl::TexImage2D(
+                gl::TEXTURE_2D,
+                0,
+                gl::RGBA8 as GLint,
+                width,
+                height,
+                0,
+                gl::BGRA,
+                gl::UNSIGNED_BYTE,
+                ptr::null(),
+            );
+
+            gl::GenBuffers(1, &mut pbo);
+            gl::BindBuffer(gl::PIXEL_UNPACK_BUFFER, pbo);
+            gl::BufferData(
+                gl::PIXEL_UNPACK_BUFFER,
+                byte_len,
+                ptr::null(),
+                gl::STREAM_DRAW,
+            );
+            gl::BindBuffer(gl::PIXEL_UNPACK_BUFFER, 0);
+            gl::Finish();
+        }
+        check_gl("allocate GL frame resources")?;
+
+        let mut resource = ptr::null_mut();
+        let register = unsafe {
+            hip_context(
+                "hipGraphicsGLRegisterBuffer",
+                rocm_oxide::hip::check(hipGraphicsGLRegisterBuffer(
+                    &mut resource,
+                    pbo,
+                    HIP_GRAPHICS_REGISTER_FLAGS_WRITE_DISCARD,
+                )),
+            )
+        };
+        if let Err(err) = register {
+            unsafe {
+                gl::DeleteBuffers(1, &pbo);
+                gl::DeleteTextures(1, &texture);
+            }
+            return Err(err);
+        }
+
+        self.size = size;
+        self.present_scale = present_scale;
+        self.texture = texture;
+        self.pbo = pbo;
+        self.resource = resource;
+        Ok(())
+    }
+
+    fn present_device_frame(
+        &mut self,
+        source: &DeviceBuffer<u32>,
+    ) -> Result<(f64, f64), Box<dyn std::error::Error>> {
+        let interop_start = Instant::now();
+        let mapped = self.map_buffer()?;
+        if mapped.len < source.len() {
+            self.unmap_buffer()?;
+            return Err(other_error(format!(
+                "mapped GL buffer is too small: got {} u32 values, need {}",
+                mapped.len,
+                source.len()
+            )));
+        }
+        unsafe {
+            source.copy_to_device_ptr(mapped.ptr, source.len())?;
+        }
+        self.unmap_buffer()?;
+        unsafe {
+            gl::BindTexture(gl::TEXTURE_2D, self.texture);
+            gl::BindBuffer(gl::PIXEL_UNPACK_BUFFER, self.pbo);
+            gl::TexSubImage2D(
+                gl::TEXTURE_2D,
+                0,
+                0,
+                0,
+                gl_size(self.size.width, "frame width")?,
+                gl_size(self.size.height, "frame height")?,
+                gl::BGRA,
+                gl::UNSIGNED_BYTE,
+                ptr::null(),
+            );
+            gl::BindBuffer(gl::PIXEL_UNPACK_BUFFER, 0);
+        }
+        check_gl("upload GL texture from HIP-mapped PBO")?;
+        let interop_ms = interop_start.elapsed().as_secs_f64() * 1000.0;
+
+        let present_start = Instant::now();
+        unsafe {
+            let (drawable_w, drawable_h) = self.window.drawable_size();
+            gl::Viewport(0, 0, drawable_w as GLsizei, drawable_h as GLsizei);
+            gl::ClearColor(0.0, 0.0, 0.0, 1.0);
+            gl::Clear(gl::COLOR_BUFFER_BIT);
+            gl::UseProgram(self.program);
+            gl::ActiveTexture(gl::TEXTURE0);
+            gl::BindTexture(gl::TEXTURE_2D, self.texture);
+            gl::BindVertexArray(self.vao);
+            gl::DrawArrays(gl::TRIANGLES, 0, 3);
+        }
+        check_gl("draw GL presenter")?;
+        self.window.gl_swap_window();
+        let present_ms = present_start.elapsed().as_secs_f64() * 1000.0;
+        Ok((interop_ms, present_ms))
+    }
+
+    fn map_buffer(&mut self) -> Result<MappedGlBuffer, Box<dyn std::error::Error>> {
+        unsafe {
+            hip_context(
+                "hipGraphicsMapResources",
+                rocm_oxide::hip::check(hipGraphicsMapResources(
+                    1,
+                    &mut self.resource,
+                    Stream::null().as_raw(),
+                )),
+            )?;
+        }
+        let mut ptr = ptr::null_mut();
+        let mut bytes = 0usize;
+        unsafe {
+            hip_context(
+                "hipGraphicsResourceGetMappedPointer",
+                rocm_oxide::hip::check(hipGraphicsResourceGetMappedPointer(
+                    &mut ptr,
+                    &mut bytes,
+                    self.resource,
+                )),
+            )?;
+        }
+        Ok(MappedGlBuffer {
+            ptr: ptr.cast::<u32>(),
+            len: bytes / std::mem::size_of::<u32>(),
+        })
+    }
+
+    fn unmap_buffer(&mut self) -> Result<(), Box<dyn std::error::Error>> {
+        unsafe {
+            hip_context(
+                "hipGraphicsUnmapResources",
+                rocm_oxide::hip::check(hipGraphicsUnmapResources(
+                    1,
+                    &mut self.resource,
+                    Stream::null().as_raw(),
+                )),
+            )?;
+        }
+        Ok(())
+    }
+
+    fn destroy_frame_resources(&mut self) {
+        unsafe {
+            gl::Finish();
+            if !self.resource.is_null() {
+                let _ = hipGraphicsUnregisterResource(self.resource);
+                self.resource = ptr::null_mut();
+            }
+            if self.pbo != 0 {
+                gl::DeleteBuffers(1, &self.pbo);
+                self.pbo = 0;
+            }
+            if self.texture != 0 {
+                gl::DeleteTextures(1, &self.texture);
+                self.texture = 0;
+            }
+        }
+    }
+}
+
+impl Drop for GlPresenter {
+    fn drop(&mut self) {
+        self.destroy_frame_resources();
+        unsafe {
+            if self.program != 0 {
+                gl::DeleteProgram(self.program);
+            }
+            if self.vao != 0 {
+                gl::DeleteVertexArrays(1, &self.vao);
+            }
+        }
+    }
+}
+
+fn create_present_program() -> Result<GLuint, Box<dyn std::error::Error>> {
+    const VERTEX: &str = r#"#version 330 core
+out vec2 v_uv;
+const vec2 vertices[3] = vec2[](
+    vec2(-1.0, -1.0),
+    vec2(3.0, -1.0),
+    vec2(-1.0, 3.0)
+);
+void main() {
+    vec2 position = vertices[gl_VertexID];
+    v_uv = (position + vec2(1.0)) * 0.5;
+    gl_Position = vec4(position, 0.0, 1.0);
+}
+"#;
+    const FRAGMENT: &str = r#"#version 330 core
+in vec2 v_uv;
+uniform sampler2D u_frame;
+out vec4 color;
+void main() {
+    color = texture(u_frame, vec2(v_uv.x, 1.0 - v_uv.y));
+}
+"#;
+
+    let vertex = compile_shader(gl::VERTEX_SHADER, VERTEX)?;
+    let fragment = compile_shader(gl::FRAGMENT_SHADER, FRAGMENT)?;
+    let program = unsafe { gl::CreateProgram() };
+    unsafe {
+        gl::AttachShader(program, vertex);
+        gl::AttachShader(program, fragment);
+        gl::LinkProgram(program);
+    }
+    let mut status = 0;
+    unsafe {
+        gl::GetProgramiv(program, gl::LINK_STATUS, &mut status);
+        gl::DeleteShader(vertex);
+        gl::DeleteShader(fragment);
+    }
+    if status == 0 {
+        let log = program_log(program);
+        unsafe {
+            gl::DeleteProgram(program);
+        }
+        return Err(other_error(format!(
+            "GL presenter program link failed: {log}"
+        )));
+    }
+    Ok(program)
+}
+
+fn compile_shader(kind: GLenum, source: &str) -> Result<GLuint, Box<dyn std::error::Error>> {
+    let shader = unsafe { gl::CreateShader(kind) };
+    let source = CString::new(source)?;
+    unsafe {
+        gl::ShaderSource(shader, 1, &source.as_ptr(), ptr::null());
+        gl::CompileShader(shader);
+    }
+    let mut status = 0;
+    unsafe {
+        gl::GetShaderiv(shader, gl::COMPILE_STATUS, &mut status);
+    }
+    if status == 0 {
+        let log = shader_log(shader);
+        unsafe {
+            gl::DeleteShader(shader);
+        }
+        return Err(other_error(format!(
+            "GL presenter shader compile failed: {log}"
+        )));
+    }
+    Ok(shader)
+}
+
+fn shader_log(shader: GLuint) -> String {
+    let mut len = 0;
+    unsafe {
+        gl::GetShaderiv(shader, gl::INFO_LOG_LENGTH, &mut len);
+    }
+    let mut buffer = vec![0u8; len.max(1) as usize];
+    unsafe {
+        gl::GetShaderInfoLog(
+            shader,
+            len,
+            ptr::null_mut(),
+            buffer.as_mut_ptr().cast::<GLchar>(),
+        );
+    }
+    String::from_utf8_lossy(&buffer)
+        .trim_end_matches('\0')
+        .trim()
+        .to_string()
+}
+
+fn program_log(program: GLuint) -> String {
+    let mut len = 0;
+    unsafe {
+        gl::GetProgramiv(program, gl::INFO_LOG_LENGTH, &mut len);
+    }
+    let mut buffer = vec![0u8; len.max(1) as usize];
+    unsafe {
+        gl::GetProgramInfoLog(
+            program,
+            len,
+            ptr::null_mut(),
+            buffer.as_mut_ptr().cast::<GLchar>(),
+        );
+    }
+    String::from_utf8_lossy(&buffer)
+        .trim_end_matches('\0')
+        .trim()
+        .to_string()
+}
+
+fn check_gl(label: &str) -> Result<(), Box<dyn std::error::Error>> {
+    let error = unsafe { gl::GetError() };
+    if error == gl::NO_ERROR {
+        Ok(())
+    } else {
+        Err(other_error(format!("{label}: GL error 0x{error:04x}")))
+    }
+}
+
+fn gl_string(name: GLenum) -> String {
+    let ptr = unsafe { gl::GetString(name) };
+    if ptr.is_null() {
+        "<unknown>".into()
+    } else {
+        unsafe {
+            std::ffi::CStr::from_ptr(ptr.cast())
+                .to_string_lossy()
+                .into_owned()
+        }
+    }
+}
+
+fn hip_gl_devices() -> Result<Vec<i32>, Box<dyn std::error::Error>> {
+    let mut count = 0u32;
+    let mut devices = [0i32; 16];
+    unsafe {
+        hip_context(
+            "hipGLGetDevices",
+            rocm_oxide::hip::check(hipGLGetDevices(
+                &mut count,
+                devices.as_mut_ptr(),
+                devices.len() as c_uint,
+                HIP_GL_DEVICE_LIST_ALL,
+            )),
+        )?;
+    }
+    Ok(devices[..(count as usize).min(devices.len())].to_vec())
+}
+
+fn hip_context(
+    label: &str,
+    result: rocm_oxide::hip::Result<()>,
+) -> Result<(), Box<dyn std::error::Error>> {
+    result.map_err(|err| other_error(format!("{label}: {err}")))
+}
+
+fn gl_frame_byte_len(size: RenderSize) -> Result<isize, Box<dyn std::error::Error>> {
+    let bytes = size
+        .pixel_count()
+        .checked_mul(std::mem::size_of::<u32>())
+        .ok_or_else(|| other_error("GL frame byte length overflows usize"))?;
+    isize::try_from(bytes).map_err(|_| other_error("GL frame byte length exceeds isize"))
+}
+
+fn gl_size(value: usize, label: &str) -> Result<GLint, Box<dyn std::error::Error>> {
+    GLint::try_from(value).map_err(|_| other_error(format!("{label} exceeds GLsizei range")))
+}
+
+fn checked_window_dim(value: usize, scale: usize) -> Result<u32, Box<dyn std::error::Error>> {
+    value
+        .checked_mul(scale)
+        .and_then(|dim| u32::try_from(dim).ok())
+        .ok_or_else(|| other_error(format!("window dimension {value} x {scale} overflows u32")))
+}
+
+fn other_error(message: impl Into<String>) -> Box<dyn std::error::Error> {
+    Box::new(std::io::Error::other(message.into()))
 }
 
 impl ResourceSnapshot {
@@ -381,7 +1128,6 @@ impl DemoBuffers {
             short: DeviceBuffer::<u32>::new(pixel_count / 2)?,
             tile_stats: DeviceBuffer::<u32>::new(tile_count)?,
             histogram: DeviceBuffer::<u32>::new(256)?,
-            histogram_zero: vec![0u32; 256],
             tile_count,
         })
     }
@@ -454,7 +1200,7 @@ fn render_frame(
             Ok(true)
         }
         2 => {
-            buffers.histogram.copy_from_host(&buffers.histogram_zero)?;
+            buffers.histogram.set_zero()?;
             unsafe {
                 kernels.spectral_atomic_histogram(
                     LaunchConfig::for_num_elems_with_block_size(
@@ -1341,6 +2087,7 @@ fn parse_args() -> Result<DemoArgs, Box<dyn std::error::Error>> {
     let mut fps_limit = 60usize;
     let mut gpu_work = DEFAULT_GPU_WORK;
     let mut present_scale = 1usize;
+    let mut present_backend = PresentBackend::Cpu;
     let mut args = std::env::args().skip(1);
     while let Some(arg) = args.next() {
         match arg.as_str() {
@@ -1380,6 +2127,12 @@ fn parse_args() -> Result<DemoArgs, Box<dyn std::error::Error>> {
                     .ok_or_else(|| "--gpu-work requires an iteration count".to_string())?;
                 gpu_work = parse_gpu_work(&value)?;
             }
+            "--present" | "--present-backend" => {
+                let value = args
+                    .next()
+                    .ok_or_else(|| "--present requires cpu or gl".to_string())?;
+                present_backend = parse_present_backend(&value)?;
+            }
             "--present-scale" | "--scale" => {
                 let value = args
                     .next()
@@ -1388,7 +2141,7 @@ fn parse_args() -> Result<DemoArgs, Box<dyn std::error::Error>> {
             }
             "--help" | "-h" => {
                 println!(
-                    "Usage: cargo run --example spectral_lattice -- [--frames N] [--mode MODE] [--resolution 4k|WIDTHxHEIGHT] [--present-scale 1|2|4] [--fps-limit FPS|uncapped] [--gpu-work ITERATIONS] [--output PATH]"
+                    "Usage: cargo run --example spectral_lattice -- [--frames N] [--mode MODE] [--resolution 4k|WIDTHxHEIGHT] [--present cpu|gl] [--present-scale 1|2|4] [--fps-limit FPS|uncapped] [--gpu-work ITERATIONS] [--output PATH]"
                 );
                 std::process::exit(0);
             }
@@ -1403,6 +2156,7 @@ fn parse_args() -> Result<DemoArgs, Box<dyn std::error::Error>> {
         fps_limit,
         gpu_work,
         present_scale,
+        present_backend,
     })
 }
 
@@ -1491,6 +2245,14 @@ fn parse_gpu_work(value: &str) -> Result<usize, Box<dyn std::error::Error>> {
     Ok(iterations)
 }
 
+fn parse_present_backend(value: &str) -> Result<PresentBackend, Box<dyn std::error::Error>> {
+    match value.to_ascii_lowercase().as_str() {
+        "cpu" | "minifb" | "readback" => Ok(PresentBackend::Cpu),
+        "gl" | "opengl" | "native" | "gpu" => Ok(PresentBackend::Gl),
+        _ => Err(format!("unknown present backend `{value}`; expected cpu or gl").into()),
+    }
+}
+
 fn parse_present_scale(value: &str) -> Result<usize, Box<dyn std::error::Error>> {
     let scale = value
         .strip_suffix('x')
@@ -1513,10 +2275,15 @@ fn minifb_scale(scale: usize) -> Scale {
 }
 
 fn display_label(state: &DemoState) -> String {
-    if state.present_scale == 1 {
-        state.render_size.label()
+    display_label_for(state.render_size, state.present_scale)
+}
+
+fn display_label_for(size: RenderSize, present_scale: usize) -> String {
+    let label = size.label();
+    if present_scale == 1 {
+        label
     } else {
-        format!("{} x{}", state.render_size.label(), state.present_scale)
+        format!("{label} x{present_scale}")
     }
 }
 

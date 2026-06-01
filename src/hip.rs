@@ -16,6 +16,7 @@ pub type HipMemPool = *mut c_void;
 pub const HIP_SUCCESS: HipError = 0;
 pub const HIP_MEMCPY_HOST_TO_DEVICE: c_int = 1;
 pub const HIP_MEMCPY_DEVICE_TO_HOST: c_int = 2;
+pub const HIP_MEMCPY_DEVICE_TO_DEVICE: c_int = 3;
 pub const HIP_DEVICE_MALLOC_FINEGRAINED: c_uint = 0x1;
 pub const HIP_HOST_MALLOC_MAPPED: c_uint = 0x2;
 pub const HIP_HOST_MALLOC_COHERENT: c_uint = 0x4000_0000;
@@ -106,6 +107,8 @@ unsafe extern "C" {
         kind: c_int,
         stream: HipStream,
     ) -> HipError;
+    fn hipMemset(dst: *mut c_void, value: c_int, size: usize) -> HipError;
+    fn hipMemsetAsync(dst: *mut c_void, value: c_int, size: usize, stream: HipStream) -> HipError;
     fn hipDeviceSynchronize() -> HipError;
     fn hipStreamCreate(stream: *mut HipStream) -> HipError;
     fn hipStreamDestroy(stream: HipStream) -> HipError;
@@ -897,6 +900,160 @@ impl<T> DeviceBuffer<T> {
         }
     }
 
+    /// Copies another device buffer into this buffer without staging through host memory.
+    pub fn copy_from_device(&self, input: &DeviceBuffer<T>) -> Result<()> {
+        validate_slice_len("device-to-device source", input.len, self.len)?;
+        let bytes = checked_allocation_bytes::<T>(self.len, "device-to-device copy")?;
+        if bytes == 0 {
+            return Ok(());
+        }
+        unsafe {
+            check(hipMemcpy(
+                self.ptr.cast::<c_void>(),
+                input.ptr.cast::<c_void>(),
+                bytes,
+                HIP_MEMCPY_DEVICE_TO_DEVICE,
+            ))
+        }
+    }
+
+    /// Enqueues a device-to-device copy into this buffer.
+    ///
+    /// The source and destination buffers must stay alive until `stream`
+    /// reaches this copy.
+    pub fn copy_from_device_async(&self, stream: &Stream, input: &DeviceBuffer<T>) -> Result<()> {
+        validate_slice_len("async device-to-device source", input.len, self.len)?;
+        let bytes = checked_allocation_bytes::<T>(self.len, "async device-to-device copy")?;
+        if bytes == 0 {
+            return Ok(());
+        }
+        unsafe {
+            check(hipMemcpyAsync(
+                self.ptr.cast::<c_void>(),
+                input.ptr.cast::<c_void>(),
+                bytes,
+                HIP_MEMCPY_DEVICE_TO_DEVICE,
+                stream.as_raw(),
+            ))
+        }
+    }
+
+    /// Copies this buffer into another device buffer without staging through host memory.
+    pub fn copy_to_device(&self, output: &DeviceBuffer<T>) -> Result<()> {
+        output.copy_from_device(self)
+    }
+
+    /// Enqueues a copy from this buffer into another device buffer.
+    ///
+    /// The source and destination buffers must stay alive until `stream`
+    /// reaches this copy.
+    pub fn copy_to_device_async(&self, stream: &Stream, output: &DeviceBuffer<T>) -> Result<()> {
+        output.copy_from_device_async(stream, self)
+    }
+
+    /// Fills the device allocation with a byte pattern.
+    ///
+    /// Prefer `set_zero` for typed zero initialization; nonzero byte patterns
+    /// are intended for byte-addressed buffers and debugging sentinels.
+    pub fn memset(&self, value: u8) -> Result<()> {
+        let bytes = checked_allocation_bytes::<T>(self.len, "device memset")?;
+        if bytes == 0 {
+            return Ok(());
+        }
+        unsafe { check(hipMemset(self.ptr.cast::<c_void>(), value as c_int, bytes)) }
+    }
+
+    /// Enqueues a byte-pattern fill of the device allocation.
+    pub fn memset_async(&self, stream: &Stream, value: u8) -> Result<()> {
+        let bytes = checked_allocation_bytes::<T>(self.len, "async device memset")?;
+        if bytes == 0 {
+            return Ok(());
+        }
+        unsafe {
+            check(hipMemsetAsync(
+                self.ptr.cast::<c_void>(),
+                value as c_int,
+                bytes,
+                stream.as_raw(),
+            ))
+        }
+    }
+
+    /// Fills the device allocation with zero bytes.
+    pub fn set_zero(&self) -> Result<()> {
+        self.memset(0)
+    }
+
+    /// Enqueues a zero-byte fill of the device allocation.
+    pub fn set_zero_async(&self, stream: &Stream) -> Result<()> {
+        self.memset_async(stream, 0)
+    }
+
+    /// Copies this buffer into another device-visible pointer.
+    ///
+    /// This is intended for interop destinations such as graphics resources
+    /// that HIP maps to a raw device pointer.
+    ///
+    /// # Safety
+    ///
+    /// `output` must point to at least `len` valid `T` elements in device
+    /// address space, must be writable for the duration of the copy, and must
+    /// not alias this buffer.
+    pub unsafe fn copy_to_device_ptr(&self, output: *mut T, len: usize) -> Result<()> {
+        validate_slice_len("device-to-device destination", len, self.len)?;
+        let bytes = checked_allocation_bytes::<T>(len, "device-to-device copy")?;
+        if bytes == 0 {
+            return Ok(());
+        }
+        if output.is_null() {
+            return Err(Error::invalid_value(
+                "device-to-device destination pointer is null",
+            ));
+        }
+        unsafe {
+            check(hipMemcpy(
+                output.cast::<c_void>(),
+                self.ptr.cast::<c_void>(),
+                bytes,
+                HIP_MEMCPY_DEVICE_TO_DEVICE,
+            ))
+        }
+    }
+
+    /// Enqueues a copy from this buffer into another device-visible pointer.
+    ///
+    /// # Safety
+    ///
+    /// `output` must point to at least `len` valid `T` elements in device
+    /// address space, must be writable until `stream` reaches this copy, and
+    /// must not alias this buffer.
+    pub unsafe fn copy_to_device_ptr_async(
+        &self,
+        stream: &Stream,
+        output: *mut T,
+        len: usize,
+    ) -> Result<()> {
+        validate_slice_len("async device-to-device destination", len, self.len)?;
+        let bytes = checked_allocation_bytes::<T>(len, "async device-to-device copy")?;
+        if bytes == 0 {
+            return Ok(());
+        }
+        if output.is_null() {
+            return Err(Error::invalid_value(
+                "async device-to-device destination pointer is null",
+            ));
+        }
+        unsafe {
+            check(hipMemcpyAsync(
+                output.cast::<c_void>(),
+                self.ptr.cast::<c_void>(),
+                bytes,
+                HIP_MEMCPY_DEVICE_TO_DEVICE,
+                stream.as_raw(),
+            ))
+        }
+    }
+
     /// Enqueues a host-to-device copy from pinned host memory.
     ///
     /// # Safety
@@ -1136,6 +1293,11 @@ impl Drop for Module {
 pub struct Function {
     raw: HipFunction,
 }
+
+// HIP function handles are immutable module entry-point references. Launches
+// bind device/context at the caller layer before use.
+unsafe impl Send for Function {}
+unsafe impl Sync for Function {}
 
 impl Function {
     pub fn occupancy_max_potential_block_size(
@@ -1407,10 +1569,46 @@ mod tests {
     }
 
     #[test]
+    fn device_copy_length_mismatch_is_error() {
+        let output = DeviceBuffer::<u8>::new(4).expect("small allocation should work");
+        let input = DeviceBuffer::<u8>::new(2).expect("small allocation should work");
+        let err = output
+            .copy_from_device(&input)
+            .expect_err("short device copy should fail");
+        assert!(err.to_string().contains("length mismatch"));
+    }
+
+    #[test]
+    fn device_to_device_copy_round_trips() {
+        let input = DeviceBuffer::from_slice(&[1u32, 2, 3, 4]).expect("input upload should work");
+        let output = DeviceBuffer::<u32>::new(4).expect("output allocation should work");
+        output
+            .copy_from_device(&input)
+            .expect("device-to-device copy should work");
+        assert_eq!(
+            output.copy_to_vec().expect("download should work"),
+            [1, 2, 3, 4]
+        );
+    }
+
+    #[test]
+    fn device_set_zero_round_trips() {
+        let buffer = DeviceBuffer::from_slice(&[7u32, 8, 9]).expect("upload should work");
+        buffer.set_zero().expect("device memset should work");
+        assert_eq!(
+            buffer.copy_to_vec().expect("download should work"),
+            [0, 0, 0]
+        );
+    }
+
+    #[test]
     fn zero_length_device_buffer_does_not_allocate() {
         let buffer = DeviceBuffer::<u8>::new(0).expect("zero-sized allocation should work");
         assert!(buffer.is_empty());
         assert_eq!(buffer.len(), 0);
+        buffer
+            .set_zero()
+            .expect("zero-length memset should be a no-op");
     }
 
     #[test]

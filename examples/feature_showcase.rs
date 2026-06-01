@@ -210,7 +210,7 @@ fn main() -> Result<()> {
         )?
     }
     .sync_on(&device.execution_context()?)?;
-    assert_eq!(completion.retained_count(), 4);
+    assert_eq!(completion.retained_count(), 5);
     let lazy_out = d_out.copy_to_vec()?;
     assert_eq!(lazy_out[8192], a[8192] + b[8192]);
     println!("ok: generated DeviceOperation binding launched on an execution stream");
@@ -226,7 +226,7 @@ fn main() -> Result<()> {
         )?
     }
     .capture_graph_on(&graph_context)?;
-    assert_eq!(graph.capture_output().retained_count(), 4);
+    assert_eq!(graph.capture_output().retained_count(), 5);
     graph.launch_and_sync_on(&graph_context)?;
     let graph_out = d_graph_out.copy_to_vec()?;
     assert_eq!(graph_out[16384], a[16384] + b[16384]);

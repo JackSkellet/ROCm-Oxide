@@ -61,6 +61,7 @@ not the product.
   - [x] `cargo rocm-oxide doctor`
   - [x] `cargo rocm-oxide inspect`
   - [x] `cargo rocm-oxide pipeline`
+  - [x] `cargo rocm-oxide profile`
   - [x] `cargo rocm-oxide new`
 - [x] Embedded artifact module:
   - [x] copy `.hsaco`, metadata, and bindings into `OUT_DIR`
@@ -75,8 +76,13 @@ not the product.
 - [x] Runtime safety:
   - [x] fallible allocation-size overflow errors instead of panics
   - [x] stream-ordered allocation/free where supported by HIP
+  - [x] GPU-side memset and device-to-device buffer copies
   - [x] negative launch tests for generated buffer/block contracts
   - [x] pinned-buffer synchronous copy helpers
+- [x] Generated launch hot paths:
+  - [x] cache HIP module function handles as generated `Kernel` fields
+  - [x] checked direct `*_on_stream` generated launch methods
+  - [x] unsafe unchecked generated launches for prevalidated tight loops
 - [x] Async execution layer:
   - [x] lazy `DeviceOperation` trait
   - [x] sync and async execution entry points
