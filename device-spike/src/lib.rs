@@ -34,10 +34,33 @@ pub struct ControlPair {
     pub right: u32,
 }
 
+#[repr(C)]
+#[derive(Clone, Copy)]
+pub struct ReturnPacket {
+    pub sum: u64,
+    pub folded: u32,
+    pub tag: u32,
+}
+
+#[repr(C)]
+#[derive(Clone, Copy)]
+pub struct CastPacket {
+    pub wide: u64,
+    pub signed_bits: u64,
+    pub float_bits: u32,
+    pub narrow: u32,
+}
+
 #[derive(Clone, Copy)]
 pub struct RustLayoutParams {
     pub base: u32,
     pub stride: u32,
+}
+
+#[derive(Clone, Copy)]
+struct ReturnRustPair {
+    left: u32,
+    right: u64,
 }
 
 #[derive(Clone, Copy)]
@@ -806,6 +829,58 @@ pub unsafe extern "C" fn compiler_flow_cast_probe(
     let byte_offset = i * core::mem::size_of::<u32>();
     let slot = unsafe { out.as_mut_ptr().cast::<u8>().add(byte_offset).cast::<u32>() };
     unsafe { core::ptr::write(slot, result) };
+}
+
+// rocm-oxide: len(out)=n
+// rocm-oxide: len(packets)=n
+// rocm-oxide: len(input)=n
+#[kernel]
+pub unsafe extern "C" fn compiler_return_value_probe(
+    out: gpu::DeviceSliceMut<u64>,
+    packets: gpu::DeviceSliceMut<ReturnPacket>,
+    input: gpu::DeviceSlice<u32>,
+    params: ControlParams,
+    n: usize,
+) {
+    let thread = gpu::thread_index_x_witness();
+    let i = thread.get();
+    if i >= n {
+        return;
+    }
+
+    let value = unsafe { input.read_unchecked(i) };
+    let pair = return_rust_pair(value, params);
+    let packet = return_packet(value, pair);
+    let score = return_packet_score(packet);
+    let disjoint_out = unsafe { gpu::DisjointSliceMut::new_unchecked(out) };
+    let disjoint_packets = unsafe { gpu::DisjointSliceMut::new_unchecked(packets) };
+    disjoint_out.write_for_thread(thread, score);
+    disjoint_packets.write_for_thread(thread, packet);
+}
+
+// rocm-oxide: len(out)=n
+// rocm-oxide: len(packets)=n
+// rocm-oxide: len(input)=n
+#[kernel]
+pub unsafe extern "C" fn compiler_arithmetic_cast_probe(
+    out: gpu::DeviceSliceMut<u64>,
+    packets: gpu::DeviceSliceMut<CastPacket>,
+    input: gpu::DeviceSlice<u32>,
+    n: usize,
+) {
+    let thread = gpu::thread_index_x_witness();
+    let i = thread.get();
+    if i >= n {
+        return;
+    }
+
+    let value = unsafe { input.read_unchecked(i) };
+    let packet = cast_packet(value, i);
+    let score = cast_packet_score(packet);
+    let disjoint_out = unsafe { gpu::DisjointSliceMut::new_unchecked(out) };
+    let disjoint_packets = unsafe { gpu::DisjointSliceMut::new_unchecked(packets) };
+    disjoint_out.write_for_thread(thread, score);
+    disjoint_packets.write_for_thread(thread, packet);
 }
 
 // rocm-oxide: len(out)=24
@@ -2470,6 +2545,30 @@ fn control_score(value: u32, params: ControlParams, pair: ControlPair) -> u32 {
         .wrapping_add((pair.left ^ pair.right) & 31)
 }
 
+fn return_rust_pair(value: u32, params: ControlParams) -> ReturnRustPair {
+    let scale = abs_i32(params.scale) as u32;
+    let rotation = (value & 7).wrapping_add(1);
+    let left = value.wrapping_add(params.seed).rotate_left(rotation);
+    let right = ((value as u64) << 32)
+        .wrapping_add(scale as u64)
+        .wrapping_add((params.seed as u64).wrapping_mul(17));
+    ReturnRustPair { left, right }
+}
+
+fn return_packet(value: u32, pair: ReturnRustPair) -> ReturnPacket {
+    let shift = (value & 3) * 8;
+    let lane_mix = (pair.right >> shift) as u32;
+    ReturnPacket {
+        sum: pair.right.wrapping_add(pair.left as u64),
+        folded: pair.left ^ lane_mix.rotate_right(value & 15),
+        tag: 0xc0de_0000u32 ^ (value & 0xff) ^ ((pair.right >> 48) as u32),
+    }
+}
+
+fn return_packet_score(packet: ReturnPacket) -> u64 {
+    packet.sum ^ ((packet.folded as u64) << 16) ^ packet.tag as u64
+}
+
 fn read_input_by_byte_cast(input: gpu::DeviceSlice<u32>, index: usize) -> u32 {
     let byte_offset = index * core::mem::size_of::<u32>();
     let slot = unsafe { input.as_ptr().cast::<u8>().add(byte_offset).cast::<u32>() };
@@ -2520,6 +2619,33 @@ fn flow_cast_score(input: gpu::DeviceSlice<u32>, len: usize, index: usize) -> u3
 
     let signed = (score as i32).wrapping_sub(value as i32);
     score.wrapping_add((signed as u32) & 31)
+}
+
+fn cast_packet(value: u32, index: usize) -> CastPacket {
+    let signed = (value as i64).wrapping_sub(0x1234).wrapping_mul(-33);
+    let wide = ((value as u64) << 37)
+        .wrapping_add((index as u64).wrapping_mul(0x1f1f_0101))
+        .rotate_left(value & 31);
+    let float_value = (signed as f32) * 0.125 + index as f32;
+    let double_value = f64::from_bits(0x3ff0_0000_0000_0000u64 | (wide & 0x000f_ffff_ffff_ffff));
+    let narrow = (wide as u32)
+        .wrapping_add(signed as u32)
+        .wrapping_add(float_value as i32 as u32);
+    let float_bits = float_value.to_bits() ^ (double_value.to_bits() as u32).rotate_left(11);
+    CastPacket {
+        wide,
+        signed_bits: signed as u64,
+        float_bits,
+        narrow,
+    }
+}
+
+fn cast_packet_score(packet: CastPacket) -> u64 {
+    packet
+        .wide
+        .wrapping_add(packet.signed_bits.rotate_left(7))
+        .wrapping_add((packet.float_bits as u64) << 1)
+        .wrapping_add(packet.narrow as u64)
 }
 
 fn abs_i32(value: i32) -> i32 {

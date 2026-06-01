@@ -26,6 +26,7 @@ fn main() {
     println!("cargo:rerun-if-changed=tools/rocm-oxide-build/Cargo.toml");
     println!("cargo:rerun-if-changed=tools/rocm-oxide-build/src");
     println!("cargo:rerun-if-env-changed=ROCM_OXIDE_ARCH");
+    println!("cargo:rerun-if-env-changed=ROCM_OXIDE_DEVICE_DEBUG");
 
     let output = Command::new("cargo")
         .args([

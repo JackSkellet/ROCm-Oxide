@@ -1,6 +1,6 @@
 use rocm_oxide::{
-    Device, DeviceBuffer, DeviceOperation, Dim3, LaunchConfig, ManagedBuffer, PinnedHostBuffer,
-    StreamPool,
+    Device, DeviceBuffer, DeviceOperation, Dim3, LaunchConfig, ManagedBuffer, ManagedMemoryKind,
+    PinnedHostBuffer, StreamPool,
 };
 use std::sync::Arc;
 
@@ -432,7 +432,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let reference_bias = 41u32;
     let reference_scale = 7u32;
     let properties = device.properties()?;
-    if properties.can_map_host_memory {
+    if let Some(kind) = properties.mapped_host_reference_capture_kind() {
+        assert!(kind.allows_host_reference_capture_during_kernel());
         let mut bias = PinnedHostBuffer::<u32>::new_zeroed_mapped_coherent(1)?;
         bias.as_mut_slice()[0] = reference_bias;
         let reference_closure = generated::HostReferenceClosure {
@@ -453,7 +454,13 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             reference_closure_out.copy_to_vec()?,
             expected_reference_closure(&reference_closure_input, reference_bias, reference_scale)
         );
-    } else if properties.managed_memory {
+    } else if let Some(kind) =
+        properties.managed_host_reference_capture_kind(ManagedMemoryKind::FineGrain)
+    {
+        assert_ne!(
+            kind.host_reference_capture_visibility(),
+            rocm_oxide::HostReferenceCaptureVisibility::DeviceOnly
+        );
         let bias = ManagedBuffer::from_slice(&[reference_bias])?;
         let reference_closure = generated::HostReferenceClosure {
             bias: bias.as_ptr(),
@@ -497,6 +504,89 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         flow_scores, expected_flow,
         "compiler_flow_cast_probe should match the host control-flow mirror"
     );
+
+    let return_input = vec![0u32, 1, 2, 8, 17, 31, 64, 255];
+    let return_values = DeviceBuffer::from_slice(&return_input)?;
+    let return_scores = DeviceBuffer::<u64>::new(return_input.len())?;
+    let return_packets = DeviceBuffer::<generated::ReturnPacket>::new(return_input.len())?;
+    let return_params = generated::ControlParams {
+        seed: 23,
+        scale: -9,
+    };
+    unsafe {
+        kernels.compiler_return_value_probe(
+            LaunchConfig::for_num_elems_with_block_size(return_input.len(), 32),
+            &return_scores,
+            &return_packets,
+            &return_values,
+            return_params,
+            return_input.len(),
+        )?;
+    }
+    rocm_oxide::hip::synchronize()?;
+    let return_scores = return_scores.copy_to_vec()?;
+    let return_packets = return_packets.copy_to_vec()?;
+    for (index, value) in return_input.iter().copied().enumerate() {
+        let expected_packet = return_packet_host(value, return_params);
+        assert_eq!(
+            (
+                return_packets[index].sum,
+                return_packets[index].folded,
+                return_packets[index].tag
+            ),
+            (
+                expected_packet.sum,
+                expected_packet.folded,
+                expected_packet.tag
+            ),
+            "compiler_return_value_probe packet mismatch at {index}"
+        );
+        assert_eq!(
+            return_scores[index],
+            return_packet_score_host(expected_packet),
+            "compiler_return_value_probe score mismatch at {index}"
+        );
+    }
+
+    let cast_input = vec![0u32, 1, 3, 7, 19, 127, 1024, 65_535];
+    let cast_values = DeviceBuffer::from_slice(&cast_input)?;
+    let cast_scores = DeviceBuffer::<u64>::new(cast_input.len())?;
+    let cast_packets = DeviceBuffer::<generated::CastPacket>::new(cast_input.len())?;
+    unsafe {
+        kernels.compiler_arithmetic_cast_probe(
+            LaunchConfig::for_num_elems_with_block_size(cast_input.len(), 32),
+            &cast_scores,
+            &cast_packets,
+            &cast_values,
+            cast_input.len(),
+        )?;
+    }
+    rocm_oxide::hip::synchronize()?;
+    let cast_scores = cast_scores.copy_to_vec()?;
+    let cast_packets = cast_packets.copy_to_vec()?;
+    for (index, value) in cast_input.iter().copied().enumerate() {
+        let expected_packet = cast_packet_host(value, index);
+        assert_eq!(
+            (
+                cast_packets[index].wide,
+                cast_packets[index].signed_bits,
+                cast_packets[index].float_bits,
+                cast_packets[index].narrow
+            ),
+            (
+                expected_packet.wide,
+                expected_packet.signed_bits,
+                expected_packet.float_bits,
+                expected_packet.narrow
+            ),
+            "compiler_arithmetic_cast_probe packet mismatch at {index}"
+        );
+        assert_eq!(
+            cast_scores[index],
+            cast_packet_score_host(expected_packet),
+            "compiler_arithmetic_cast_probe score mismatch at {index}"
+        );
+    }
 
     let reduce_n = 1_000usize;
     let reduce_block_x = 128u32;
@@ -833,6 +923,31 @@ fn control_score_host(
         .wrapping_add((pair.left ^ pair.right) & 31)
 }
 
+fn return_rust_pair_host(value: u32, params: generated::ControlParams) -> (u32, u64) {
+    let scale = params.scale.unsigned_abs();
+    let rotation = (value & 7).wrapping_add(1);
+    let left = value.wrapping_add(params.seed).rotate_left(rotation);
+    let right = ((value as u64) << 32)
+        .wrapping_add(scale as u64)
+        .wrapping_add((params.seed as u64).wrapping_mul(17));
+    (left, right)
+}
+
+fn return_packet_host(value: u32, params: generated::ControlParams) -> generated::ReturnPacket {
+    let (left, right) = return_rust_pair_host(value, params);
+    let shift = (value & 3) * 8;
+    let lane_mix = (right >> shift) as u32;
+    generated::ReturnPacket {
+        sum: right.wrapping_add(left as u64),
+        folded: left ^ lane_mix.rotate_right(value & 15),
+        tag: 0xc0de_0000u32 ^ (value & 0xff) ^ ((right >> 48) as u32),
+    }
+}
+
+fn return_packet_score_host(packet: generated::ReturnPacket) -> u64 {
+    packet.sum ^ ((packet.folded as u64) << 16) ^ packet.tag as u64
+}
+
 fn flow_cast_score_host(input: &[u32], index: usize) -> u32 {
     let value = input[index];
     let mut score = 0u32;
@@ -877,4 +992,31 @@ fn flow_cast_score_host(input: &[u32], index: usize) -> u32 {
 
     let signed = (score as i32).wrapping_sub(value as i32);
     score.wrapping_add((signed as u32) & 31)
+}
+
+fn cast_packet_host(value: u32, index: usize) -> generated::CastPacket {
+    let signed = (value as i64).wrapping_sub(0x1234).wrapping_mul(-33);
+    let wide = ((value as u64) << 37)
+        .wrapping_add((index as u64).wrapping_mul(0x1f1f_0101))
+        .rotate_left(value & 31);
+    let float_value = (signed as f32) * 0.125 + index as f32;
+    let double_value = f64::from_bits(0x3ff0_0000_0000_0000u64 | (wide & 0x000f_ffff_ffff_ffff));
+    let narrow = (wide as u32)
+        .wrapping_add(signed as u32)
+        .wrapping_add(float_value as i32 as u32);
+    let float_bits = float_value.to_bits() ^ (double_value.to_bits() as u32).rotate_left(11);
+    generated::CastPacket {
+        wide,
+        signed_bits: signed as u64,
+        float_bits,
+        narrow,
+    }
+}
+
+fn cast_packet_score_host(packet: generated::CastPacket) -> u64 {
+    packet
+        .wide
+        .wrapping_add(packet.signed_bits.rotate_left(7))
+        .wrapping_add((packet.float_bits as u64) << 1)
+        .wrapping_add(packet.narrow as u64)
 }

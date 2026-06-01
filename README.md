@@ -55,6 +55,8 @@ cargo run --example rust_device_vector_add
 cargo run --example rust_device_generated_bindings
 cargo run --example feature_showcase
 cargo run --example performance_probe
+cargo run --example compiler_feature_lab
+cargo run --example compiler_feature_lab -- --frames 1
 cargo run --example possibilities_window
 cargo run --example device_operation_chain
 cargo run --example module_global
@@ -89,6 +91,12 @@ compatibility default and the headless PNG export path. Use `--present-scale 2`
 or press `M` in the live demo to keep the render buffer smaller while presenting
 a larger window; for example, `--resolution 720p --present-scale 2` opens a
 1440p-sized window with one quarter of the native 1440p readback traffic.
+
+`compiler_feature_lab` is a separate GUI focused on the compiler/runtime parity
+work. It runs the generated return-by-value, arithmetic/cast, host-reference,
+scoped-atomic, and debug-info probes, then shows each feature in its own visual
+panel. Mouse hit testing uses framebuffer-scaled minifb coordinates, so buttons
+and sliders stay aligned when the window is resized.
 
 The root [build.rs](/home/kjwtil/Documents/ROCm-Oxide/build.rs)
 generates device artifacts before the host crate compiles. It exposes these
@@ -202,6 +210,9 @@ rewrite panics as actionable diagnostics, discovers kernel-bearing local path
 dependencies for bundling, records rustc-reported AMDGPU layout facts for
 device structs, and mirrors layout-proven `repr(C)` and default `repr(Rust)`
 payloads into host bindings.
+Set `ROCM_OXIDE_DEVICE_DEBUG=1` to preserve device debug info through rustc,
+ROCm `llc`, and ROCm `clang` for ROCgdb/ROCm-native debugger sessions; see
+[docs/debugger-workflow.md](/home/jack/Documents/GitKraken_Projects/ROCm-Oxide/docs/debugger-workflow.md).
 The repo pins nightly Rust in `rust-toolchain.toml` so `cargo` commands use a
 toolchain with `rust-src`; `rocm-oxide-build --doctor` also probes that `core`
 can actually be built for `amdgcn-amd-amdhsa`.

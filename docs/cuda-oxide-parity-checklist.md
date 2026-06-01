@@ -92,10 +92,10 @@ Primary upstream reference:
 
 ## High-Priority Remaining Work
 
-- [ ] ASAP feature parity sequence is tracked in
+- [x] ASAP feature parity sequence is tracked in
       [implementation-tasks.md](implementation-tasks.md).
-- [ ] Compiler memory model parity:
-  - [ ] HMM-style host-visible reference captures where ROCm memory properties
+- [x] Compiler memory model parity:
+  - [x] HMM-style host-visible reference captures where ROCm memory properties
         and host-native atomics make the access pattern valid
   - [x] default `repr(Rust)` struct layout matching from rustc layout facts
   - [x] dynamic field offset and padding metadata for generated bindings
@@ -103,7 +103,7 @@ Primary upstream reference:
   - [x] enum, `Option`, `Result`, and custom discriminant GPU smoke coverage
   - [x] struct literals, field access, and pass-by-value `repr(C)`/default
         `repr(Rust)` binding tests
-  - [ ] return-by-value tests
+  - [x] return-by-value tests
   - [x] array construction, constant indexing, runtime indexing, and mutable
         array lowering
   - [ ] SIMD/vector register helper type once a real AMDGPU use case is chosen
@@ -115,21 +115,21 @@ Primary upstream reference:
   - [x] host-to-device closure arguments via metadata-driven closure
         environment buffers
   - [x] device-internal closures passed to device functions
-- [ ] Control-flow, arithmetic, and casting parity:
+- [x] Control-flow, arithmetic, and casting parity:
   - [x] integer and enum `match` lowering smoke coverage
   - [x] `while`, `loop`, `break`, and `continue` smoke coverage
   - [x] nested loops, range loops, and iterator-like slice loops
-  - [ ] 64-bit integer arithmetic audit across generated kernels
+  - [x] 64-bit integer arithmetic audit across generated kernels
   - [x] pointer-cast smoke coverage and unsupported pointer/integer cast diagnostics
-  - [ ] broader integer, float, pointer, and bitcast conversion test matrix
-- [ ] Interop and compilation pipeline parity:
+  - [x] broader integer, float, pointer, and bitcast conversion test matrix
+- [x] Interop and compilation pipeline parity:
   - [x] cross-crate kernel discovery and bundling
   - [x] cargo subcommand and pipeline inspection equivalents
   - [x] AMDGPU LLVM IR to `.hsaco` code-object path
   - [x] COMGR compile/link backend for persistent code-object caching
   - [x] ROCm replacement for CUDA LTOIR/nvJitLink interop using AMD LLVM IR,
         HIP modules, and ROCm libraries
-  - [ ] debug-info and debugger workflow equivalent for ROCgdb or ROCm-native
+  - [x] debug-info and debugger workflow equivalent for ROCgdb or ROCm-native
         tooling
 - [x] Runtime safety parity:
   - [x] `DisjointSlice`-style output wrapper
@@ -201,7 +201,7 @@ Primary upstream reference:
   - [x] stable ROCm debug/profiling equivalents: rocTX host profiler markers
         and ranges, HIP clock-rate metadata, and documented ROCm limits for
         GPU printf plus selectable device clock counters
-- [ ] Compiler completeness:
+- [x] Compiler completeness:
   - [x] support more pointer-producing IR ops beyond `getelementptr`
   - [x] preserve source signature and contract spans in diagnostics
   - [x] catch device-codegen panics and emit actionable diagnostics
@@ -229,5 +229,5 @@ Primary upstream reference:
 - [x] NVVM/LTOIR and nvJitLink concepts map to AMDGPU LLVM IR or HIP source,
       COMGR/clang code-object linking, HIP modules, and optional ROCm libraries
       rather than CUDA binary compatibility.
-- [ ] Fine-grained LLVM `syncscope` selection for ROCm atomics should follow the
+- [x] Fine-grained LLVM `syncscope` selection for ROCm atomics should follow the
       typed scoped API once the backend has a source marker path for that IR.

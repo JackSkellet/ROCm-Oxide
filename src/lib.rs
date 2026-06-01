@@ -31,10 +31,11 @@ pub use parity::{
 pub use profiling::{RocTx, RocTxScopedRange, RocTxVersion};
 pub use runtime::{
     AtomicMemoryKind, Device, DeviceLimits, DeviceProperties, DeviceSlice, DeviceSliceMut, Dim3,
-    Error, Kernel, KernelMetadata, KernelResource, LaunchConfig, LaunchRecommendation, Module,
-    OccupancyActiveBlocks, OccupancyMaxPotentialBlockSize, Result, SystemScopeAtomicVisibility,
-    validate_block_x, validate_buffer_len, validate_cooperative_launch_config,
-    validate_device_buffers_disjoint, validate_launch_config, validate_launch_config_for_limits,
+    Error, HostReferenceCaptureVisibility, Kernel, KernelMetadata, KernelResource, LaunchConfig,
+    LaunchRecommendation, Module, OccupancyActiveBlocks, OccupancyMaxPotentialBlockSize, Result,
+    SystemScopeAtomicVisibility, validate_block_x, validate_buffer_len,
+    validate_cooperative_launch_config, validate_device_buffers_disjoint, validate_launch_config,
+    validate_launch_config_for_limits,
 };
 
 #[macro_export]

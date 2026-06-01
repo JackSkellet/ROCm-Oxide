@@ -351,6 +351,10 @@ impl DeviceProperties {
         }
     }
 
+    pub const fn mapped_host_reference_capture_kind(self) -> Option<AtomicMemoryKind> {
+        self.mapped_host_memory_kind()
+    }
+
     pub const fn managed_memory_kind(
         self,
         requested: hip::ManagedMemoryKind,
@@ -368,6 +372,13 @@ impl DeviceProperties {
                 Some(AtomicMemoryKind::ManagedCoarseGrain)
             }
         }
+    }
+
+    pub const fn managed_host_reference_capture_kind(
+        self,
+        requested: hip::ManagedMemoryKind,
+    ) -> Option<AtomicMemoryKind> {
+        self.managed_memory_kind(requested)
     }
 }
 
@@ -509,6 +520,13 @@ pub enum SystemScopeAtomicVisibility {
     HostVisibleDuringKernel,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum HostReferenceCaptureVisibility {
+    DeviceOnly,
+    HostVisibleAfterSynchronization,
+    HostVisibleDuringKernel,
+}
+
 impl AtomicMemoryKind {
     pub const fn system_scope_visibility(self) -> SystemScopeAtomicVisibility {
         match self {
@@ -528,6 +546,27 @@ impl AtomicMemoryKind {
         matches!(
             self.system_scope_visibility(),
             SystemScopeAtomicVisibility::HostVisibleDuringKernel
+        )
+    }
+
+    pub const fn host_reference_capture_visibility(self) -> HostReferenceCaptureVisibility {
+        match self {
+            Self::DefaultDevice | Self::FineGrainedDevice => {
+                HostReferenceCaptureVisibility::DeviceOnly
+            }
+            Self::MappedCoherentHost | Self::ManagedFineGrain => {
+                HostReferenceCaptureVisibility::HostVisibleDuringKernel
+            }
+            Self::ManagedCoarseGrain => {
+                HostReferenceCaptureVisibility::HostVisibleAfterSynchronization
+            }
+        }
+    }
+
+    pub const fn allows_host_reference_capture_during_kernel(self) -> bool {
+        matches!(
+            self.host_reference_capture_visibility(),
+            HostReferenceCaptureVisibility::HostVisibleDuringKernel
         )
     }
 }
@@ -1109,8 +1148,8 @@ fn rocminfo_path() -> PathBuf {
 #[cfg(test)]
 mod tests {
     use super::{
-        AtomicMemoryKind, DeviceLimits, DeviceProperties, Dim3, KernelMetadata, LaunchConfig,
-        SystemScopeAtomicVisibility,
+        AtomicMemoryKind, DeviceLimits, DeviceProperties, Dim3, HostReferenceCaptureVisibility,
+        KernelMetadata, LaunchConfig, SystemScopeAtomicVisibility,
     };
     use crate::hip::{DeviceBuffer, ManagedMemoryKind};
 
@@ -1219,6 +1258,34 @@ mod tests {
     }
 
     #[test]
+    fn host_reference_capture_visibility_matches_memory_visibility() {
+        assert_eq!(
+            AtomicMemoryKind::DefaultDevice.host_reference_capture_visibility(),
+            HostReferenceCaptureVisibility::DeviceOnly
+        );
+        assert_eq!(
+            AtomicMemoryKind::FineGrainedDevice.host_reference_capture_visibility(),
+            HostReferenceCaptureVisibility::DeviceOnly
+        );
+        assert_eq!(
+            AtomicMemoryKind::MappedCoherentHost.host_reference_capture_visibility(),
+            HostReferenceCaptureVisibility::HostVisibleDuringKernel
+        );
+        assert_eq!(
+            AtomicMemoryKind::ManagedFineGrain.host_reference_capture_visibility(),
+            HostReferenceCaptureVisibility::HostVisibleDuringKernel
+        );
+        assert_eq!(
+            AtomicMemoryKind::ManagedCoarseGrain.host_reference_capture_visibility(),
+            HostReferenceCaptureVisibility::HostVisibleAfterSynchronization
+        );
+        assert!(AtomicMemoryKind::MappedCoherentHost.allows_host_reference_capture_during_kernel());
+        assert!(
+            !AtomicMemoryKind::ManagedCoarseGrain.allows_host_reference_capture_during_kernel()
+        );
+    }
+
+    #[test]
     fn device_properties_classify_host_visible_memory() {
         let props = DeviceProperties {
             ordinal: 0,
@@ -1252,6 +1319,14 @@ mod tests {
         );
         assert_eq!(
             props.mapped_host_memory_kind(),
+            Some(AtomicMemoryKind::MappedCoherentHost)
+        );
+        assert_eq!(
+            props.managed_host_reference_capture_kind(ManagedMemoryKind::FineGrain),
+            Some(AtomicMemoryKind::ManagedFineGrain)
+        );
+        assert_eq!(
+            props.mapped_host_reference_capture_kind(),
             Some(AtomicMemoryKind::MappedCoherentHost)
         );
     }

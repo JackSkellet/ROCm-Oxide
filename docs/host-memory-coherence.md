@@ -18,6 +18,12 @@ Runtime pieces:
   `hipMemAdviseSetCoarseGrain` to the currently selected HIP device.
 - `PinnedHostBuffer::new_zeroed_mapped_coherent` remains the explicit mapped
   coherent host path for zero-copy GPU access.
+- `DeviceProperties::mapped_host_reference_capture_kind()` and
+  `managed_host_reference_capture_kind()` expose the same classification for
+  kernels that capture a host-side pointer/reference in a closure environment.
+  Use `AtomicMemoryKind::host_reference_capture_visibility()` to decide whether
+  that captured reference is device-only, visible after synchronization, or
+  visible while the kernel is running.
 
 Coherence rules:
 
@@ -33,6 +39,11 @@ Coherence rules:
   `DeviceProperties::host_native_atomic_supported` are true. Otherwise it is
   downgraded to synchronization-boundary visibility.
 - Coarse-grain managed memory is host-visible after synchronization.
+- Host-reference closure captures are valid only when the captured pointer comes
+  from a memory kind classified by these helpers. Mapped coherent host memory and
+  fine-grain managed memory can be host-visible during a kernel when the device
+  reports the required native atomic/concurrent-access attributes; coarse-grain
+  managed memory is limited to synchronization boundaries.
 - Peer access is explicit. Query it first with `Device::can_access_peer`; enable
   it for the current source device only when HIP reports support.
 

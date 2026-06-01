@@ -33,6 +33,7 @@ fn run() -> Result<(), String> {
             .to_string()
     })?;
     let tools = ToolPaths::discover()?;
+    let debug_info = device_debug_info_enabled();
 
     ensure_tool("cargo", &["--version"])?;
     ensure_tool("rustc", &["--version"])?;
@@ -105,7 +106,7 @@ fn run() -> Result<(), String> {
                 ));
             }
         }
-        build_device_crate(device_crate, &arch)?;
+        build_device_crate(device_crate, &arch, debug_info)?;
         let package_name = package_name(device_crate)?;
         let artifact_stem = if device_crate == &device_crates[0] {
             args.output_stem.clone()
@@ -125,20 +126,18 @@ fn run() -> Result<(), String> {
         let transformed = compiler_step("rewrite Rust-emitted LLVM IR", || {
             transform_ir(&source, &kernel_names, &crate_kernels, &device_globals)
         })?;
+        let transformed = strip_rocm_llc_unsupported_debug_metadata(&transformed);
         fs::write(&kernel_ir, transformed)
             .map_err(|err| format!("failed to write {}: {err}", kernel_ir.display()))?;
         kernel_irs.push(kernel_ir.clone());
 
-        run_command(
-            Command::new(&tools.llc.path)
-                .arg("-mtriple=amdgcn-amd-amdhsa")
-                .arg(format!("-mcpu={arch}"))
-                .arg("-filetype=obj")
-                .arg(&kernel_ir)
-                .arg("-o")
-                .arg(&obj),
-            "lower LLVM IR with ROCm llc",
-        )?;
+        let mut lower = Command::new(&tools.llc.path);
+        lower
+            .arg("-mtriple=amdgcn-amd-amdhsa")
+            .arg(format!("-mcpu={arch}"))
+            .arg("-filetype=obj");
+        lower.arg(&kernel_ir).arg("-o").arg(&obj);
+        run_command(&mut lower, "lower LLVM IR with ROCm llc")?;
         if crate_kernels.contains_key("lds_block_sum")
             || crate_kernels.contains_key("static_lds_reverse")
         {
@@ -172,6 +171,9 @@ fn run() -> Result<(), String> {
     link.arg("-target")
         .arg("amdgcn-amd-amdhsa")
         .arg(format!("-mcpu={arch}"));
+    if debug_info {
+        link.arg("-g");
+    }
     for obj in &objects {
         link.arg(obj);
     }
@@ -952,7 +954,34 @@ fn cargo_command() -> Command {
     Command::new(env::var_os("CARGO").unwrap_or_else(|| "cargo".into()))
 }
 
-fn build_device_crate(device_crate: &Path, arch: &str) -> Result<(), String> {
+fn device_debug_info_enabled() -> bool {
+    env_flag_enabled(env::var_os("ROCM_OXIDE_DEVICE_DEBUG").as_deref())
+}
+
+fn env_flag_enabled(value: Option<&OsStr>) -> bool {
+    let Some(value) = value.and_then(OsStr::to_str) else {
+        return false;
+    };
+    let value = value.trim();
+    if value.is_empty() {
+        return false;
+    }
+    !matches!(value.to_ascii_lowercase().as_str(), "0" | "false" | "no" | "off")
+}
+
+fn device_rustflags(arch: &str) -> String {
+    format!("-C target-cpu={arch}")
+}
+
+fn device_debug_rustc_args(debug_info: bool) -> &'static [&'static str] {
+    if debug_info {
+        &["-C", "debuginfo=2"]
+    } else {
+        &[]
+    }
+}
+
+fn build_device_crate(device_crate: &Path, arch: &str, debug_info: bool) -> Result<(), String> {
     let mut command = cargo_command();
     command
         .arg("rustc")
@@ -963,8 +992,9 @@ fn build_device_crate(device_crate: &Path, arch: &str) -> Result<(), String> {
         .arg("--release")
         .arg("--")
         .arg("--emit=llvm-ir")
+        .args(device_debug_rustc_args(debug_info))
         .current_dir(device_crate)
-        .env("RUSTFLAGS", format!("-C target-cpu={arch}"));
+        .env("RUSTFLAGS", device_rustflags(arch));
     sanitize_rust_env(&mut command);
     run_command(&mut command, "compile Rust device crate to AMDGPU LLVM IR")
         .map_err(with_core_build_hint)
@@ -2573,6 +2603,49 @@ fn is_identifier(value: &str) -> bool {
     };
     (first == '_' || first.is_ascii_alphabetic())
         && chars.all(|ch| ch == '_' || ch.is_ascii_alphanumeric())
+}
+
+fn strip_rocm_llc_unsupported_debug_metadata(ir: &str) -> String {
+    if !ir.contains("dwarfAddressSpace:") {
+        return ir.to_string();
+    }
+    let mut output = String::with_capacity(ir.len());
+    for line in ir.lines() {
+        output.push_str(&strip_dwarf_address_space_field(line));
+        output.push('\n');
+    }
+    if !ir.ends_with('\n') {
+        output.pop();
+    }
+    output
+}
+
+fn strip_dwarf_address_space_field(line: &str) -> String {
+    const FIELD: &str = ", dwarfAddressSpace:";
+    let Some(_) = line.find(FIELD) else {
+        return line.to_string();
+    };
+
+    let mut remaining = line;
+    let mut output = String::with_capacity(line.len());
+    while let Some(pos) = remaining.find(FIELD) {
+        output.push_str(&remaining[..pos]);
+        let after_field = &remaining[pos + FIELD.len()..];
+        let after_space = after_field.trim_start();
+        let consumed_space = after_field.len() - after_space.len();
+        let digits_len = after_space
+            .chars()
+            .take_while(|ch| ch.is_ascii_digit())
+            .map(char::len_utf8)
+            .sum::<usize>();
+        if digits_len == 0 {
+            output.push_str(&remaining[pos..]);
+            return output;
+        }
+        remaining = &after_field[consumed_space + digits_len..];
+    }
+    output.push_str(remaining);
+    output
 }
 
 fn transform_ir(
@@ -4744,6 +4817,39 @@ pub unsafe extern "C" fn helper() {}
     }
 
     #[test]
+    fn device_debug_env_flag_accepts_common_truthy_and_falsey_values() {
+        assert!(!super::env_flag_enabled(None));
+        assert!(!super::env_flag_enabled(Some(std::ffi::OsStr::new(""))));
+        assert!(!super::env_flag_enabled(Some(std::ffi::OsStr::new("0"))));
+        assert!(!super::env_flag_enabled(Some(std::ffi::OsStr::new("false"))));
+        assert!(!super::env_flag_enabled(Some(std::ffi::OsStr::new("OFF"))));
+        assert!(super::env_flag_enabled(Some(std::ffi::OsStr::new("1"))));
+        assert!(super::env_flag_enabled(Some(std::ffi::OsStr::new("true"))));
+        assert!(super::env_flag_enabled(Some(std::ffi::OsStr::new("debug"))));
+    }
+
+    #[test]
+    fn device_rustflags_keep_build_std_dependencies_on_target_cpu_only() {
+        assert_eq!(super::device_rustflags("gfx1201"), "-C target-cpu=gfx1201");
+        assert_eq!(super::device_debug_rustc_args(false), &[] as &[&str]);
+        assert_eq!(
+            super::device_debug_rustc_args(true),
+            &["-C", "debuginfo=2"] as &[&str]
+        );
+    }
+
+    #[test]
+    fn strips_rocm_llc_unsupported_dwarf_address_space_metadata() {
+        let input = r#"!54 = !DIDerivedType(tag: DW_TAG_pointer_type, name: "*mut f32", baseType: !4, size: 64, align: 64, dwarfAddressSpace: 0)
+!55 = !DIDerivedType(tag: DW_TAG_pointer_type, name: "*mut u32", baseType: !5, size: 64, dwarfAddressSpace: 1, flags: DIFlagArtificial)
+"#;
+        let output = super::strip_rocm_llc_unsupported_debug_metadata(input);
+        assert!(!output.contains("dwarfAddressSpace"));
+        assert!(output.contains("align: 64)"));
+        assert!(output.contains("size: 64, flags: DIFlagArtificial)"));
+    }
+
+    #[test]
     fn parses_per_kernel_resource_rows_from_metadata_json() {
         let input = r#"{
   "kernels": [
@@ -5239,6 +5345,8 @@ start:
   %dev = atomicrmw add ptr %counters, i32 1 monotonic, align 4
   call void @__rocm_oxide_atomic_scope_device(ptr %counters)
   %cas = cmpxchg ptr %counters, i32 0, i32 1 monotonic monotonic, align 4
+  call void @__rocm_oxide_atomic_scope_workgroup(ptr %counters)
+  store atomic i32 7, ptr %counters release, align 4
   call void @__rocm_oxide_atomic_scope_system(ptr %counters)
   %sys = load atomic i32, ptr %counters acquire, align 4
   ret void
@@ -5268,6 +5376,9 @@ pub unsafe extern "C" fn scoped(counters: *mut u32) {}
         assert!(output.contains(
             "%cas = cmpxchg ptr addrspace(1) %counters, i32 0, i32 1 syncscope(\"agent\") monotonic monotonic, align 4"
         ));
+        assert!(
+            output.contains("store atomic i32 7, ptr addrspace(1) %counters syncscope(\"workgroup\") release, align 4")
+        );
         assert!(
             output.contains("%sys = load atomic i32, ptr addrspace(1) %counters acquire, align 4")
         );
