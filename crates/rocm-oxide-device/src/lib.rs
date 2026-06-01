@@ -956,6 +956,24 @@ pub mod cooperative {
         StaticTile
     }
 
+    macro_rules! block_reduce_method {
+        ($method:ident, $root:ident, $ty:ty) => {
+            #[inline(always)]
+            pub unsafe fn $method(self, scratch: *mut $ty, value: $ty) -> $ty {
+                unsafe { super::$root(scratch, value) }
+            }
+        };
+    }
+
+    macro_rules! block_scan_method {
+        ($method:ident, $root:ident, $ty:ty) => {
+            #[inline(always)]
+            pub unsafe fn $method(self, scratch: *mut $ty, value: $ty) -> $ty {
+                unsafe { super::$root(scratch, value) }
+            }
+        };
+    }
+
     impl ThreadBlock {
         #[inline(always)]
         pub fn size(self) -> u32 {
@@ -1019,6 +1037,10 @@ pub mod cooperative {
             unsafe { block_reduce_add_f32(scratch, value) }
         }
 
+        block_reduce_method!(reduce_add_u64, block_reduce_add_u64, u64);
+        block_reduce_method!(reduce_add_i64, block_reduce_add_i64, i64);
+        block_reduce_method!(reduce_add_f64, block_reduce_add_f64, f64);
+
         #[inline(always)]
         pub unsafe fn reduce_min_u32(self, scratch: *mut u32, value: u32) -> u32 {
             unsafe { block_reduce_min_u32(scratch, value) }
@@ -1033,6 +1055,10 @@ pub mod cooperative {
         pub unsafe fn reduce_min_f32(self, scratch: *mut f32, value: f32) -> f32 {
             unsafe { block_reduce_min_f32(scratch, value) }
         }
+
+        block_reduce_method!(reduce_min_u64, block_reduce_min_u64, u64);
+        block_reduce_method!(reduce_min_i64, block_reduce_min_i64, i64);
+        block_reduce_method!(reduce_min_f64, block_reduce_min_f64, f64);
 
         #[inline(always)]
         pub unsafe fn reduce_max_u32(self, scratch: *mut u32, value: u32) -> u32 {
@@ -1049,20 +1075,36 @@ pub mod cooperative {
             unsafe { block_reduce_max_f32(scratch, value) }
         }
 
+        block_reduce_method!(reduce_max_u64, block_reduce_max_u64, u64);
+        block_reduce_method!(reduce_max_i64, block_reduce_max_i64, i64);
+        block_reduce_method!(reduce_max_f64, block_reduce_max_f64, f64);
+
         #[inline(always)]
         pub unsafe fn reduce_and_u32(self, scratch: *mut u32, value: u32) -> u32 {
             unsafe { block_reduce_and_u32(scratch, value) }
         }
+
+        block_reduce_method!(reduce_and_i32, block_reduce_and_i32, i32);
+        block_reduce_method!(reduce_and_u64, block_reduce_and_u64, u64);
+        block_reduce_method!(reduce_and_i64, block_reduce_and_i64, i64);
 
         #[inline(always)]
         pub unsafe fn reduce_or_u32(self, scratch: *mut u32, value: u32) -> u32 {
             unsafe { block_reduce_or_u32(scratch, value) }
         }
 
+        block_reduce_method!(reduce_or_i32, block_reduce_or_i32, i32);
+        block_reduce_method!(reduce_or_u64, block_reduce_or_u64, u64);
+        block_reduce_method!(reduce_or_i64, block_reduce_or_i64, i64);
+
         #[inline(always)]
         pub unsafe fn reduce_xor_u32(self, scratch: *mut u32, value: u32) -> u32 {
             unsafe { block_reduce_xor_u32(scratch, value) }
         }
+
+        block_reduce_method!(reduce_xor_i32, block_reduce_xor_i32, i32);
+        block_reduce_method!(reduce_xor_u64, block_reduce_xor_u64, u64);
+        block_reduce_method!(reduce_xor_i64, block_reduce_xor_i64, i64);
 
         #[inline(always)]
         pub unsafe fn scan_inclusive_add_u32(self, scratch: *mut u32, value: u32) -> u32 {
@@ -1079,6 +1121,34 @@ pub mod cooperative {
             unsafe { block_scan_inclusive_add_f32(scratch, value) }
         }
 
+        block_scan_method!(scan_inclusive_add_u64, block_scan_inclusive_add_u64, u64);
+        block_scan_method!(scan_inclusive_add_i64, block_scan_inclusive_add_i64, i64);
+        block_scan_method!(scan_inclusive_add_f64, block_scan_inclusive_add_f64, f64);
+        block_scan_method!(scan_inclusive_min_u32, block_scan_inclusive_min_u32, u32);
+        block_scan_method!(scan_inclusive_min_i32, block_scan_inclusive_min_i32, i32);
+        block_scan_method!(scan_inclusive_min_f32, block_scan_inclusive_min_f32, f32);
+        block_scan_method!(scan_inclusive_min_u64, block_scan_inclusive_min_u64, u64);
+        block_scan_method!(scan_inclusive_min_i64, block_scan_inclusive_min_i64, i64);
+        block_scan_method!(scan_inclusive_min_f64, block_scan_inclusive_min_f64, f64);
+        block_scan_method!(scan_inclusive_max_u32, block_scan_inclusive_max_u32, u32);
+        block_scan_method!(scan_inclusive_max_i32, block_scan_inclusive_max_i32, i32);
+        block_scan_method!(scan_inclusive_max_f32, block_scan_inclusive_max_f32, f32);
+        block_scan_method!(scan_inclusive_max_u64, block_scan_inclusive_max_u64, u64);
+        block_scan_method!(scan_inclusive_max_i64, block_scan_inclusive_max_i64, i64);
+        block_scan_method!(scan_inclusive_max_f64, block_scan_inclusive_max_f64, f64);
+        block_scan_method!(scan_inclusive_and_u32, block_scan_inclusive_and_u32, u32);
+        block_scan_method!(scan_inclusive_and_i32, block_scan_inclusive_and_i32, i32);
+        block_scan_method!(scan_inclusive_and_u64, block_scan_inclusive_and_u64, u64);
+        block_scan_method!(scan_inclusive_and_i64, block_scan_inclusive_and_i64, i64);
+        block_scan_method!(scan_inclusive_or_u32, block_scan_inclusive_or_u32, u32);
+        block_scan_method!(scan_inclusive_or_i32, block_scan_inclusive_or_i32, i32);
+        block_scan_method!(scan_inclusive_or_u64, block_scan_inclusive_or_u64, u64);
+        block_scan_method!(scan_inclusive_or_i64, block_scan_inclusive_or_i64, i64);
+        block_scan_method!(scan_inclusive_xor_u32, block_scan_inclusive_xor_u32, u32);
+        block_scan_method!(scan_inclusive_xor_i32, block_scan_inclusive_xor_i32, i32);
+        block_scan_method!(scan_inclusive_xor_u64, block_scan_inclusive_xor_u64, u64);
+        block_scan_method!(scan_inclusive_xor_i64, block_scan_inclusive_xor_i64, i64);
+
         #[inline(always)]
         pub unsafe fn scan_exclusive_add_u32(self, scratch: *mut u32, value: u32) -> u32 {
             unsafe { block_scan_exclusive_add_u32(scratch, value) }
@@ -1093,6 +1163,34 @@ pub mod cooperative {
         pub unsafe fn scan_exclusive_add_f32(self, scratch: *mut f32, value: f32) -> f32 {
             unsafe { block_scan_exclusive_add_f32(scratch, value) }
         }
+
+        block_scan_method!(scan_exclusive_add_u64, block_scan_exclusive_add_u64, u64);
+        block_scan_method!(scan_exclusive_add_i64, block_scan_exclusive_add_i64, i64);
+        block_scan_method!(scan_exclusive_add_f64, block_scan_exclusive_add_f64, f64);
+        block_scan_method!(scan_exclusive_min_u32, block_scan_exclusive_min_u32, u32);
+        block_scan_method!(scan_exclusive_min_i32, block_scan_exclusive_min_i32, i32);
+        block_scan_method!(scan_exclusive_min_f32, block_scan_exclusive_min_f32, f32);
+        block_scan_method!(scan_exclusive_min_u64, block_scan_exclusive_min_u64, u64);
+        block_scan_method!(scan_exclusive_min_i64, block_scan_exclusive_min_i64, i64);
+        block_scan_method!(scan_exclusive_min_f64, block_scan_exclusive_min_f64, f64);
+        block_scan_method!(scan_exclusive_max_u32, block_scan_exclusive_max_u32, u32);
+        block_scan_method!(scan_exclusive_max_i32, block_scan_exclusive_max_i32, i32);
+        block_scan_method!(scan_exclusive_max_f32, block_scan_exclusive_max_f32, f32);
+        block_scan_method!(scan_exclusive_max_u64, block_scan_exclusive_max_u64, u64);
+        block_scan_method!(scan_exclusive_max_i64, block_scan_exclusive_max_i64, i64);
+        block_scan_method!(scan_exclusive_max_f64, block_scan_exclusive_max_f64, f64);
+        block_scan_method!(scan_exclusive_and_u32, block_scan_exclusive_and_u32, u32);
+        block_scan_method!(scan_exclusive_and_i32, block_scan_exclusive_and_i32, i32);
+        block_scan_method!(scan_exclusive_and_u64, block_scan_exclusive_and_u64, u64);
+        block_scan_method!(scan_exclusive_and_i64, block_scan_exclusive_and_i64, i64);
+        block_scan_method!(scan_exclusive_or_u32, block_scan_exclusive_or_u32, u32);
+        block_scan_method!(scan_exclusive_or_i32, block_scan_exclusive_or_i32, i32);
+        block_scan_method!(scan_exclusive_or_u64, block_scan_exclusive_or_u64, u64);
+        block_scan_method!(scan_exclusive_or_i64, block_scan_exclusive_or_i64, i64);
+        block_scan_method!(scan_exclusive_xor_u32, block_scan_exclusive_xor_u32, u32);
+        block_scan_method!(scan_exclusive_xor_i32, block_scan_exclusive_xor_i32, i32);
+        block_scan_method!(scan_exclusive_xor_u64, block_scan_exclusive_xor_u64, u64);
+        block_scan_method!(scan_exclusive_xor_i64, block_scan_exclusive_xor_i64, i64);
     }
 
     impl Wavefront {
@@ -1668,6 +1766,30 @@ define_block_reduce!(
     rhs,
     if lhs < rhs { lhs } else { rhs }
 );
+define_block_reduce!(block_reduce_add_u64, u64, lhs, rhs, lhs.wrapping_add(rhs));
+define_block_reduce!(block_reduce_add_i64, i64, lhs, rhs, lhs.wrapping_add(rhs));
+define_block_reduce!(block_reduce_add_f64, f64, lhs, rhs, lhs + rhs);
+define_block_reduce!(
+    block_reduce_min_u64,
+    u64,
+    lhs,
+    rhs,
+    if lhs < rhs { lhs } else { rhs }
+);
+define_block_reduce!(
+    block_reduce_min_i64,
+    i64,
+    lhs,
+    rhs,
+    if lhs < rhs { lhs } else { rhs }
+);
+define_block_reduce!(
+    block_reduce_min_f64,
+    f64,
+    lhs,
+    rhs,
+    if lhs < rhs { lhs } else { rhs }
+);
 define_block_reduce!(
     block_reduce_max_u32,
     u32,
@@ -1689,9 +1811,39 @@ define_block_reduce!(
     rhs,
     if lhs > rhs { lhs } else { rhs }
 );
+define_block_reduce!(
+    block_reduce_max_u64,
+    u64,
+    lhs,
+    rhs,
+    if lhs > rhs { lhs } else { rhs }
+);
+define_block_reduce!(
+    block_reduce_max_i64,
+    i64,
+    lhs,
+    rhs,
+    if lhs > rhs { lhs } else { rhs }
+);
+define_block_reduce!(
+    block_reduce_max_f64,
+    f64,
+    lhs,
+    rhs,
+    if lhs > rhs { lhs } else { rhs }
+);
 define_block_reduce!(block_reduce_and_u32, u32, lhs, rhs, lhs & rhs);
+define_block_reduce!(block_reduce_and_i32, i32, lhs, rhs, lhs & rhs);
+define_block_reduce!(block_reduce_and_u64, u64, lhs, rhs, lhs & rhs);
+define_block_reduce!(block_reduce_and_i64, i64, lhs, rhs, lhs & rhs);
 define_block_reduce!(block_reduce_or_u32, u32, lhs, rhs, lhs | rhs);
+define_block_reduce!(block_reduce_or_i32, i32, lhs, rhs, lhs | rhs);
+define_block_reduce!(block_reduce_or_u64, u64, lhs, rhs, lhs | rhs);
+define_block_reduce!(block_reduce_or_i64, i64, lhs, rhs, lhs | rhs);
 define_block_reduce!(block_reduce_xor_u32, u32, lhs, rhs, lhs ^ rhs);
+define_block_reduce!(block_reduce_xor_i32, i32, lhs, rhs, lhs ^ rhs);
+define_block_reduce!(block_reduce_xor_u64, u64, lhs, rhs, lhs ^ rhs);
+define_block_reduce!(block_reduce_xor_i64, i64, lhs, rhs, lhs ^ rhs);
 
 #[inline(always)]
 pub unsafe fn block_scan_inclusive_add_u32(scratch: *mut u32, value: u32) -> u32 {
@@ -1791,6 +1943,304 @@ pub unsafe fn block_scan_exclusive_add_i32(scratch: *mut i32, value: i32) -> i32
 pub unsafe fn block_scan_exclusive_add_f32(scratch: *mut f32, value: f32) -> f32 {
     unsafe { block_scan_inclusive_add_f32(scratch, value) - value }
 }
+
+macro_rules! define_block_scan {
+    (
+        $inclusive:ident,
+        $exclusive:ident,
+        $ty:ty,
+        $identity:expr,
+        $lhs:ident,
+        $rhs:ident,
+        $combine:expr
+    ) => {
+        #[inline(always)]
+        pub unsafe fn $inclusive(scratch: *mut $ty, value: $ty) -> $ty {
+            let rank = this_thread_block().thread_rank();
+            let size = this_thread_block().size();
+            unsafe { scratch.add(rank as usize).write(value) };
+            workgroup_barrier();
+
+            let mut offset = 1u32;
+            while offset < size {
+                let $rhs = if rank >= offset {
+                    unsafe { scratch.add((rank - offset) as usize).read() }
+                } else {
+                    $identity
+                };
+                workgroup_barrier();
+                if rank >= offset {
+                    let slot = unsafe { scratch.add(rank as usize) };
+                    let $lhs = unsafe { slot.read() };
+                    unsafe { slot.write($combine) };
+                }
+                workgroup_barrier();
+                offset <<= 1;
+            }
+
+            let result = unsafe { scratch.add(rank as usize).read() };
+            workgroup_barrier();
+            result
+        }
+
+        #[inline(always)]
+        pub unsafe fn $exclusive(scratch: *mut $ty, value: $ty) -> $ty {
+            let _ = unsafe { $inclusive(scratch, value) };
+            let rank = this_thread_block().thread_rank();
+            let result = if rank == 0 {
+                $identity
+            } else {
+                unsafe { scratch.add((rank - 1) as usize).read() }
+            };
+            workgroup_barrier();
+            result
+        }
+    };
+}
+
+define_block_scan!(
+    block_scan_inclusive_add_u64,
+    block_scan_exclusive_add_u64,
+    u64,
+    0,
+    lhs,
+    rhs,
+    lhs.wrapping_add(rhs)
+);
+define_block_scan!(
+    block_scan_inclusive_add_i64,
+    block_scan_exclusive_add_i64,
+    i64,
+    0,
+    lhs,
+    rhs,
+    lhs.wrapping_add(rhs)
+);
+define_block_scan!(
+    block_scan_inclusive_add_f64,
+    block_scan_exclusive_add_f64,
+    f64,
+    0.0,
+    lhs,
+    rhs,
+    lhs + rhs
+);
+define_block_scan!(
+    block_scan_inclusive_min_u32,
+    block_scan_exclusive_min_u32,
+    u32,
+    u32::MAX,
+    lhs,
+    rhs,
+    if lhs < rhs { lhs } else { rhs }
+);
+define_block_scan!(
+    block_scan_inclusive_min_i32,
+    block_scan_exclusive_min_i32,
+    i32,
+    i32::MAX,
+    lhs,
+    rhs,
+    if lhs < rhs { lhs } else { rhs }
+);
+define_block_scan!(
+    block_scan_inclusive_min_f32,
+    block_scan_exclusive_min_f32,
+    f32,
+    f32::INFINITY,
+    lhs,
+    rhs,
+    if lhs < rhs { lhs } else { rhs }
+);
+define_block_scan!(
+    block_scan_inclusive_min_u64,
+    block_scan_exclusive_min_u64,
+    u64,
+    u64::MAX,
+    lhs,
+    rhs,
+    if lhs < rhs { lhs } else { rhs }
+);
+define_block_scan!(
+    block_scan_inclusive_min_i64,
+    block_scan_exclusive_min_i64,
+    i64,
+    i64::MAX,
+    lhs,
+    rhs,
+    if lhs < rhs { lhs } else { rhs }
+);
+define_block_scan!(
+    block_scan_inclusive_min_f64,
+    block_scan_exclusive_min_f64,
+    f64,
+    f64::INFINITY,
+    lhs,
+    rhs,
+    if lhs < rhs { lhs } else { rhs }
+);
+define_block_scan!(
+    block_scan_inclusive_max_u32,
+    block_scan_exclusive_max_u32,
+    u32,
+    u32::MIN,
+    lhs,
+    rhs,
+    if lhs > rhs { lhs } else { rhs }
+);
+define_block_scan!(
+    block_scan_inclusive_max_i32,
+    block_scan_exclusive_max_i32,
+    i32,
+    i32::MIN,
+    lhs,
+    rhs,
+    if lhs > rhs { lhs } else { rhs }
+);
+define_block_scan!(
+    block_scan_inclusive_max_f32,
+    block_scan_exclusive_max_f32,
+    f32,
+    f32::NEG_INFINITY,
+    lhs,
+    rhs,
+    if lhs > rhs { lhs } else { rhs }
+);
+define_block_scan!(
+    block_scan_inclusive_max_u64,
+    block_scan_exclusive_max_u64,
+    u64,
+    u64::MIN,
+    lhs,
+    rhs,
+    if lhs > rhs { lhs } else { rhs }
+);
+define_block_scan!(
+    block_scan_inclusive_max_i64,
+    block_scan_exclusive_max_i64,
+    i64,
+    i64::MIN,
+    lhs,
+    rhs,
+    if lhs > rhs { lhs } else { rhs }
+);
+define_block_scan!(
+    block_scan_inclusive_max_f64,
+    block_scan_exclusive_max_f64,
+    f64,
+    f64::NEG_INFINITY,
+    lhs,
+    rhs,
+    if lhs > rhs { lhs } else { rhs }
+);
+define_block_scan!(
+    block_scan_inclusive_and_u32,
+    block_scan_exclusive_and_u32,
+    u32,
+    u32::MAX,
+    lhs,
+    rhs,
+    lhs & rhs
+);
+define_block_scan!(
+    block_scan_inclusive_and_i32,
+    block_scan_exclusive_and_i32,
+    i32,
+    -1,
+    lhs,
+    rhs,
+    lhs & rhs
+);
+define_block_scan!(
+    block_scan_inclusive_and_u64,
+    block_scan_exclusive_and_u64,
+    u64,
+    u64::MAX,
+    lhs,
+    rhs,
+    lhs & rhs
+);
+define_block_scan!(
+    block_scan_inclusive_and_i64,
+    block_scan_exclusive_and_i64,
+    i64,
+    -1,
+    lhs,
+    rhs,
+    lhs & rhs
+);
+define_block_scan!(
+    block_scan_inclusive_or_u32,
+    block_scan_exclusive_or_u32,
+    u32,
+    0,
+    lhs,
+    rhs,
+    lhs | rhs
+);
+define_block_scan!(
+    block_scan_inclusive_or_i32,
+    block_scan_exclusive_or_i32,
+    i32,
+    0,
+    lhs,
+    rhs,
+    lhs | rhs
+);
+define_block_scan!(
+    block_scan_inclusive_or_u64,
+    block_scan_exclusive_or_u64,
+    u64,
+    0,
+    lhs,
+    rhs,
+    lhs | rhs
+);
+define_block_scan!(
+    block_scan_inclusive_or_i64,
+    block_scan_exclusive_or_i64,
+    i64,
+    0,
+    lhs,
+    rhs,
+    lhs | rhs
+);
+define_block_scan!(
+    block_scan_inclusive_xor_u32,
+    block_scan_exclusive_xor_u32,
+    u32,
+    0,
+    lhs,
+    rhs,
+    lhs ^ rhs
+);
+define_block_scan!(
+    block_scan_inclusive_xor_i32,
+    block_scan_exclusive_xor_i32,
+    i32,
+    0,
+    lhs,
+    rhs,
+    lhs ^ rhs
+);
+define_block_scan!(
+    block_scan_inclusive_xor_u64,
+    block_scan_exclusive_xor_u64,
+    u64,
+    0,
+    lhs,
+    rhs,
+    lhs ^ rhs
+);
+define_block_scan!(
+    block_scan_inclusive_xor_i64,
+    block_scan_exclusive_xor_i64,
+    i64,
+    0,
+    lhs,
+    rhs,
+    lhs ^ rhs
+);
 
 #[inline(always)]
 pub unsafe fn atomic_add_u32(ptr: *mut u32, value: u32) -> u32 {

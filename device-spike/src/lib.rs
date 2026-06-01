@@ -467,6 +467,141 @@ pub unsafe extern "C" fn block_collectives_probe(
     }
 }
 
+// rocm-oxide: len(out)=36
+#[kernel]
+pub unsafe extern "C" fn block_collectives_ext_probe(
+    out: gpu::DeviceSliceMut<u64>,
+    n: usize,
+    block_x: u32,
+) {
+    let block = gpu::this_thread_block();
+    let rank = block.thread_rank();
+    let i = gpu::global_id_x();
+    let active = i < n;
+    let lane = rank as u64;
+    let value = lane + 1;
+    let wide = if active { (1u64 << 40) + value } else { 0 };
+    let signed = if active {
+        -((1i64 << 33) + value as i64)
+    } else {
+        0
+    };
+    let fvalue = if active { value as f64 * 0.25 } else { 0.0 };
+    let bit = if rank < 64 { 1u64 << rank } else { 0 };
+    let descending = if active {
+        block_x as u64 - lane
+    } else {
+        u64::MAX
+    };
+    let scratch_u64 = unsafe { gpu::DynamicSharedMem::<u8>::offset(0).cast::<u64>() };
+    let scratch_i64 = unsafe {
+        gpu::DynamicSharedMem::<u8>::offset(block_x as usize * core::mem::size_of::<u64>())
+            .cast::<i64>()
+    };
+    let scratch_f64 = unsafe {
+        gpu::DynamicSharedMem::<u8>::offset(
+            block_x as usize * (core::mem::size_of::<u64>() + core::mem::size_of::<i64>()),
+        )
+        .cast::<f64>()
+    };
+
+    let add_u64 = unsafe { block.reduce_add_u64(scratch_u64, wide) };
+    let add_i64 = unsafe { block.reduce_add_i64(scratch_i64, signed) };
+    let add_f64 = unsafe { block.reduce_add_f64(scratch_f64, fvalue) };
+    let min_u64 = unsafe { block.reduce_min_u64(scratch_u64, if active { wide } else { u64::MAX }) };
+    let max_u64 = unsafe { block.reduce_max_u64(scratch_u64, wide) };
+    let min_i64 = unsafe { block.reduce_min_i64(scratch_i64, if active { signed } else { i64::MAX }) };
+    let max_i64 = unsafe { block.reduce_max_i64(scratch_i64, if active { signed } else { i64::MIN }) };
+    let min_f64 = unsafe {
+        block.reduce_min_f64(
+            scratch_f64,
+            if active { fvalue } else { f64::INFINITY },
+        )
+    };
+    let max_f64 = unsafe {
+        block.reduce_max_f64(
+            scratch_f64,
+            if active {
+                fvalue
+            } else {
+                f64::NEG_INFINITY
+            },
+        )
+    };
+    let and_u64 = unsafe { block.reduce_and_u64(scratch_u64, if active { !bit } else { u64::MAX }) };
+    let or_u64 = unsafe { block.reduce_or_u64(scratch_u64, if active { bit } else { 0 }) };
+    let xor_u64 = unsafe { block.reduce_xor_u64(scratch_u64, if active { bit } else { 0 }) };
+    let and_i64 = unsafe { block.reduce_and_i64(scratch_i64, if active { !(bit as i64) } else { -1 }) };
+    let or_i64 = unsafe { block.reduce_or_i64(scratch_i64, if active { bit as i64 } else { 0 }) };
+    let xor_i64 = unsafe { block.reduce_xor_i64(scratch_i64, if active { bit as i64 } else { 0 }) };
+
+    let scan_add_u64_inclusive = unsafe { block.scan_inclusive_add_u64(scratch_u64, wide) };
+    let scan_add_u64_exclusive = unsafe { block.scan_exclusive_add_u64(scratch_u64, wide) };
+    let scan_add_f64_inclusive = unsafe { block.scan_inclusive_add_f64(scratch_f64, fvalue) };
+    let scan_add_f64_exclusive = unsafe { block.scan_exclusive_add_f64(scratch_f64, fvalue) };
+    let scan_min_u64_inclusive =
+        unsafe { block.scan_inclusive_min_u64(scratch_u64, descending) };
+    let scan_min_u64_exclusive =
+        unsafe { block.scan_exclusive_min_u64(scratch_u64, descending) };
+    let scan_max_u64_inclusive = unsafe { block.scan_inclusive_max_u64(scratch_u64, value) };
+    let scan_max_u64_exclusive = unsafe { block.scan_exclusive_max_u64(scratch_u64, value) };
+    let scan_or_u64_inclusive = unsafe { block.scan_inclusive_or_u64(scratch_u64, bit) };
+    let scan_or_u64_exclusive = unsafe { block.scan_exclusive_or_u64(scratch_u64, bit) };
+    let scan_xor_u64_inclusive = unsafe { block.scan_inclusive_xor_u64(scratch_u64, bit) };
+    let scan_xor_u64_exclusive = unsafe { block.scan_exclusive_xor_u64(scratch_u64, bit) };
+    let scan_and_u64_inclusive = unsafe { block.scan_inclusive_and_u64(scratch_u64, !bit) };
+    let scan_and_u64_exclusive = unsafe { block.scan_exclusive_and_u64(scratch_u64, !bit) };
+
+    if rank == 0 {
+        unsafe {
+            out.write_unchecked(0, add_u64);
+            out.write_unchecked(1, add_i64 as u64);
+            out.write_unchecked(2, add_f64.to_bits());
+            out.write_unchecked(3, min_u64);
+            out.write_unchecked(4, max_u64);
+            out.write_unchecked(5, min_i64 as u64);
+            out.write_unchecked(6, max_i64 as u64);
+            out.write_unchecked(7, min_f64.to_bits());
+            out.write_unchecked(8, max_f64.to_bits());
+            out.write_unchecked(9, and_u64);
+            out.write_unchecked(10, or_u64);
+            out.write_unchecked(11, xor_u64);
+            out.write_unchecked(12, and_i64 as u64);
+            out.write_unchecked(13, or_i64 as u64);
+            out.write_unchecked(14, xor_i64 as u64);
+        }
+    }
+    if rank == 7 {
+        unsafe {
+            out.write_unchecked(15, scan_add_u64_inclusive);
+            out.write_unchecked(16, scan_add_u64_exclusive);
+            out.write_unchecked(17, scan_add_f64_inclusive.to_bits());
+            out.write_unchecked(18, scan_add_f64_exclusive.to_bits());
+            out.write_unchecked(19, scan_min_u64_inclusive);
+            out.write_unchecked(20, scan_min_u64_exclusive);
+            out.write_unchecked(21, scan_max_u64_inclusive);
+            out.write_unchecked(22, scan_max_u64_exclusive);
+            out.write_unchecked(23, scan_or_u64_inclusive);
+            out.write_unchecked(24, scan_or_u64_exclusive);
+            out.write_unchecked(25, scan_xor_u64_inclusive);
+            out.write_unchecked(26, scan_xor_u64_exclusive);
+            out.write_unchecked(27, scan_and_u64_inclusive);
+            out.write_unchecked(28, scan_and_u64_exclusive);
+        }
+    }
+    if rank == block_x - 1 {
+        unsafe {
+            out.write_unchecked(29, scan_add_u64_inclusive);
+            out.write_unchecked(30, scan_add_u64_exclusive);
+            out.write_unchecked(31, scan_min_u64_inclusive);
+            out.write_unchecked(32, scan_min_u64_exclusive);
+            out.write_unchecked(33, scan_or_u64_inclusive);
+            out.write_unchecked(34, scan_or_u64_exclusive);
+            out.write_unchecked(35, 1);
+        }
+    }
+}
+
 // rocm-oxide: len(out)=6
 #[kernel]
 pub unsafe extern "C" fn debug_helpers_probe(out: gpu::DeviceSliceMut<u32>) {

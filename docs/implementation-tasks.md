@@ -57,7 +57,7 @@ features on top of stronger contracts.
           `f32`
     - [x] broaden block collectives to min/max/bitwise reductions over the
           current `u32`/`i32`/`f32` scalar matrix
-    - [ ] broaden block collectives to `u64`/`i64`/`f64` and additional scan
+    - [x] broaden block collectives to `u64`/`i64`/`f64` and additional scan
           operators
     - [x] add smoke-safe debug helpers for dispatch id, program counter, sleep,
           assert/trap, and breakpoint entry points

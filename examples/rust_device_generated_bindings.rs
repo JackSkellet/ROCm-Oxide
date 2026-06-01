@@ -231,6 +231,60 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             .collect::<Vec<_>>()
     );
 
+    let collective_ext_out = DeviceBuffer::<u64>::new(36)?;
+    unsafe {
+        kernels.block_collectives_ext_probe(
+            LaunchConfig::for_num_elems_with_block_size(collective_n, collective_block_x)
+                .with_shared_mem_bytes(collective_block_x * 24),
+            &collective_ext_out,
+            collective_n,
+            collective_block_x,
+        )?;
+    }
+    rocm_oxide::hip::synchronize()?;
+    let collective_ext = collective_ext_out.copy_to_vec()?;
+    let wide_base = 1u64 << 40;
+    let block_sum = collective_block_x as u64 * (collective_block_x as u64 + 1) / 2;
+    let wide_sum = wide_base * collective_block_x as u64 + block_sum;
+    let signed_sum = -((1i64 << 33) * collective_block_x as i64 + block_sum as i64);
+    let lane_mask = (1u64 << collective_block_x) - 1;
+    assert_eq!(collective_ext[0], wide_sum);
+    assert_eq!(collective_ext[1], signed_sum as u64);
+    assert_eq!(f64::from_bits(collective_ext[2]), 132.0);
+    assert_eq!(collective_ext[3], wide_base + 1);
+    assert_eq!(collective_ext[4], wide_base + collective_block_x as u64);
+    assert_eq!(collective_ext[5], (-((1i64 << 33) + 32)) as u64);
+    assert_eq!(collective_ext[6], (-((1i64 << 33) + 1)) as u64);
+    assert_eq!(f64::from_bits(collective_ext[7]), 0.25);
+    assert_eq!(f64::from_bits(collective_ext[8]), 8.0);
+    assert_eq!(collective_ext[9], !lane_mask);
+    assert_eq!(collective_ext[10], lane_mask);
+    assert_eq!(collective_ext[11], lane_mask);
+    assert_eq!(collective_ext[12], !lane_mask);
+    assert_eq!(collective_ext[13], lane_mask);
+    assert_eq!(collective_ext[14], lane_mask);
+    assert_eq!(collective_ext[15], wide_base * 8 + 36);
+    assert_eq!(collective_ext[16], wide_base * 7 + 28);
+    assert_eq!(f64::from_bits(collective_ext[17]), 9.0);
+    assert_eq!(f64::from_bits(collective_ext[18]), 7.0);
+    assert_eq!(collective_ext[19], 25);
+    assert_eq!(collective_ext[20], 26);
+    assert_eq!(collective_ext[21], 8);
+    assert_eq!(collective_ext[22], 7);
+    assert_eq!(collective_ext[23], 0xff);
+    assert_eq!(collective_ext[24], 0x7f);
+    assert_eq!(collective_ext[25], 0xff);
+    assert_eq!(collective_ext[26], 0x7f);
+    assert_eq!(collective_ext[27], !0xff);
+    assert_eq!(collective_ext[28], !0x7f);
+    assert_eq!(collective_ext[29], wide_sum);
+    assert_eq!(collective_ext[30], wide_base * 31 + 496);
+    assert_eq!(collective_ext[31], 1);
+    assert_eq!(collective_ext[32], 2);
+    assert_eq!(collective_ext[33], lane_mask);
+    assert_eq!(collective_ext[34], (1u64 << (collective_block_x - 1)) - 1);
+    assert_eq!(collective_ext[35], 1);
+
     let debug_out = DeviceBuffer::<u32>::new(6)?;
     unsafe {
         kernels.debug_helpers_probe(LaunchConfig::for_num_elems(1), &debug_out)?;

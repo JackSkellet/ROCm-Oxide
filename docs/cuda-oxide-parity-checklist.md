@@ -185,7 +185,7 @@ Primary upstream reference:
   - [x] scratch-backed block add reductions/scans over `u32`, `i32`, and `f32`
   - [x] broader block collective min/max/bitwise reductions over the current
         `u32`/`i32`/`f32` scalar matrix
-  - [ ] broader block collective `u64`/`i64`/`f64` support and additional scan
+  - [x] broader block collective `u64`/`i64`/`f64` support and additional scan
         operators
   - [x] smoke-safe debug helpers for dispatch id, program counter, sleep,
         assert/trap, and breakpoint entry points
