@@ -25,14 +25,24 @@ scripts/verify.sh --full
 All profiles write logs and artifacts under
 `target/production-readiness/`.
 
-The offline profile covers:
+The host-only CI profile is:
+
+```bash
+scripts/verify.sh --host-ci
+```
+
+It covers:
 
 - formatting checks;
 - verification script syntax;
+- cargo package dry-run coverage;
+- proc-macro, build-tool, and cargo-wrapper tests that do not need ROCm.
+
+The ROCm offline profile adds:
+
 - documentation generation with `cargo doc --no-deps`;
 - strict `cargo clippy --all-targets` warnings-as-errors coverage;
-- cargo package dry-run coverage;
-- proc-macro, build-tool, and cargo-wrapper tests that do not need a live GPU.
+- root crate build-script coverage without running GPU examples.
 
 The quick profile covers:
 
@@ -59,11 +69,11 @@ verification should avoid relying on default test parallelism.
 
 Detailed promotion rules are captured in [CI and release gates](release-gates.md).
 
-The standard GitHub Actions workflow runs `scripts/verify.sh --offline` on
-pull requests and pushes to `main`.
+The standard GitHub Actions workflow runs `scripts/verify.sh --host-ci` on pull
+requests and pushes to `main`.
 
-The manual GPU workflow runs quick and full verification on self-hosted Linux
-ROCm runners labeled:
+The manual GPU workflow runs the ROCm offline gate plus quick and full
+verification on self-hosted Linux ROCm runners labeled:
 
 - `self-hosted`, `linux`, `rocm`, `gfx1100`;
 - `self-hosted`, `linux`, `rocm`, `gfx1201`.

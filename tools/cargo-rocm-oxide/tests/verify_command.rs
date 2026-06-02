@@ -89,7 +89,7 @@ fn help_lists_verify_command() {
     );
     let stdout = String::from_utf8_lossy(&output.stdout);
     assert!(
-        stdout.contains("cargo rocm-oxide verify [--offline|--quick|--full]"),
+        stdout.contains("cargo rocm-oxide verify [--host-ci|--offline|--quick|--full]"),
         "help output did not list verify command:\n{stdout}"
     );
 }

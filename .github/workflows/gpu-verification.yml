@@ -4,6 +4,35 @@ on:
   workflow_dispatch:
 
 jobs:
+  rocm-offline-quality-gate:
+    name: ROCm offline quality gate
+    runs-on:
+      - self-hosted
+      - linux
+      - rocm
+      - gfx1201
+    timeout-minutes: 60
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install Rust toolchain
+        run: rustup toolchain install nightly --component rust-src --component clippy --component rustfmt
+
+      - name: Show Rust toolchain
+        run: rustup show
+
+      - name: Run ROCm offline verification
+        run: scripts/verify.sh --offline
+
+      - name: Upload production readiness artifacts
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: production-readiness-rocm-offline
+          path: target/production-readiness
+          if-no-files-found: ignore
+
   gpu-production-gate:
     name: ${{ matrix.gpu_arch }} ${{ matrix.profile }} gate
     runs-on:

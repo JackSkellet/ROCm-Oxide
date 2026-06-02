@@ -5,7 +5,10 @@ ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$ROOT"
 
 PROFILE="full"
-if [[ "${1:-}" == "--offline" ]]; then
+if [[ "${1:-}" == "--host-ci" ]]; then
+  PROFILE="host-ci"
+  shift
+elif [[ "${1:-}" == "--offline" ]]; then
   PROFILE="offline"
   shift
 elif [[ "${1:-}" == "--quick" ]]; then
@@ -16,13 +19,14 @@ elif [[ "${1:-}" == "--full" ]]; then
   shift
 elif [[ "${1:-}" == "--help" || "${1:-}" == "-h" ]]; then
   cat <<'USAGE'
-Usage: scripts/verify.sh [--offline|--quick|--full]
+Usage: scripts/verify.sh [--host-ci|--offline|--quick|--full]
 
 Runs the ROCm-Oxide production verification gate.
 
-  --offline  CPU-only formatting, docs, clippy, package, and tool-crate tests.
-  --quick  Unit/tool tests plus core GPU smoke coverage.
-  --full   Full local gate, including heavier examples and visual artifacts.
+  --host-ci  Host-only GitHub CI gate; does not build the root ROCm crate.
+  --offline  ROCm-installed docs, clippy, package, and tool-crate tests.
+  --quick    Unit/tool tests plus core GPU smoke coverage.
+  --full     Full local gate, including heavier examples and visual artifacts.
 
 Artifacts are written under target/production-readiness/.
 USAGE
@@ -56,13 +60,23 @@ run cargo test --manifest-path crates/rocm-oxide-kernel/Cargo.toml -- --test-thr
 run cargo test --manifest-path tools/rocm-oxide-build/Cargo.toml -- --test-threads=1
 run cargo test --manifest-path tools/cargo-rocm-oxide/Cargo.toml -- --test-threads=1
 
-if [[ "$PROFILE" == "offline" ]]; then
+run_host_ci_checks() {
   run cargo fmt --check
   run bash -n scripts/verify.sh
   run bash -n scripts/consumer-smoke.sh
+  run cargo package --allow-dirty --no-verify
+}
+
+if [[ "$PROFILE" == "host-ci" ]]; then
+  run_host_ci_checks
+  printf '\nverification profile `%s` passed; artifacts: %s\n' "$PROFILE" "$ARTIFACT_DIR"
+  exit 0
+fi
+
+if [[ "$PROFILE" == "offline" ]]; then
+  run_host_ci_checks
   run cargo doc --no-deps
   run cargo clippy --all-targets -- -D warnings -A clippy::too_many_arguments
-  run cargo package --allow-dirty --no-verify
   printf '\nverification profile `%s` passed; artifacts: %s\n' "$PROFILE" "$ARTIFACT_DIR"
   exit 0
 fi

@@ -166,6 +166,7 @@ cargo run --manifest-path tools/cargo-rocm-oxide/Cargo.toml -- rocm-oxide inspec
 cargo run --manifest-path tools/cargo-rocm-oxide/Cargo.toml -- rocm-oxide run --example rust_device_generated_bindings
 cargo run --manifest-path tools/cargo-rocm-oxide/Cargo.toml -- rocm-oxide pipeline
 cargo run --manifest-path tools/cargo-rocm-oxide/Cargo.toml -- rocm-oxide profile
+cargo run --manifest-path tools/cargo-rocm-oxide/Cargo.toml -- rocm-oxide verify --host-ci
 cargo run --manifest-path tools/cargo-rocm-oxide/Cargo.toml -- rocm-oxide verify --offline
 cargo run --manifest-path tools/cargo-rocm-oxide/Cargo.toml -- rocm-oxide verify --quick
 ```

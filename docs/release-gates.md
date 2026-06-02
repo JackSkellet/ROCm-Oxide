@@ -5,15 +5,28 @@ artifacts, not on a single demo run.
 
 ## Pull Request Gate
 
-Every pull request must pass the offline production gate:
+Every pull request must pass the host-only production gate:
+
+```bash
+scripts/verify.sh --host-ci
+```
+
+This gate runs formatting, shell syntax checks, a cargo package dry-run, and
+CPU-only Rust tests for the proc macro, build tool, and cargo wrapper. It must
+not require ROCm tools, ROCm libraries, or a visible ROCm GPU.
+
+## ROCm Offline Quality Gate
+
+Before tagging, run the ROCm-installed offline gate:
 
 ```bash
 scripts/verify.sh --offline
 ```
 
-This gate runs formatting, shell syntax checks, documentation generation,
-strict clippy, a cargo package dry-run, and CPU-only Rust tests for the proc
-macro, build tool, and cargo wrapper. It must not require a visible ROCm GPU.
+This gate adds documentation generation and strict clippy for the root crate.
+It requires the ROCm toolchain and libraries used by `build.rs`, and it needs
+either a visible ROCm GPU or `ROCM_OXIDE_ARCH=gfx...` so device artifacts can be
+generated without guessing an architecture.
 
 ## GPU Promotion Gate
 
@@ -76,7 +89,8 @@ Before a tagged release:
 
 ## Failure Policy
 
-Offline failures block pull requests. Quick GPU failures block runtime,
-compiler, generated-binding, and library-interoperability promotion. Full GPU
-failures block releases unless the failure is documented as an accepted known
-limitation with an owner and follow-up task.
+Host-only CI failures block pull requests. ROCm offline failures block tags.
+Quick GPU failures block runtime, compiler, generated-binding, and
+library-interoperability promotion. Full GPU failures block releases unless the
+failure is documented as an accepted known limitation with an owner and
+follow-up task.

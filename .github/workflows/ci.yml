@@ -20,5 +20,5 @@ jobs:
       - name: Show Rust toolchain
         run: rustup show
 
-      - name: Run offline verification
-        run: scripts/verify.sh --offline
+      - name: Run host-only verification
+        run: scripts/verify.sh --host-ci

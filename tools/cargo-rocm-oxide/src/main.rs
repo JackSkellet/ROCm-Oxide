@@ -49,7 +49,7 @@ fn print_help() {
     cargo rocm-oxide inspect [metadata.json]
     cargo rocm-oxide pipeline [--build]
     cargo rocm-oxide profile [--trace] [--name NAME] [--pmc COUNTER[,COUNTER...]] [--output-directory DIR] [-- <program> ...]
-    cargo rocm-oxide verify [--offline|--quick|--full]
+    cargo rocm-oxide verify [--host-ci|--offline|--quick|--full]
     cargo rocm-oxide new <path>"
     );
 }
