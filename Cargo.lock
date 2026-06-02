@@ -2277,8 +2277,10 @@ dependencies = [
  "font8x8",
  "gl",
  "image",
+ "libwayshot-xcap",
  "minifb",
  "sdl2",
+ "wayland-client 0.31.14",
  "xcap",
 ]
 

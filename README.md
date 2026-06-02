@@ -78,9 +78,10 @@ cargo run --example rust_device_generated_bindings
 ## Notable examples
 
 - **`spectral_lattice`**: interactive visual GPU workbench (multiple render/compute paths, GUI controls, headless frame export, CPU/OpenGL/Vulkan present paths)
-- **`matrix_lens`**: Vulkan-only pass-through lens demo that captures the
-  monitor region under the window and renders matrix/glass/thermal/xray effects
-  on the GPU
+- **`matrix_lens`**: Vulkan-only pass-through lens demo that reads the monitor
+  region under the window through a wlroots/GBM dma-buf path when available and
+  otherwise crops the latest desktop video-stream frame before rendering
+  matrix/glass/thermal/xray effects on the GPU
 - **`compiler_feature_lab`**: GUI for probing compiler/runtime/device feature slices
 - **`performance_probe`**: emits timing/resource snapshots and JSON benchmark output
 
@@ -110,9 +111,13 @@ on the GPU and composite the same interactive controls through a small textured
 overlay panel instead of reading the full frame back to the host every frame.
 The Vulkan overlay panel is rasterized on a bounded worker and presents the
 latest ready texture so CPU UI drawing does not block the GPU presentation path.
-`matrix_lens` is Vulkan-only and uses monitor-region capture keyed from the SDL
-window position, then uploads new capture frames asynchronously while the HIP
-kernel and Vulkan presenter keep rendering the latest available image.
+`matrix_lens` is Vulkan-only. On Wayland/wlroots it asks the compositor for the
+window-sized region at the SDL window position as a GBM dma-buf, imports that
+image into Vulkan, copies it into a HIP-imported Vulkan input buffer, and renders
+directly into the HIP-imported Vulkan output buffer before presentation. If the
+compositor or driver cannot provide that GPU path, the demo uses a persistent
+xcap video recorder and crops the newest streamed frame instead of issuing
+per-frame screenshots.
 
 ---
 
