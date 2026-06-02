@@ -1475,6 +1475,29 @@ impl VulkanPresenter {
             );
         }
 
+        // Composite UI in render-space before the frame blit so the visible
+        // controls stay aligned with SDL mouse coordinates after resizes.
+        let overlay_copy = vk::BufferImageCopy::default()
+            .buffer_offset(0)
+            .buffer_row_length(overlay_size.width as u32)
+            .buffer_image_height(overlay_size.height as u32)
+            .image_subresource(color_subresource_layers())
+            .image_offset(vk::Offset3D { x: 0, y: 0, z: 0 })
+            .image_extent(vk::Extent3D {
+                width: overlay_size.width as u32,
+                height: overlay_size.height as u32,
+                depth: 1,
+            });
+        unsafe {
+            self.device.cmd_copy_buffer_to_image(
+                self.command_buffer,
+                self.overlay_buffer,
+                self.frame_image,
+                vk::ImageLayout::TRANSFER_DST_OPTIMAL,
+                std::slice::from_ref(&overlay_copy),
+            );
+        }
+
         self.image_barrier(
             self.frame_image,
             vk::ImageLayout::TRANSFER_DST_OPTIMAL,
@@ -1528,27 +1551,6 @@ impl VulkanPresenter {
                 vk::ImageLayout::TRANSFER_DST_OPTIMAL,
                 std::slice::from_ref(&blit),
                 vk::Filter::LINEAR,
-            );
-        }
-
-        let overlay_copy = vk::BufferImageCopy::default()
-            .buffer_offset(0)
-            .buffer_row_length(overlay_size.width as u32)
-            .buffer_image_height(overlay_size.height as u32)
-            .image_subresource(color_subresource_layers())
-            .image_offset(vk::Offset3D { x: 0, y: 0, z: 0 })
-            .image_extent(vk::Extent3D {
-                width: overlay_size.width as u32,
-                height: overlay_size.height as u32,
-                depth: 1,
-            });
-        unsafe {
-            self.device.cmd_copy_buffer_to_image(
-                self.command_buffer,
-                self.overlay_buffer,
-                swapchain_image,
-                vk::ImageLayout::TRANSFER_DST_OPTIMAL,
-                std::slice::from_ref(&overlay_copy),
             );
         }
 
