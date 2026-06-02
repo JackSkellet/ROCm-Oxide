@@ -102,6 +102,8 @@ device-to-device into that shared buffer before Vulkan blits it to the swapchain
 the CPU-readback compatibility path. GL and Vulkan presentation keep the frame
 on the GPU and composite the same interactive controls through a small textured
 overlay panel instead of reading the full frame back to the host every frame.
+The Vulkan overlay panel is rasterized on a bounded worker and presents the
+latest ready texture so CPU UI drawing does not block the GPU presentation path.
 
 ---
 

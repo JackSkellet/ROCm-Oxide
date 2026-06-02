@@ -15,6 +15,8 @@ use std::ffi::{CStr, CString, c_int, c_uint, c_void};
 use std::os::fd::{FromRawFd, OwnedFd};
 use std::path::{Path, PathBuf};
 use std::ptr;
+use std::sync::mpsc::{self, Receiver, SyncSender, TryRecvError, TrySendError};
+use std::thread;
 use std::time::{Duration, Instant};
 
 mod generated {
@@ -137,6 +139,7 @@ struct PaletteSeed {
     source: String,
 }
 
+#[derive(Clone)]
 struct DemoState {
     mode: usize,
     speed: f32,
@@ -162,6 +165,7 @@ struct DemoState {
     save_requested: bool,
 }
 
+#[derive(Clone)]
 struct ResourceSnapshot {
     resource_line: String,
     launch_line: String,
@@ -256,6 +260,34 @@ struct OverlayFrame {
     pixels: Vec<u32>,
 }
 
+struct OverlayJob {
+    generation: u64,
+    frame: OverlayFrame,
+    state: DemoState,
+    resources: ResourceSnapshot,
+}
+
+struct OverlayResult {
+    generation: u64,
+    frame: OverlayFrame,
+    draw_ms: f64,
+}
+
+struct AsyncOverlayRenderer {
+    job_tx: SyncSender<OverlayJob>,
+    result_rx: Receiver<OverlayResult>,
+    current: OverlayFrame,
+    spare: Option<OverlayFrame>,
+    generation: u64,
+    pending_generation: Option<u64>,
+    last_draw_ms: f64,
+}
+
+struct QueuedGpuTiming {
+    start: Event,
+    stop: Event,
+}
+
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 struct RenderSize {
     width: usize,
@@ -333,8 +365,8 @@ impl OverlayFrame {
     }
 
     fn draw(&mut self, state: &DemoState, resources: &ResourceSnapshot) {
-        self.pixels.fill(0);
-        draw_overlay(&mut self.pixels, self.size, state, resources);
+        self.pixels.fill(overlay_panel_background_rgb());
+        draw_overlay_contents(&mut self.pixels, self.size, state, resources);
         for pixel in &mut self.pixels {
             if *pixel != 0 {
                 *pixel |= 0xff00_0000;
@@ -347,6 +379,147 @@ impl OverlayFrame {
             .len()
             .checked_mul(std::mem::size_of::<u32>())
             .ok_or_else(|| other_error("overlay byte length overflows usize"))
+    }
+}
+
+impl AsyncOverlayRenderer {
+    fn new(
+        render_size: RenderSize,
+        state: &DemoState,
+        resources: &ResourceSnapshot,
+    ) -> Result<Self, Box<dyn std::error::Error>> {
+        let (job_tx, job_rx) = mpsc::sync_channel::<OverlayJob>(1);
+        let (result_tx, result_rx) = mpsc::channel::<OverlayResult>();
+        let _ = thread::Builder::new()
+            .name("spectral-overlay".into())
+            .spawn(move || {
+                while let Ok(mut job) = job_rx.recv() {
+                    let draw_start = Instant::now();
+                    job.frame.resize(job.state.render_size);
+                    job.frame.draw(&job.state, &job.resources);
+                    let draw_ms = draw_start.elapsed().as_secs_f64() * 1000.0;
+                    if result_tx
+                        .send(OverlayResult {
+                            generation: job.generation,
+                            frame: job.frame,
+                            draw_ms,
+                        })
+                        .is_err()
+                    {
+                        break;
+                    }
+                }
+            })?;
+
+        let mut current = OverlayFrame::new(render_size);
+        let draw_start = Instant::now();
+        current.draw(state, resources);
+        let last_draw_ms = draw_start.elapsed().as_secs_f64() * 1000.0;
+        Ok(Self {
+            job_tx,
+            result_rx,
+            current,
+            spare: Some(OverlayFrame::new(render_size)),
+            generation: 0,
+            pending_generation: None,
+            last_draw_ms,
+        })
+    }
+
+    fn reset(&mut self, render_size: RenderSize, state: &DemoState, resources: &ResourceSnapshot) {
+        self.generation = self.generation.wrapping_add(1);
+        self.pending_generation = None;
+        self.drain_stale_results();
+        self.current.resize(render_size);
+        if let Some(spare) = &mut self.spare {
+            spare.resize(render_size);
+        }
+        let draw_start = Instant::now();
+        self.current.draw(state, resources);
+        self.last_draw_ms = draw_start.elapsed().as_secs_f64() * 1000.0;
+    }
+
+    fn schedule(&mut self, state: &DemoState, resources: &ResourceSnapshot) {
+        if self.pending_generation.is_some() {
+            return;
+        }
+        let mut frame = self
+            .spare
+            .take()
+            .unwrap_or_else(|| OverlayFrame::new(state.render_size));
+        frame.resize(state.render_size);
+        let generation = self.generation.wrapping_add(1);
+        let job = OverlayJob {
+            generation,
+            frame,
+            state: state.clone(),
+            resources: resources.clone(),
+        };
+        match self.job_tx.try_send(job) {
+            Ok(()) => {
+                self.generation = generation;
+                self.pending_generation = Some(generation);
+            }
+            Err(TrySendError::Full(job)) => {
+                self.spare = Some(job.frame);
+            }
+            Err(TrySendError::Disconnected(job)) => {
+                self.spare = Some(job.frame);
+            }
+        }
+    }
+
+    fn poll_ready(&mut self) {
+        loop {
+            match self.result_rx.try_recv() {
+                Ok(result) => self.accept_result(result),
+                Err(TryRecvError::Empty) => break,
+                Err(TryRecvError::Disconnected) => break,
+            }
+        }
+    }
+
+    fn current(&self) -> &OverlayFrame {
+        &self.current
+    }
+
+    fn last_draw_ms(&self) -> f64 {
+        self.last_draw_ms
+    }
+
+    fn accept_result(&mut self, result: OverlayResult) {
+        let is_pending = self.pending_generation == Some(result.generation);
+        let is_current_generation = result.generation == self.generation;
+        if is_pending || is_current_generation {
+            let old = std::mem::replace(&mut self.current, result.frame);
+            self.spare = Some(old);
+            self.last_draw_ms = result.draw_ms;
+            if is_pending {
+                self.pending_generation = None;
+            }
+        } else if self.spare.is_none() {
+            self.spare = Some(result.frame);
+        }
+    }
+
+    fn drain_stale_results(&mut self) {
+        loop {
+            match self.result_rx.try_recv() {
+                Ok(result) => {
+                    if self.spare.is_none() {
+                        self.spare = Some(result.frame);
+                    }
+                }
+                Err(TryRecvError::Empty) => break,
+                Err(TryRecvError::Disconnected) => break,
+            }
+        }
+    }
+}
+
+impl QueuedGpuTiming {
+    fn elapsed_ms(&self) -> Result<f32, Box<dyn std::error::Error>> {
+        Ok(self.start.elapsed_ms_until(&self.stop)?)
     }
 }
 
@@ -692,7 +865,7 @@ fn run_vulkan_present(
     let mut presenter =
         VulkanPresenter::new(&sdl, buffers.size, state.present_scale, state.fps_limit)?;
     let mut events = sdl.event_pump().map_err(other_error)?;
-    let mut overlay = OverlayFrame::new(buffers.size);
+    let mut overlay_renderer = AsyncOverlayRenderer::new(buffers.size, &state, &resources)?;
     let start = Instant::now();
     let run_start = Instant::now();
     let mut last_fps = Instant::now();
@@ -722,9 +895,9 @@ fn run_vulkan_present(
         if state.render_size != buffers.size {
             buffers = DemoBuffers::new(state.render_size)?;
             resources = ResourceSnapshot::new(device, kernels, buffers.size.pixel_count())?;
-            overlay.resize(buffers.size);
             presenter.recreate_frame_resources(buffers.size, state.present_scale)?;
             state.status = format!("resolution set to {}", display_label(&state));
+            overlay_renderer.reset(buffers.size, &state, &resources);
         } else if state.present_scale != presenter.present_scale {
             presenter.recreate_frame_resources(buffers.size, state.present_scale)?;
             state.status = format!("present scale set to {}x", state.present_scale);
@@ -737,16 +910,20 @@ fn run_vulkan_present(
             }
         }
 
-        let (use_post, gpu_ms) = render_workload_timed(kernels, &buffers, &state)?;
+        overlay_renderer.poll_ready();
+        state.draw_ms = overlay_renderer.last_draw_ms();
+        overlay_renderer.schedule(&state, &resources);
+
+        let (use_post, gpu_timing) = render_workload_queued(kernels, &buffers, &state)?;
         last_use_post = use_post;
-        state.gpu_ms = gpu_ms;
         let source = display_source(&buffers, use_post);
-        let draw_start = Instant::now();
-        overlay.draw(&state, &resources);
-        state.draw_ms = draw_start.elapsed().as_secs_f64() * 1000.0;
-        let (interop_ms, present_ms) = presenter.present_device_frame(source, &overlay)?;
+        overlay_renderer.poll_ready();
+        state.draw_ms = overlay_renderer.last_draw_ms();
+        let (interop_ms, present_ms) =
+            presenter.present_device_frame(source, overlay_renderer.current())?;
         state.copy_ms = interop_ms;
         state.present_ms = present_ms;
+        state.gpu_ms = gpu_timing.elapsed_ms()?;
 
         if state.save_requested {
             let mut host_frame = PinnedHostBuffer::<u32>::new_zeroed(buffers.size.pixel_count())?;
@@ -1177,6 +1354,7 @@ impl VulkanPresenter {
         unsafe {
             source.copy_to_device_ptr(self.hip_mapped_ptr, source.len())?;
         }
+        Stream::null().synchronize()?;
         self.upload_overlay(overlay)?;
         let interop_ms = interop_start.elapsed().as_secs_f64() * 1000.0;
 
@@ -2602,6 +2780,20 @@ fn render_workload_timed(
     Ok((use_post, start.elapsed_ms_until(&stop)?))
 }
 
+fn render_workload_queued(
+    kernels: &generated::DeviceKernels,
+    buffers: &DemoBuffers,
+    state: &DemoState,
+) -> Result<(bool, QueuedGpuTiming), Box<dyn std::error::Error>> {
+    let stream = Stream::null();
+    let start = Event::new()?;
+    let stop = Event::new()?;
+    start.record(&stream)?;
+    let use_post = render_workload(kernels, buffers, state)?;
+    stop.record(&stream)?;
+    Ok((use_post, QueuedGpuTiming { start, stop }))
+}
+
 fn render_frame(
     kernels: &generated::DeviceKernels,
     buffers: &DemoBuffers,
@@ -3019,6 +3211,16 @@ fn draw_overlay(
     let scale = ui_scale(size);
     let panel_w = PANEL_W * scale;
     blend_rect(frame, size, 0, 0, panel_w, size.height, 0x071018, 224);
+    draw_overlay_contents(frame, size, state, resources);
+}
+
+fn draw_overlay_contents(
+    frame: &mut [u32],
+    size: RenderSize,
+    state: &DemoState,
+    resources: &ResourceSnapshot,
+) {
+    let scale = ui_scale(size);
     blend_rect(
         frame,
         size,
@@ -3310,6 +3512,10 @@ fn draw_overlay(
             (PANEL_W - 42) * scale,
         );
     }
+}
+
+fn overlay_panel_background_rgb() -> u32 {
+    blend(0, 0x071018, 224)
 }
 
 fn mode_detail(mode: usize) -> &'static str {
