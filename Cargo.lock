@@ -2279,9 +2279,13 @@ dependencies = [
  "image",
  "libwayshot-xcap",
  "minifb",
+ "pipewire",
+ "rand",
  "sdl2",
+ "serde",
  "wayland-client 0.31.14",
  "xcap",
+ "zbus",
 ]
 
 [[package]]

@@ -5,10 +5,31 @@ use libwayshot_xcap::WayshotConnection;
 use libwayshot_xcap::region::{
     EmbeddedRegion, LogicalRegion, Position, Region, Size as WayshotSize,
 };
+use pipewire::{
+    channel,
+    context::ContextRc,
+    keys::{MEDIA_CATEGORY, MEDIA_ROLE, MEDIA_TYPE},
+    main_loop::MainLoopRc,
+    properties,
+    spa::{
+        param::{
+            ParamType,
+            format::{FormatProperties, MediaSubtype, MediaType},
+            format_utils,
+            video::{VideoFormat, VideoInfoRaw},
+        },
+        pod::{self, Pod, serialize::PodSerializer},
+        utils::{Direction, Fraction, Rectangle, SpaTypes},
+    },
+    stream::{StreamFlags, StreamRc},
+};
 use rocm_oxide::{Device, DeviceBuffer, LaunchConfig, Stream};
 use sdl2::event::Event as SdlEvent;
 use sdl2::keyboard::Keycode;
+use serde::Deserialize;
+use std::collections::HashMap;
 use std::ffi::{CStr, CString, c_int, c_uint, c_void};
+use std::io::Cursor;
 use std::os::fd::{FromRawFd, IntoRawFd, OwnedFd};
 use std::path::PathBuf;
 use std::ptr;
@@ -20,6 +41,11 @@ use std::sync::{
 use std::thread;
 use std::time::{Duration, Instant};
 use xcap::{Frame as VideoFrame, Monitor, VideoRecorder};
+use zbus::{
+    Message,
+    blocking::{Connection as ZBusConnection, Proxy},
+    zvariant::{DeserializeDict, OwnedFd as ZbusOwnedFd, OwnedObjectPath, OwnedValue, Type, Value},
+};
 
 mod generated {
     include!(env!("ROCM_OXIDE_DEVICE_BINDINGS"));
@@ -86,6 +112,7 @@ mod generated {
 
 const DEFAULT_OUTPUT: &str = "target/matrix_lens.png";
 const DEFAULT_FPS_LIMIT: usize = 60;
+const DEFAULT_CAPTURE_WARMUP_TIMEOUT_MS: u64 = 30_000;
 const DEFAULT_DRM_RENDER_NODE: &str = "/dev/dri/renderD128";
 const HIP_EXTERNAL_MEMORY_HANDLE_TYPE_OPAQUE_FD: c_int = 1;
 const DRM_FORMAT_ARGB8888: u32 = fourcc(*b"AR24");
@@ -240,9 +267,78 @@ struct MonitorKey {
 struct ActiveVideoStream {
     key: MonitorKey,
     name: String,
-    recorder: VideoRecorder,
+    recorder: ActiveVideoRecorder,
     receiver: Receiver<VideoFrame>,
     latest_frame: Option<VideoFrame>,
+}
+
+enum ActiveVideoRecorder {
+    FixedPortal(FixedPortalVideoRecorder),
+    Xcap(VideoRecorder),
+}
+
+impl ActiveVideoRecorder {
+    fn start(&self) -> Result<(), Box<dyn std::error::Error>> {
+        match self {
+            Self::FixedPortal(recorder) => recorder.start(),
+            Self::Xcap(recorder) => {
+                recorder.start()?;
+                Ok(())
+            }
+        }
+    }
+
+    fn stop(&self) {
+        match self {
+            Self::FixedPortal(recorder) => recorder.stop(),
+            Self::Xcap(recorder) => {
+                let _ = recorder.stop();
+            }
+        }
+    }
+}
+
+struct FixedPortalVideoRecorder {
+    is_running: Arc<AtomicBool>,
+    active_sender: channel::Sender<bool>,
+}
+
+#[derive(Clone)]
+struct FixedPortalListenerData {
+    format: VideoInfoRaw,
+}
+
+#[derive(DeserializeDict, Type, Debug)]
+#[zvariant(signature = "dict")]
+struct PortalCreateSessionResponse {
+    session_handle: String,
+}
+
+#[derive(DeserializeDict, Type, Debug)]
+#[zvariant(signature = "dict")]
+struct PortalStartStream {
+    #[allow(dead_code)]
+    id: Option<String>,
+    #[allow(dead_code)]
+    position: Option<(i32, i32)>,
+    #[allow(dead_code)]
+    size: Option<(i32, i32)>,
+    #[allow(dead_code)]
+    source_type: Option<u32>,
+    #[allow(dead_code)]
+    mapping_id: Option<String>,
+}
+
+#[derive(DeserializeDict, Type, Debug)]
+#[zvariant(signature = "dict")]
+struct PortalStartResponse {
+    streams: Option<Vec<(u32, PortalStartStream)>>,
+    #[allow(dead_code)]
+    restore_token: Option<String>,
+}
+
+struct FixedPortalScreenCast {
+    conn: ZBusConnection,
 }
 
 struct GpuCaptureBackend {
@@ -411,6 +507,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let mut copy_ms = 0.0f64;
     let mut present_ms = 0.0f64;
     let mut frame_budget = args.frames.map(|frames| frames.max(1));
+    let capture_warmup_started = Instant::now();
+    let capture_warmup_timeout = capture_warmup_timeout();
 
     while frame_budget != Some(0) {
         let frame_start = Instant::now();
@@ -519,6 +617,24 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 Arc::clone(&running),
                 Arc::clone(&frozen),
             ));
+        }
+
+        if bounded_live_capture_pending(args.capture_mode, frame_budget, captures) {
+            if capture_warmup_started.elapsed() >= capture_warmup_timeout {
+                return Err(format!(
+                    "Matrix Lens capture: no live frames after {:.1}s; last status: {capture_status}",
+                    capture_warmup_timeout.as_secs_f64()
+                )
+                .into());
+            }
+            presenter.window.set_title(&format!(
+                "ROCm-Oxide Matrix Lens Vulkan | {} | {} | waiting for capture | {}",
+                MODES[mode],
+                args.capture_mode.label(),
+                capture_status,
+            ))?;
+            pace_frame(frame_start, args.fps_limit);
+            continue;
         }
 
         let frame_index = (start.elapsed().as_millis() / 16) as u32;
@@ -698,10 +814,10 @@ fn spawn_video_capture_thread(
             let request = *request.lock().expect("capture request mutex poisoned");
             let needs_new_stream = active_stream
                 .as_ref()
-                .is_none_or(|stream| !stream.covers(request));
+                .is_none_or(|stream| !stream.is_portal() && !stream.covers(request));
             if needs_new_stream {
                 if let Some(stream) = active_stream.take() {
-                    let _ = stream.recorder.stop();
+                    stream.recorder.stop();
                 }
                 {
                     let mut shared = shared.lock().expect("capture mutex poisoned");
@@ -767,33 +883,447 @@ fn spawn_video_capture_thread(
                     );
                 }
                 Err(err) => {
-                    if let Some(stream) = active_stream.take() {
-                        let _ = stream.recorder.stop();
+                    if active_stream
+                        .as_ref()
+                        .is_some_and(ActiveVideoStream::is_portal)
+                    {
+                        let mut shared = shared.lock().expect("capture mutex poisoned");
+                        shared.errors = shared.errors.wrapping_add(1);
+                        shared.status = format!("video stream kept previous frame: {err}");
+                        thread::sleep(Duration::from_millis(250));
+                    } else if let Some(stream) = active_stream.take() {
+                        stream.recorder.stop();
+                        fill_matrix_fallback(&mut local, size);
+                        let mut shared = shared.lock().expect("capture mutex poisoned");
+                        shared.pixels.copy_from_slice(&local);
+                        shared.sequence = shared.sequence.wrapping_add(1);
+                        shared.errors = shared.errors.wrapping_add(1);
+                        shared.status = format!("video stream fallback: {err}");
+                        fallback_is_current = true;
+                        thread::sleep(Duration::from_millis(250));
                     }
-                    fill_matrix_fallback(&mut local, size);
-                    let mut shared = shared.lock().expect("capture mutex poisoned");
-                    shared.pixels.copy_from_slice(&local);
-                    shared.sequence = shared.sequence.wrapping_add(1);
-                    shared.errors = shared.errors.wrapping_add(1);
-                    shared.status = format!("video stream fallback: {err}");
-                    fallback_is_current = true;
-                    thread::sleep(Duration::from_millis(250));
                 }
             }
             thread::sleep(Duration::from_millis(16));
         }
         if let Some(stream) = active_stream.take() {
-            let _ = stream.recorder.stop();
+            stream.recorder.stop();
         }
     })
+}
+
+impl FixedPortalVideoRecorder {
+    fn new(
+        fallback_key: MonitorKey,
+    ) -> Result<(Self, Receiver<VideoFrame>, MonitorKey), Box<dyn std::error::Error>> {
+        let (sender, receiver) = std::sync::mpsc::channel();
+        let (active_sender, active_receiver) = channel::channel();
+        let screen_cast = FixedPortalScreenCast::new()?;
+        let session = screen_cast.create_session()?;
+        screen_cast.select_sources(&session)?;
+        let response = screen_cast.start(&session)?;
+        let mut streams = response
+            .streams
+            .ok_or_else(|| other_error("portal screencast returned no streams"))?;
+        let (stream_id, stream_info) = streams
+            .drain(..)
+            .next()
+            .ok_or_else(|| other_error("portal screencast returned an empty stream list"))?;
+        let key = portal_stream_key(&stream_info).unwrap_or(fallback_key);
+        let pipewire_fd = screen_cast.open_pipewire_remote(&session)?;
+        let recorder = Self {
+            is_running: Arc::new(AtomicBool::new(false)),
+            active_sender,
+        };
+        recorder.spawn_pipewire_capturer(stream_id, active_receiver, sender, pipewire_fd);
+        Ok((recorder, receiver, key))
+    }
+
+    fn start(&self) -> Result<(), Box<dyn std::error::Error>> {
+        self.is_running.store(true, Ordering::Relaxed);
+        let _ = self.active_sender.send(true);
+        Ok(())
+    }
+
+    fn stop(&self) {
+        self.is_running.store(false, Ordering::Relaxed);
+        let _ = self.active_sender.send(false);
+    }
+
+    fn spawn_pipewire_capturer(
+        &self,
+        stream_id: u32,
+        active_receiver: channel::Receiver<bool>,
+        sender: std::sync::mpsc::Sender<VideoFrame>,
+        pipewire_fd: OwnedFd,
+    ) {
+        let is_running = Arc::clone(&self.is_running);
+        thread::spawn(move || {
+            if let Err(err) = run_pipewire_video_capture(
+                stream_id,
+                active_receiver,
+                sender,
+                is_running,
+                pipewire_fd,
+            ) {
+                eprintln!("Matrix Lens capture: PipeWire video stream stopped: {err}");
+            }
+        });
+    }
+}
+
+fn portal_stream_key(stream: &PortalStartStream) -> Option<MonitorKey> {
+    let (x, y) = stream.position?;
+    let (width, height) = stream.size?;
+    if width <= 0 || height <= 0 {
+        return None;
+    }
+    Some(MonitorKey {
+        id: 0,
+        x,
+        y,
+        width: width as u32,
+        height: height as u32,
+    })
+}
+
+impl FixedPortalScreenCast {
+    fn new() -> Result<Self, Box<dyn std::error::Error>> {
+        let conn = ZBusConnection::session()?;
+        Ok(Self { conn })
+    }
+
+    fn proxy(&self) -> Result<Proxy<'_>, Box<dyn std::error::Error>> {
+        Ok(Proxy::new(
+            &self.conn,
+            "org.freedesktop.portal.Desktop",
+            "/org/freedesktop/portal/desktop",
+            "org.freedesktop.portal.ScreenCast",
+        )?)
+    }
+
+    fn request_proxy(&self, handle_token: &str) -> Result<Proxy<'_>, Box<dyn std::error::Error>> {
+        let unique_identifier = self
+            .conn
+            .unique_name()
+            .ok_or_else(|| other_error("failed to get DBus unique name"))?
+            .trim_start_matches(':')
+            .replace('.', "_");
+        let path =
+            format!("/org/freedesktop/portal/desktop/request/{unique_identifier}/{handle_token}");
+        Ok(Proxy::new(
+            &self.conn,
+            "org.freedesktop.portal.Desktop",
+            path,
+            "org.freedesktop.portal.Request",
+        )?)
+    }
+
+    fn create_session(&self) -> Result<OwnedObjectPath, Box<dyn std::error::Error>> {
+        let handle_token = portal_token();
+        let session_handle_token = portal_token();
+        let request = self.request_proxy(&handle_token)?;
+        let mut response = request.receive_signal("Response")?;
+        let mut options = HashMap::new();
+        options.insert("handle_token", Value::from(&handle_token));
+        options.insert("session_handle_token", Value::from(&session_handle_token));
+        self.proxy()?.call_method("CreateSession", &(options))?;
+        let body: PortalCreateSessionResponse =
+            decode_portal_response(response.next().ok_or_else(|| {
+                other_error("portal did not respond to screencast CreateSession")
+            })?)?;
+        let session = OwnedObjectPath::try_from(body.session_handle)?;
+        Ok(session)
+    }
+
+    fn select_sources(&self, session: &OwnedObjectPath) -> Result<(), Box<dyn std::error::Error>> {
+        let handle_token = portal_token();
+        let request = self.request_proxy(&handle_token)?;
+        let mut response = request.receive_signal("Response")?;
+        let mut options = HashMap::new();
+        options.insert("handle_token", Value::from(&handle_token));
+        options.insert("types", Value::from(1_u32));
+        options.insert("multiple", Value::from(false));
+        options.insert("cursor_mode", Value::from(2_u32));
+        self.proxy()?
+            .call_method("SelectSources", &(session, options))?;
+        let _: HashMap<String, OwnedValue> =
+            decode_portal_response(response.next().ok_or_else(|| {
+                other_error("portal did not respond to screencast SelectSources")
+            })?)?;
+        Ok(())
+    }
+
+    fn start(
+        &self,
+        session: &OwnedObjectPath,
+    ) -> Result<PortalStartResponse, Box<dyn std::error::Error>> {
+        let handle_token = portal_token();
+        let request = self.request_proxy(&handle_token)?;
+        let mut response = request.receive_signal("Response")?;
+        let mut options = HashMap::new();
+        options.insert("handle_token", Value::from(&handle_token));
+        self.proxy()?
+            .call_method("Start", &(session, "", options))?;
+        decode_portal_response(
+            response
+                .next()
+                .ok_or_else(|| other_error("portal did not respond to screencast Start"))?,
+        )
+    }
+
+    fn open_pipewire_remote(
+        &self,
+        session: &OwnedObjectPath,
+    ) -> Result<OwnedFd, Box<dyn std::error::Error>> {
+        let options: HashMap<&str, Value<'_>> = HashMap::new();
+        let fd: ZbusOwnedFd = self
+            .proxy()?
+            .call("OpenPipeWireRemote", &(session, options))?;
+        Ok(fd.into())
+    }
+}
+
+fn run_pipewire_video_capture(
+    stream_id: u32,
+    active_receiver: channel::Receiver<bool>,
+    sender: std::sync::mpsc::Sender<VideoFrame>,
+    is_running: Arc<AtomicBool>,
+    pipewire_fd: OwnedFd,
+) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+    pipewire::init();
+    let main_loop = MainLoopRc::new(None)?;
+    let context = ContextRc::new(&main_loop, None)?;
+    let core = context.connect_fd_rc(pipewire_fd, None)?;
+    let user_data = FixedPortalListenerData {
+        format: Default::default(),
+    };
+    let stream = StreamRc::new(
+        core.clone(),
+        "ROCm-Oxide Matrix Lens",
+        properties::properties! {
+            *MEDIA_TYPE => "Video",
+            *MEDIA_CATEGORY => "Capture",
+            *MEDIA_ROLE => "Screen",
+        },
+    )?;
+    let _listener = stream
+        .add_local_listener_with_user_data(user_data)
+        .param_changed(|_, user_data, id, param| {
+            let Some(param) = param else {
+                return;
+            };
+            if id != ParamType::Format.as_raw() {
+                return;
+            }
+            let Ok((media_type, media_subtype)) = format_utils::parse_format(param) else {
+                return;
+            };
+            if media_type != MediaType::Video || media_subtype != MediaSubtype::Raw {
+                return;
+            }
+            let _ = user_data.format.parse(param);
+        })
+        .process(move |stream, user_data| {
+            let Some(mut buffer) = stream.dequeue_buffer() else {
+                return;
+            };
+            if !is_running.load(Ordering::Relaxed) {
+                return;
+            }
+            let datas = buffer.datas_mut();
+            if datas.is_empty() {
+                return;
+            }
+            let size = user_data.format.size();
+            let Some(frame_data) = datas[0].data() else {
+                return;
+            };
+            let rgba = match user_data.format.format() {
+                VideoFormat::RGB => {
+                    let mut out = vec![0; (size.width * size.height * 4) as usize];
+                    for (src, dst) in frame_data.chunks_exact(3).zip(out.chunks_exact_mut(4)) {
+                        dst[0] = src[0];
+                        dst[1] = src[1];
+                        dst[2] = src[2];
+                        dst[3] = 255;
+                    }
+                    out
+                }
+                VideoFormat::BGR => {
+                    let mut out = vec![0; (size.width * size.height * 4) as usize];
+                    for (src, dst) in frame_data.chunks_exact(3).zip(out.chunks_exact_mut(4)) {
+                        dst[0] = src[2];
+                        dst[1] = src[1];
+                        dst[2] = src[0];
+                        dst[3] = 255;
+                    }
+                    out
+                }
+                VideoFormat::RGBA | VideoFormat::RGBx => frame_data.to_vec(),
+                VideoFormat::BGRA | VideoFormat::BGRx => {
+                    let mut out = frame_data.to_vec();
+                    for px in out.chunks_exact_mut(4) {
+                        px.swap(0, 2);
+                    }
+                    out
+                }
+                VideoFormat::xRGB | VideoFormat::ARGB => {
+                    let mut out = frame_data.to_vec();
+                    for px in out.chunks_exact_mut(4) {
+                        px[0] = px[1];
+                        px[1] = px[2];
+                        px[2] = px[3];
+                        px[3] = 255;
+                    }
+                    out
+                }
+                VideoFormat::xBGR | VideoFormat::ABGR => {
+                    let mut out = frame_data.to_vec();
+                    for px in out.chunks_exact_mut(4) {
+                        let b = px[1];
+                        let g = px[2];
+                        let r = px[3];
+                        px[0] = r;
+                        px[1] = g;
+                        px[2] = b;
+                        px[3] = 255;
+                    }
+                    out
+                }
+                format => {
+                    eprintln!("Matrix Lens capture: unsupported PipeWire video format {format:?}");
+                    return;
+                }
+            };
+            let _ = sender.send(VideoFrame::new(size.width, size.height, rgba));
+        })
+        .register()?;
+    let obj = pod::object!(
+        SpaTypes::ObjectParamFormat,
+        ParamType::EnumFormat,
+        pod::property!(FormatProperties::MediaType, Id, MediaType::Video),
+        pod::property!(FormatProperties::MediaSubtype, Id, MediaSubtype::Raw),
+        pod::property!(
+            FormatProperties::VideoFormat,
+            Choice,
+            Enum,
+            Id,
+            VideoFormat::RGB,
+            VideoFormat::BGR,
+            VideoFormat::RGBA,
+            VideoFormat::BGRA,
+            VideoFormat::RGBx,
+            VideoFormat::BGRx,
+            VideoFormat::xRGB,
+            VideoFormat::xBGR,
+            VideoFormat::ARGB,
+            VideoFormat::ABGR,
+        ),
+        pod::property!(
+            FormatProperties::VideoSize,
+            Choice,
+            Range,
+            Rectangle,
+            Rectangle {
+                width: 128,
+                height: 128
+            },
+            Rectangle {
+                width: 1,
+                height: 1
+            },
+            Rectangle {
+                width: 4096,
+                height: 4096
+            }
+        ),
+        pod::property!(
+            FormatProperties::VideoFramerate,
+            Choice,
+            Range,
+            Fraction,
+            Fraction { num: 24, denom: 1 },
+            Fraction { num: 0, denom: 1 },
+            Fraction {
+                num: 1000,
+                denom: 1
+            }
+        ),
+    );
+    let values = PodSerializer::serialize(Cursor::new(Vec::new()), &pod::Value::Object(obj))?
+        .0
+        .into_inner();
+    let mut params = [Pod::from_bytes(&values).ok_or("failed to create PipeWire format pod")?];
+    stream.connect(
+        Direction::Input,
+        Some(stream_id),
+        StreamFlags::AUTOCONNECT | StreamFlags::MAP_BUFFERS,
+        &mut params,
+    )?;
+    stream.set_active(true)?;
+    let _attached = active_receiver.attach(main_loop.loop_(), {
+        move |active| {
+            let _ = stream.set_active(active);
+            if !active {
+                let _ = stream.flush(true);
+            }
+        }
+    });
+    main_loop.run();
+    Ok(())
+}
+
+fn decode_portal_response<T>(message: Message) -> Result<T, Box<dyn std::error::Error>>
+where
+    T: for<'de> Deserialize<'de> + Type,
+{
+    let (code, body): (u32, T) = message.body().deserialize()?;
+    match code {
+        0 => Ok(body),
+        1 => Err(other_error("portal request was canceled")),
+        code => Err(other_error(format!("portal returned response code {code}"))),
+    }
+}
+
+fn portal_token() -> String {
+    format!("rocm_oxide_{}", rand::random::<u32>())
+}
+
+fn is_wayland_session() -> bool {
+    std::env::var_os("XDG_SESSION_TYPE")
+        .is_some_and(|value| value.to_string_lossy().eq_ignore_ascii_case("wayland"))
+        || std::env::var_os("WAYLAND_DISPLAY").is_some_and(|value| {
+            value
+                .to_string_lossy()
+                .to_ascii_lowercase()
+                .contains("wayland")
+        })
 }
 
 impl ActiveVideoStream {
     fn new(request: CaptureRequest) -> Result<Self, Box<dyn std::error::Error>> {
         let monitor = monitor_for_request(request)?;
-        let key = monitor_key(&monitor)?;
-        let name = monitor.name().unwrap_or_else(|_| "monitor".to_string());
-        let (recorder, receiver) = monitor.video_recorder()?;
+        let fallback_key = monitor_key(&monitor)?;
+        let fallback_name = monitor.name().unwrap_or_else(|_| "monitor".to_string());
+        let (recorder, receiver, key, name) = if is_wayland_session() {
+            println!("Matrix Lens capture: requesting xdg-desktop-portal screencast chooser");
+            let (recorder, receiver, key) = FixedPortalVideoRecorder::new(fallback_key)?;
+            (
+                ActiveVideoRecorder::FixedPortal(recorder),
+                receiver,
+                key,
+                "desktop portal".to_string(),
+            )
+        } else {
+            let (recorder, receiver) = monitor.video_recorder()?;
+            (
+                ActiveVideoRecorder::Xcap(recorder),
+                receiver,
+                fallback_key,
+                fallback_name,
+            )
+        };
         recorder.start()?;
         Ok(Self {
             key,
@@ -802,6 +1332,10 @@ impl ActiveVideoStream {
             receiver,
             latest_frame: None,
         })
+    }
+
+    fn is_portal(&self) -> bool {
+        matches!(self.recorder, ActiveVideoRecorder::FixedPortal(_))
     }
 
     fn covers(&self, request: CaptureRequest) -> bool {
@@ -834,7 +1368,16 @@ impl ActiveVideoStream {
         let Some(frame) = self.latest_frame.as_ref() else {
             return Ok(None);
         };
-        video_frame_to_pixels(frame, request, size, self.key, &self.name, output).map(Some)
+        match video_frame_to_pixels(frame, request, size, self.key, &self.name, output) {
+            Ok(status) => Ok(Some(status)),
+            Err(err)
+                if self.is_portal()
+                    && err.to_string() == "window is outside capturable monitor" =>
+            {
+                video_frame_to_pixels_full(frame, size, &self.name, output).map(Some)
+            }
+            Err(err) => Err(err),
+        }
     }
 }
 
@@ -929,6 +1472,52 @@ fn video_frame_to_pixels(
         frame.height,
         right - left,
         bottom - top
+    ))
+}
+
+fn video_frame_to_pixels_full(
+    frame: &VideoFrame,
+    size: RenderSize,
+    stream_name: &str,
+    output: &mut [u32],
+) -> Result<String, Box<dyn std::error::Error>> {
+    if output.len() != size.pixel_count() {
+        return Err(other_error(format!(
+            "video output has {} pixels, expected {}",
+            output.len(),
+            size.pixel_count()
+        )));
+    }
+    let expected_bytes = (frame.width as usize)
+        .checked_mul(frame.height as usize)
+        .and_then(|pixels| pixels.checked_mul(4))
+        .ok_or_else(|| other_error("video frame byte length overflows usize"))?;
+    if frame.raw.len() < expected_bytes {
+        return Err(other_error(format!(
+            "video frame has {} bytes, expected at least {expected_bytes}",
+            frame.raw.len()
+        )));
+    }
+
+    let frame_w = frame.width.max(1);
+    let frame_h = frame.height.max(1);
+    for y in 0..size.height {
+        let frame_y = ((y as u64) * u64::from(frame_h) / (size.height.max(1) as u64))
+            .min(u64::from(frame_h - 1)) as u32;
+        for x in 0..size.width {
+            let frame_x = ((x as u64) * u64::from(frame_w) / (size.width.max(1) as u64))
+                .min(u64::from(frame_w - 1)) as u32;
+            let source_index = ((frame_y as usize) * (frame.width as usize) + frame_x as usize)
+                .checked_mul(4)
+                .ok_or_else(|| other_error("video frame source index overflows usize"))?;
+            let px = &frame.raw[source_index..source_index + 4];
+            output[y * size.width + x] =
+                ((px[0] as u32) << 16) | ((px[1] as u32) << 8) | px[2] as u32;
+        }
+    }
+    Ok(format!(
+        "video stream {stream_name} full {}x{} -> {}x{}",
+        frame.width, frame.height, size.width, size.height
     ))
 }
 
@@ -2103,6 +2692,22 @@ fn initial_capture_status(capture_mode: CaptureMode) -> &'static str {
     }
 }
 
+fn capture_warmup_timeout() -> Duration {
+    std::env::var("ROCM_OXIDE_MATRIX_LENS_CAPTURE_WARMUP_MS")
+        .ok()
+        .and_then(|value| value.parse::<u64>().ok())
+        .map(Duration::from_millis)
+        .unwrap_or_else(|| Duration::from_millis(DEFAULT_CAPTURE_WARMUP_TIMEOUT_MS))
+}
+
+fn bounded_live_capture_pending(
+    capture_mode: CaptureMode,
+    frame_budget: Option<u32>,
+    captures: u64,
+) -> bool {
+    frame_budget.is_some() && capture_mode != CaptureMode::Pattern && captures == 0
+}
+
 fn parse_args() -> Result<DemoArgs, Box<dyn std::error::Error>> {
     let mut frames = None;
     let mut output = PathBuf::from(DEFAULT_OUTPUT);
@@ -2261,6 +2866,23 @@ mod tests {
     }
 
     #[test]
+    fn bounded_live_capture_waits_until_first_capture() {
+        assert!(bounded_live_capture_pending(CaptureMode::Video, Some(3), 0));
+        assert!(bounded_live_capture_pending(CaptureMode::Auto, Some(3), 0));
+        assert!(!bounded_live_capture_pending(
+            CaptureMode::Video,
+            Some(3),
+            1
+        ));
+        assert!(!bounded_live_capture_pending(
+            CaptureMode::Pattern,
+            Some(3),
+            0
+        ));
+        assert!(!bounded_live_capture_pending(CaptureMode::Video, None, 0));
+    }
+
+    #[test]
     fn video_frame_to_pixels_scales_monitor_space_to_frame_pixels() {
         let frame = video_frame_2x2();
         let request = CaptureRequest {
@@ -2414,6 +3036,28 @@ mod tests {
         .expect_err("outside request should fail");
 
         assert_eq!(err.to_string(), "window is outside capturable monitor");
+    }
+
+    #[test]
+    fn video_frame_to_pixels_full_scales_entire_stream() {
+        let frame = video_frame_2x2();
+        let size = RenderSize {
+            width: 4,
+            height: 4,
+        };
+        let mut output = vec![0; size.pixel_count()];
+
+        let status =
+            video_frame_to_pixels_full(&frame, size, "portal", &mut output).expect("full stream");
+
+        assert_eq!(status, "video stream portal full 2x2 -> 4x4");
+        assert_eq!(
+            output,
+            vec![
+                0x102030, 0x102030, 0x405060, 0x405060, 0x102030, 0x102030, 0x405060, 0x405060,
+                0x708090, 0x708090, 0xa0b0c0, 0xa0b0c0, 0x708090, 0x708090, 0xa0b0c0, 0xa0b0c0,
+            ]
+        );
     }
 }
 
