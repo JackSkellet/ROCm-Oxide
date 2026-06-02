@@ -1,8 +1,21 @@
+//! Rust-first host/runtime APIs for AMD ROCm.
+//!
+//! Prefer the root `rocm_oxide::*` re-exports for application code. Public
+//! modules are classified in `docs/api-stability.md`; low-level ROCm modules are
+//! intentionally public for experiments and generated bindings, but are not all
+//! stable API yet.
+
+/// Experimental low-level HIP wrapper surface.
 pub mod hip;
+/// Experimental HIPRTC/COMGR runtime compilation and code-object cache surface.
 pub mod hiprtc;
+/// Experimental optional ROCm library interop surface.
 pub mod libraries;
+/// Experimental lazy stream and graph operation composition.
 pub mod operation;
+/// Experimental CUDA-to-ROCm feature planning helpers.
 pub mod parity;
+/// Experimental rocTX profiling marker/range helpers.
 pub mod profiling;
 mod runtime;
 

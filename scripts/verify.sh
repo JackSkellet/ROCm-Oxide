@@ -20,7 +20,7 @@ Usage: scripts/verify.sh [--offline|--quick|--full]
 
 Runs the ROCm-Oxide production verification gate.
 
-  --offline  CPU-only formatting, script syntax, and tool-crate tests.
+  --offline  CPU-only formatting, docs, clippy, package, and tool-crate tests.
   --quick  Unit/tool tests plus core GPU smoke coverage.
   --full   Full local gate, including heavier examples and visual artifacts.
 
@@ -59,6 +59,10 @@ run cargo test --manifest-path tools/cargo-rocm-oxide/Cargo.toml -- --test-threa
 if [[ "$PROFILE" == "offline" ]]; then
   run cargo fmt --check
   run bash -n scripts/verify.sh
+  run bash -n scripts/consumer-smoke.sh
+  run cargo doc --no-deps
+  run cargo clippy --all-targets -- -D warnings -A clippy::too_many_arguments
+  run cargo package --allow-dirty --no-verify
   printf '\nverification profile `%s` passed; artifacts: %s\n' "$PROFILE" "$ARTIFACT_DIR"
   exit 0
 fi
@@ -69,6 +73,8 @@ run cargo run --manifest-path tools/cargo-rocm-oxide/Cargo.toml -- rocm-oxide pi
 run cargo run --example vector_add
 run cargo run --example rust_device_generated_bindings
 run cargo run --example feature_showcase
+run scripts/consumer-smoke.sh
+run cargo run --example validation_profile -- --json "$ARTIFACT_DIR/validation_profile.json"
 run cargo run --example performance_probe -- --json "$ARTIFACT_DIR/performance_probe.json"
 run cargo run --example spectral_lattice -- --frames 1 --mode chain --output "$ARTIFACT_DIR/spectral_lattice_chain.png"
 

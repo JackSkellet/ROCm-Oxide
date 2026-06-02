@@ -61,6 +61,11 @@ impl Error {
             log: None,
         }
     }
+
+    fn with_context(mut self, context: impl Into<String>) -> Self {
+        self.message = format!("{}: {}", context.into(), self.message);
+        self
+    }
 }
 
 impl fmt::Display for Error {
@@ -396,7 +401,12 @@ fn compile_code_object_with_resolved_options(source: &str, options: &[String]) -
             })
         })
         .collect::<Result<Vec<_>>>()?;
-    program.compile(&options)?;
+    program.compile(&options).map_err(|err| {
+        err.with_context(format!(
+            "HIPRTC compile failed with options [{}]",
+            display_options(&options)
+        ))
+    })?;
     program.code()
 }
 
@@ -409,7 +419,20 @@ fn compile_code_object_comgr_with_resolved_options(
         .map_err(|err| Error::invalid_input(format!("COMGR backend unavailable: {err}")))?;
     comgr
         .compile_hip_source_to_code_object_with_options(source, arch, options)
-        .map_err(|err| Error::invalid_input(format!("COMGR backend failed: {err}")))
+        .map_err(|err| {
+            Error::invalid_input(format!(
+                "COMGR backend failed for arch {arch} with options [{}]: {err}",
+                options.join(" ")
+            ))
+        })
+}
+
+fn display_options(options: &[CString]) -> String {
+    options
+        .iter()
+        .map(|option| option.to_string_lossy())
+        .collect::<Vec<_>>()
+        .join(" ")
 }
 
 fn persistent_code_object_cache_get_or_compile<F>(
@@ -575,5 +598,59 @@ mod tests {
         assert_eq!(stats.entries, 1);
         assert_eq!(stats.hits, 1);
         assert_eq!(stats.misses, 1);
+    }
+
+    #[test]
+    fn hiprtc_error_context_preserves_compile_log() {
+        let err = super::Error {
+            code: 7,
+            message: "compile failed".to_string(),
+            log: Some("kernel.hip:3: bad ABI".to_string()),
+        }
+        .with_context("HIPRTC compile failed with options [--gpu-architecture=gfx1201]");
+
+        let message = err.to_string();
+        assert!(message.contains("HIPRTC compile failed with options"));
+        assert!(message.contains("compile failed (7)"));
+        assert!(message.contains("kernel.hip:3: bad ABI"));
+    }
+
+    #[test]
+    fn specialization_cache_does_not_reuse_mismatched_backend_key() {
+        let cache = SpecializationCache::new();
+        let options = vec!["-O3".to_string()];
+        let hiprtc = SpecializationCacheKey::with_backend(
+            SpecializationBackend::Hiprtc,
+            "source",
+            "gfx1201",
+            &options,
+            "meta",
+        );
+        let comgr = SpecializationCacheKey::with_backend(
+            SpecializationBackend::Comgr,
+            "source",
+            "gfx1201",
+            &options,
+            "meta",
+        );
+
+        let hiprtc_code = cache
+            .get_or_compile(hiprtc, || Ok(vec![1]))
+            .expect("HIPRTC cache insert should work");
+        let comgr_code = cache
+            .get_or_compile(comgr.clone(), || Ok(vec![2]))
+            .expect("COMGR cache insert should not reuse HIPRTC entry");
+        assert_eq!(hiprtc_code.as_slice(), [1]);
+        assert_eq!(comgr_code.as_slice(), [2]);
+        assert!(!Arc::ptr_eq(&hiprtc_code, &comgr_code));
+
+        let comgr_hit = cache
+            .get_or_compile(comgr, || Ok(vec![3]))
+            .expect("same COMGR key should hit cache");
+        assert!(Arc::ptr_eq(&comgr_code, &comgr_hit));
+        let stats = cache.stats();
+        assert_eq!(stats.entries, 2);
+        assert_eq!(stats.hits, 1);
+        assert_eq!(stats.misses, 2);
     }
 }

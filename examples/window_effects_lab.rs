@@ -144,8 +144,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             && let Some((mx, my)) = buffer_mouse_pos(&window)
         {
             handle_click(
-                mx as usize,
-                my as usize,
+                mx,
+                my,
                 &buttons,
                 &mut mode,
                 &mut sharpness,

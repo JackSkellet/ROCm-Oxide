@@ -159,7 +159,7 @@ impl Device {
     }
 
     pub fn load_code_object(&self, code_object: &[u8]) -> Result<Module> {
-        let module = hip::Module::from_code_object(&code_object)?;
+        let module = hip::Module::from_code_object(code_object)?;
         Ok(Module {
             module,
             limits: self.limits,
@@ -983,6 +983,15 @@ impl Kernel {
         Ok(())
     }
 
+    /// Validates the launch shape, then launches this kernel on the default
+    /// stream with raw ABI parameters.
+    ///
+    /// # Safety
+    ///
+    /// Launch-shape validation does not validate the kernel ABI. `params` must
+    /// contain exactly the ABI expected by this kernel, and every pointer
+    /// referenced by those arguments must remain valid until the launch has
+    /// completed.
     pub unsafe fn launch_raw(
         &self,
         config: LaunchConfig,
@@ -1004,16 +1013,27 @@ impl Kernel {
         config: LaunchConfig,
         params: &mut [*mut c_void],
     ) -> Result<()> {
-        Ok(unsafe {
+        unsafe {
             self.function.launch(
                 config.grid.as_tuple(),
                 config.block.as_tuple(),
                 config.shared_mem_bytes,
                 params,
             )?;
-        })
+        }
+        Ok(())
     }
 
+    /// Validates the launch shape, then adds this kernel to an explicit HIP
+    /// graph with raw ABI parameters.
+    ///
+    /// # Safety
+    ///
+    /// Launch-shape validation does not validate the kernel ABI or graph
+    /// resource lifetimes. `params` must contain exactly the ABI expected by
+    /// this kernel, every buffer or pointer referenced by those arguments must
+    /// remain valid until any graph execution using this node completes, and
+    /// `graph` must be associated with the kernel's device/context.
     pub unsafe fn add_graph_node_raw(
         &self,
         graph: &hip::Graph,
@@ -1054,6 +1074,15 @@ impl Kernel {
         })
     }
 
+    /// Validates the launch shape, then launches this kernel on `stream` with
+    /// raw ABI parameters.
+    ///
+    /// # Safety
+    ///
+    /// Launch-shape validation does not validate the kernel ABI. `stream` must
+    /// be valid for the kernel's device/context, `params` must contain exactly
+    /// the ABI expected by this kernel, and every pointer referenced by those
+    /// arguments must remain valid until `stream` reaches the launch.
     pub unsafe fn launch_raw_on_stream(
         &self,
         stream: &hip::Stream,
@@ -1079,7 +1108,7 @@ impl Kernel {
         config: LaunchConfig,
         params: &mut [*mut c_void],
     ) -> Result<()> {
-        Ok(unsafe {
+        unsafe {
             self.function.launch_on_stream(
                 config.grid.as_tuple(),
                 config.block.as_tuple(),
@@ -1087,9 +1116,20 @@ impl Kernel {
                 stream.as_raw(),
                 params,
             )?;
-        })
+        }
+        Ok(())
     }
 
+    /// Validates launch shape and cooperative limits, then launches this
+    /// kernel cooperatively on `stream` with raw ABI parameters.
+    ///
+    /// # Safety
+    ///
+    /// Launch-shape and cooperative-limit validation do not validate the
+    /// kernel ABI. `stream` must be valid for the kernel's device/context, the
+    /// kernel must be eligible for cooperative launch, `params` must contain
+    /// exactly the ABI expected by this kernel, and every pointer referenced by
+    /// those arguments must remain valid until `stream` reaches the launch.
     pub unsafe fn launch_cooperative_raw_on_stream(
         &self,
         stream: &hip::Stream,
@@ -1098,7 +1138,7 @@ impl Kernel {
     ) -> Result<()> {
         validate_launch_config_for_limits(config, self.limits, self.metadata)?;
         validate_cooperative_launch_config(config)?;
-        Ok(unsafe {
+        unsafe {
             self.function.launch_cooperative_on_stream(
                 config.grid.as_tuple(),
                 config.block.as_tuple(),
@@ -1106,7 +1146,8 @@ impl Kernel {
                 stream.as_raw(),
                 params,
             )?;
-        })
+        }
+        Ok(())
     }
 }
 

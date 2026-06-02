@@ -53,6 +53,9 @@ struct DynamicLibrary {
     name: String,
 }
 
+// rocTX function tables are immutable after dlopen/dlsym. The library wrapper
+// owns the process handle and closes it only after the last Arc-held function
+// table drops.
 unsafe impl Send for DynamicLibrary {}
 unsafe impl Sync for DynamicLibrary {}
 unsafe impl Send for RocTxFunctions {}

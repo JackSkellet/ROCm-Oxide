@@ -5,6 +5,20 @@
 #![feature(gpu_launch_sized_workgroup_mem)]
 #![feature(stdarch_amdgpu)]
 
+//! GPU-side support APIs for ROCm-Oxide generated kernels.
+//!
+//! # Safety
+//!
+//! Public `unsafe` functions in this crate are device-only escape hatches over
+//! AMDGPU intrinsics, raw device pointers, and caller-provided LDS scratch
+//! memory. Callers must ensure raw pointers identify the correct address space,
+//! element type, alignment, initialized length, aliasing permissions, and
+//! lifetime for the active kernel dispatch. Block collective scratch pointers
+//! must provide at least one element per participating workgroup lane and every
+//! lane in the block must execute the collective in the same control-flow
+//! order. Scoped atomic helpers require storage that is valid for the selected
+//! memory scope and ordering.
+
 use core::arch::amdgpu;
 use core::intrinsics::gpu::{amdgpu_dispatch_ptr, gpu_launch_sized_workgroup_mem};
 use core::sync::atomic::Ordering;

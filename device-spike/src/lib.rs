@@ -3,6 +3,7 @@
 #![feature(stdarch_amdgpu)]
 #![feature(unboxed_closures)]
 #![allow(improper_ctypes_definitions)]
+#![allow(unused_features)]
 
 use rocm_oxide_device as gpu;
 use rocm_oxide_kernel::{device_global, kernel, shared};
@@ -1618,6 +1619,7 @@ pub unsafe extern "C" fn raytrace_world(
     unsafe { frame.write_unchecked(i, rgb) };
 }
 
+#[allow(clippy::manual_range_contains)]
 #[kernel]
 pub unsafe extern "C" fn window_fx(
     frame: gpu::DeviceSliceMut<u32>,
@@ -2506,11 +2508,11 @@ fn control_score(value: u32, params: ControlParams, pair: ControlPair) -> u32 {
     for item in fixed {
         array_score = array_score.wrapping_add(item & 15);
     }
-    for j in 0..4 {
+    for (j, item) in mutable.iter().enumerate() {
         if j == runtime_index {
             continue;
         }
-        array_score = array_score.wrapping_add(mutable[j]);
+        array_score = array_score.wrapping_add(*item);
     }
 
     let mut loop_score = 0u32;
@@ -2585,7 +2587,7 @@ fn flow_cast_score(input: gpu::DeviceSlice<u32>, len: usize, index: usize) -> u3
         } else {
             score = score.wrapping_add(17);
         }
-    } else if value % 3 == 0 {
+    } else if value.is_multiple_of(3) {
         score = score.wrapping_add(23);
     } else if value > 10 {
         score = score.wrapping_add(31);
@@ -2863,8 +2865,7 @@ fn wheel(hue: u32, value: u32) -> u32 {
 
 fn tri(phase: u32) -> u32 {
     let x = (phase & 255) as i32 - 128;
-    let v = 255 - clamp_u32((abs_i32(x) as u32) << 1, 0, 255);
-    v
+    255 - clamp_u32((abs_i32(x) as u32) << 1, 0, 255)
 }
 
 fn hash32(mut x: u32) -> u32 {

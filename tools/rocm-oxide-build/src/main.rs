@@ -32,6 +32,7 @@ fn run() -> Result<(), String> {
         "failed to detect ROCm GPU architecture; pass --arch gfx... or set ROCM_OXIDE_ARCH"
             .to_string()
     })?;
+    validate_gpu_arch(&arch)?;
     let tools = ToolPaths::discover()?;
     let debug_info = device_debug_info_enabled();
 
@@ -299,6 +300,7 @@ fn doctor() -> Result<(), String> {
     let rocminfo_summary = report_rocminfo(&rocminfo)?;
     let arch = match rocminfo_summary.arch {
         Some(arch) => {
+            validate_gpu_arch(&arch)?;
             println!("ok: selected AMD GPU architecture {arch}");
             arch
         }
@@ -636,15 +638,39 @@ fn find_rocm_tool(
     }
     push_tool_candidate(&mut candidates, PathBuf::from(name), "PATH");
 
-    for candidate in candidates {
+    for candidate in &candidates {
         if tool_works(&candidate.path, check_args) {
-            return Ok(candidate);
+            return Ok(candidate.clone());
         }
     }
 
-    Err(format!(
-        "could not find `{name}`; set {env_var}=/path/to/{name}, ROCM_PATH=/path/to/rocm, or HIP_PATH=/path/to/rocm"
-    ))
+    Err(format_missing_rocm_tool(env_var, name, &candidates))
+}
+
+fn validate_gpu_arch(arch: &str) -> Result<(), String> {
+    let valid = arch.starts_with("gfx")
+        && arch.len() > 3
+        && arch[3..]
+            .chars()
+            .all(|ch| ch.is_ascii_hexdigit() || ch == '_');
+    if valid {
+        Ok(())
+    } else {
+        Err(format!(
+            "unsupported GPU architecture `{arch}`; expected a ROCm gfx target such as gfx1100 or gfx1201. Pass --arch gfx... or set ROCM_OXIDE_ARCH=gfx..."
+        ))
+    }
+}
+
+fn format_missing_rocm_tool(env_var: &str, name: &str, candidates: &[ToolPath]) -> String {
+    let checked = candidates
+        .iter()
+        .map(|candidate| format!("[{}] {}", candidate.source, candidate.path.display()))
+        .collect::<Vec<_>>()
+        .join(", ");
+    format!(
+        "could not find `{name}`; checked candidates: {checked}. Set {env_var}=/path/to/{name}, ROCM_PATH=/path/to/rocm, HIP_PATH=/path/to/rocm, or install ROCm tools under /opt/rocm"
+    )
 }
 
 fn rocm_roots() -> Vec<(String, PathBuf)> {
@@ -2991,7 +3017,7 @@ fn rewrite_pointer_operand_with_needle(line: &str, needle: &str, replacement: &s
     let mut output = String::with_capacity(line.len() + replacement.len());
     let mut cursor = 0usize;
 
-    while let Some(relative) = line[cursor..].find(&needle) {
+    while let Some(relative) = line[cursor..].find(needle) {
         let start = cursor + relative;
         let end = start + needle.len();
         output.push_str(&line[cursor..start]);
@@ -3002,7 +3028,7 @@ fn rewrite_pointer_operand_with_needle(line: &str, needle: &str, replacement: &s
         {
             output.push_str(&line[start..end]);
         } else {
-            output.push_str(&replacement);
+            output.push_str(replacement);
         }
         cursor = end;
     }
@@ -4806,6 +4832,34 @@ pub unsafe extern "C" fn helper() {}
                 PathBuf::from("/rocm/rocminfo"),
             ]
         );
+    }
+
+    #[test]
+    fn rejects_non_gfx_architecture_with_actionable_hint() {
+        let err = super::validate_gpu_arch("sm_90")
+            .expect_err("CUDA architecture should not be accepted as ROCm gfx");
+        assert!(err.contains("unsupported GPU architecture `sm_90`"));
+        assert!(err.contains("--arch gfx"));
+        assert!(err.contains("ROCM_OXIDE_ARCH=gfx"));
+    }
+
+    #[test]
+    fn missing_rocm_tool_diagnostic_lists_checked_candidates() {
+        let candidates = vec![
+            super::ToolPath {
+                path: PathBuf::from("/rocm/lib/llvm/bin/llc"),
+                source: "ROCM_PATH".to_string(),
+            },
+            super::ToolPath {
+                path: PathBuf::from("llc"),
+                source: "PATH".to_string(),
+            },
+        ];
+        let message = super::format_missing_rocm_tool("ROCM_OXIDE_LLC", "llc", &candidates);
+        assert!(message.contains("could not find `llc`"));
+        assert!(message.contains("[ROCM_PATH] /rocm/lib/llvm/bin/llc"));
+        assert!(message.contains("[PATH] llc"));
+        assert!(message.contains("ROCM_OXIDE_LLC=/path/to/llc"));
     }
 
     #[test]

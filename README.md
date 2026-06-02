@@ -179,15 +179,19 @@ When installed as `cargo-rocm-oxide`, these become `cargo rocm-oxide ...`.
 ### Core architecture and compiler path
 
 - [DESIGN.md](DESIGN.md)
+- [API stability](docs/api-stability.md)
+- [Supported ROCm and GPU matrix](docs/supported-rocm-gpu-matrix.md)
 - [Compiler path](docs/compiler-path.md)
 - [Code object linking](docs/code-object-linking.md)
 - [Toolchain discovery](docs/toolchain-discovery.md)
+- [Unsafe and FFI audit](docs/unsafe-audit.md)
 
 ### Runtime semantics and memory model
 
 - [Atomic scopes](docs/atomic-scopes.md)
 - [Host-memory coherence](docs/host-memory-coherence.md)
 - [Stream-ordered allocation](docs/stream-ordered-allocation.md)
+- [Unsafe and FFI audit](docs/unsafe-audit.md)
 - [ROCm library interop](docs/rocm-library-interop.md)
 
 ### Parity tracking and roadmap docs
@@ -198,10 +202,19 @@ When installed as `cargo-rocm-oxide`, these become `cargo rocm-oxide ...`.
 - [Future work](docs/cuda-future-work.md)
 - [Implementation tasks](docs/implementation-tasks.md)
 - [Production readiness](docs/production-readiness.md)
+- [CI and release gates](docs/release-gates.md)
 
 ### Debugging
 
 - [Debugger workflow](docs/debugger-workflow.md)
+
+### Project and release
+
+- [Changelog](CHANGELOG.md)
+- [Contributing](CONTRIBUTING.md)
+- [Security policy](SECURITY.md)
+- [MIT license](LICENSE-MIT)
+- [Apache-2.0 license](LICENSE-APACHE)
 
 ---
 

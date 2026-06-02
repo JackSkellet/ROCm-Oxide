@@ -2,6 +2,10 @@ use std::ffi::{CStr, c_char, c_int, c_uint, c_void};
 use std::fmt;
 use std::marker::PhantomData;
 use std::ptr::{self, NonNull};
+use std::sync::{
+    Arc,
+    atomic::{AtomicU64, Ordering},
+};
 
 pub type HipError = c_int;
 pub type HipModule = *mut c_void;
@@ -627,6 +631,9 @@ pub struct OwnedMemPool {
     raw: HipMemPool,
 }
 
+// HIP memory-pool handles are process/runtime handles. These wrappers never
+// expose Rust references into pool state, and only OwnedMemPool destroys its
+// handle when ownership returns to Drop.
 unsafe impl Send for MemPool {}
 unsafe impl Sync for MemPool {}
 unsafe impl Send for OwnedMemPool {}
@@ -831,6 +838,9 @@ pub struct DeviceVirtualMemory {
     handle: HipMemGenericAllocationHandle,
 }
 
+// DeviceVirtualMemory owns a mapped HIP VMM reservation. The raw pointer is
+// exposed only as a device address, and unmap/release/address-free happen once
+// in Drop after wrapper ownership returns.
 unsafe impl Send for DeviceVirtualMemory {}
 unsafe impl Sync for DeviceVirtualMemory {}
 
@@ -850,15 +860,13 @@ impl DeviceVirtualMemory {
         let mut handle = ptr::null_mut();
 
         unsafe {
-            if let Err(err) = check(hipMemAddressReserve(
+            check(hipMemAddressReserve(
                 &mut ptr,
                 size,
                 granularity,
                 ptr::null_mut(),
                 0,
-            )) {
-                return Err(err);
-            }
+            ))?;
             if let Err(err) = check(hipMemCreate(&mut handle, size, &props, 0)) {
                 let _ = hipMemAddressFree(ptr, size);
                 return Err(err);
@@ -986,6 +994,9 @@ pub struct Stream {
     raw: HipStream,
 }
 
+// HIP streams are opaque queues. Sharing a stream handle across threads does
+// not expose Rust references; callers still own the ordering contracts for
+// enqueued work.
 unsafe impl Send for Stream {}
 unsafe impl Sync for Stream {}
 
@@ -1017,7 +1028,10 @@ impl Stream {
         unsafe {
             check(hipStreamEndCapture(self.raw, &mut raw))?;
         }
-        Ok(Graph { raw })
+        Ok(Graph {
+            raw,
+            id: next_graph_id(),
+        })
     }
 
     pub fn as_raw(&self) -> HipStream {
@@ -1054,24 +1068,34 @@ impl StreamCaptureMode {
 
 pub struct Graph {
     raw: HipGraph,
+    id: u64,
 }
 
+// Graph wrappers own opaque HIP graph handles. Node membership is tracked with
+// an internal graph id so safe builders reject cross-graph dependencies before
+// reaching HIP.
 unsafe impl Send for Graph {}
 unsafe impl Sync for Graph {}
 
 /// Non-owning handle to a node inside a HIP graph.
 ///
 /// The owning `Graph` must outlive any `GraphNode` values created from it.
-#[repr(transparent)]
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct GraphNode {
     raw: HipGraphNode,
+    graph_id: u64,
 }
 
+// GraphNode is a non-owning HIP node token. It carries only the raw handle and
+// graph id; the owning Graph must outlive uses of the token.
 unsafe impl Send for GraphNode {}
 unsafe impl Sync for GraphNode {}
 
 impl GraphNode {
+    const fn new(raw: HipGraphNode, graph_id: u64) -> Self {
+        Self { raw, graph_id }
+    }
+
     pub const fn as_raw(self) -> HipGraphNode {
         self.raw
     }
@@ -1140,6 +1164,9 @@ pub struct GraphMemoryAllocation {
     bytes: usize,
 }
 
+// This is a non-owning token for memory allocated by a graph node. The pointer
+// is valid according to graph execution order, and freeing it requires an
+// explicit graph free node.
 unsafe impl Send for GraphMemoryAllocation {}
 unsafe impl Sync for GraphMemoryAllocation {}
 
@@ -1171,7 +1198,16 @@ impl GraphMemoryAllocation {
         graph: &Graph,
         dependencies: &[GraphNode],
     ) -> Result<GraphNode> {
-        unsafe { graph.add_mem_free_node(dependencies, self.ptr) }
+        graph.validate_node(self.allocation_node, "memory allocation node")?;
+        let mut free_dependencies = Vec::with_capacity(dependencies.len() + 1);
+        free_dependencies.push(self.allocation_node);
+        free_dependencies.extend(
+            dependencies
+                .iter()
+                .copied()
+                .filter(|node| *node != self.allocation_node),
+        );
+        unsafe { graph.add_mem_free_node(&free_dependencies, self.ptr) }
     }
 }
 
@@ -1181,7 +1217,10 @@ impl Graph {
         unsafe {
             check(hipGraphCreate(&mut raw, 0))?;
         }
-        Ok(Self { raw })
+        Ok(Self {
+            raw,
+            id: next_graph_id(),
+        })
     }
 
     pub fn as_raw(&self) -> HipGraph {
@@ -1203,7 +1242,8 @@ impl Graph {
     }
 
     pub fn add_empty_node(&self, dependencies: &[GraphNode]) -> Result<GraphNode> {
-        let (dependencies, dependency_count) = graph_dependency_slice(dependencies);
+        let dependency_handles = self.dependency_handles(dependencies)?;
+        let (dependencies, dependency_count) = graph_dependency_slice(&dependency_handles);
         let mut raw = ptr::null_mut();
         unsafe {
             check(hipGraphAddEmptyNode(
@@ -1213,10 +1253,12 @@ impl Graph {
                 dependency_count,
             ))?;
         }
-        Ok(GraphNode { raw })
+        Ok(GraphNode::new(raw, self.id))
     }
 
     pub fn add_dependency(&self, from: GraphNode, to: GraphNode) -> Result<()> {
+        self.validate_node(from, "dependency source")?;
+        self.validate_node(to, "dependency target")?;
         let from = [from.raw];
         let to = [to.raw];
         unsafe {
@@ -1232,6 +1274,10 @@ impl Graph {
     pub fn add_dependencies(&self, edges: &[(GraphNode, GraphNode)]) -> Result<()> {
         if edges.is_empty() {
             return Ok(());
+        }
+        for (from, to) in edges {
+            self.validate_node(*from, "dependency source")?;
+            self.validate_node(*to, "dependency target")?;
         }
         let from = edges.iter().map(|(from, _)| from.raw).collect::<Vec<_>>();
         let to = edges.iter().map(|(_, to)| to.raw).collect::<Vec<_>>();
@@ -1260,7 +1306,8 @@ impl Graph {
         bytes: usize,
         kind: c_int,
     ) -> Result<GraphNode> {
-        let (dependencies, dependency_count) = graph_dependency_slice(dependencies);
+        let dependency_handles = self.dependency_handles(dependencies)?;
+        let (dependencies, dependency_count) = graph_dependency_slice(&dependency_handles);
         let mut raw = ptr::null_mut();
         unsafe {
             check(hipGraphAddMemcpyNode1D(
@@ -1274,7 +1321,7 @@ impl Graph {
                 kind,
             ))?;
         }
-        Ok(GraphNode { raw })
+        Ok(GraphNode::new(raw, self.id))
     }
 
     /// Adds a byte-pattern memset node to the graph.
@@ -1290,7 +1337,8 @@ impl Graph {
         value: u8,
         bytes: usize,
     ) -> Result<GraphNode> {
-        let (dependencies, dependency_count) = graph_dependency_slice(dependencies);
+        let dependency_handles = self.dependency_handles(dependencies)?;
+        let (dependencies, dependency_count) = graph_dependency_slice(&dependency_handles);
         let params = hip_memset_params_1d(dst, value, bytes);
         let mut raw = ptr::null_mut();
         unsafe {
@@ -1302,7 +1350,7 @@ impl Graph {
                 &params,
             ))?;
         }
-        Ok(GraphNode { raw })
+        Ok(GraphNode::new(raw, self.id))
     }
 
     /// Adds a graph memory allocation node and returns the graph-managed pointer.
@@ -1317,7 +1365,8 @@ impl Graph {
                 "HIP graph memory allocation nodes must request nonzero bytes",
             ));
         }
-        let (dependencies, dependency_count) = graph_dependency_slice(dependencies);
+        let dependency_handles = self.dependency_handles(dependencies)?;
+        let (dependencies, dependency_count) = graph_dependency_slice(&dependency_handles);
         let access_desc = HipMemAccessDesc {
             location: MemLocation::Device(device_id).as_raw(),
             flags: MemAccessFlags::ReadWrite.as_raw(),
@@ -1344,8 +1393,9 @@ impl Graph {
                 "HIP graph memory allocation node returned a null device pointer",
             ));
         }
+        let allocation_node = GraphNode::new(raw, self.id);
         Ok(GraphMemoryAllocation {
-            allocation_node: GraphNode { raw },
+            allocation_node,
             ptr: params.dptr,
             bytes,
         })
@@ -1367,7 +1417,8 @@ impl Graph {
                 "HIP graph memory free node pointer is null",
             ));
         }
-        let (dependencies, dependency_count) = graph_dependency_slice(dependencies);
+        let dependency_handles = self.dependency_handles(dependencies)?;
+        let (dependencies, dependency_count) = graph_dependency_slice(&dependency_handles);
         let mut raw = ptr::null_mut();
         unsafe {
             check(hipGraphAddMemFreeNode(
@@ -1378,7 +1429,7 @@ impl Graph {
                 ptr,
             ))?;
         }
-        Ok(GraphNode { raw })
+        Ok(GraphNode::new(raw, self.id))
     }
 
     /// Adds a kernel launch node to the graph.
@@ -1396,7 +1447,8 @@ impl Graph {
         shared_mem_bytes: u32,
         params: &mut [*mut c_void],
     ) -> Result<GraphNode> {
-        let (dependencies, dependency_count) = graph_dependency_slice(dependencies);
+        let dependency_handles = self.dependency_handles(dependencies)?;
+        let (dependencies, dependency_count) = graph_dependency_slice(&dependency_handles);
         let params = hip_kernel_node_params(function, grid, block, shared_mem_bytes, params);
         let mut raw = ptr::null_mut();
         unsafe {
@@ -1408,18 +1460,42 @@ impl Graph {
                 &params,
             ))?;
         }
-        Ok(GraphNode { raw })
+        Ok(GraphNode::new(raw, self.id))
+    }
+
+    fn dependency_handles(&self, dependencies: &[GraphNode]) -> Result<Vec<HipGraphNode>> {
+        dependencies
+            .iter()
+            .enumerate()
+            .map(|(index, node)| {
+                self.validate_node(*node, &format!("dependency {index}"))?;
+                Ok(node.raw)
+            })
+            .collect()
+    }
+
+    fn validate_node(&self, node: GraphNode, label: &str) -> Result<()> {
+        if node.graph_id == self.id {
+            Ok(())
+        } else {
+            Err(Error::invalid_value(format!(
+                "HIP graph {label} belongs to graph {}, but this graph is {}",
+                node.graph_id, self.id
+            )))
+        }
     }
 }
 
-fn graph_dependency_slice(dependencies: &[GraphNode]) -> (*const HipGraphNode, usize) {
+fn next_graph_id() -> u64 {
+    static NEXT_GRAPH_ID: AtomicU64 = AtomicU64::new(1);
+    NEXT_GRAPH_ID.fetch_add(1, Ordering::Relaxed)
+}
+
+fn graph_dependency_slice(dependencies: &[HipGraphNode]) -> (*const HipGraphNode, usize) {
     if dependencies.is_empty() {
         (ptr::null(), 0)
     } else {
-        (
-            dependencies.as_ptr().cast::<HipGraphNode>(),
-            dependencies.len(),
-        )
+        (dependencies.as_ptr(), dependencies.len())
     }
 }
 
@@ -1470,6 +1546,8 @@ pub struct GraphExec {
     raw: HipGraphExec,
 }
 
+// GraphExec owns an instantiated HIP executable graph. Launch/update use HIP's
+// opaque handle API and Drop destroys the executable graph exactly once.
 unsafe impl Send for GraphExec {}
 unsafe impl Sync for GraphExec {}
 
@@ -1513,6 +1591,8 @@ pub struct Event {
     raw: HipEvent,
 }
 
+// HIP events are opaque synchronization handles. Recording/synchronizing uses
+// the handle value only, and Drop destroys the event once ownership returns.
 unsafe impl Send for Event {}
 unsafe impl Sync for Event {}
 
@@ -1557,6 +1637,8 @@ pub struct DeviceBuffer<T> {
     len: usize,
 }
 
+// DeviceBuffer owns a device allocation and never creates host references to
+// `T`. Send/Sync follow the element bounds required for typed host copies.
 unsafe impl<T: Send> Send for DeviceBuffer<T> {}
 unsafe impl<T: Sync> Sync for DeviceBuffer<T> {}
 
@@ -1582,6 +1664,8 @@ impl_device_pod!(
     u8, u16, u32, u64, u128, usize, i8, i16, i32, i64, i128, isize, f32, f64,
 );
 
+// Arrays of plain device data preserve the element validity and ownership
+// invariants required by DevicePod.
 unsafe impl<T: DevicePod, const N: usize> DevicePod for [T; N] {}
 
 pub struct ManagedBuffer<T> {
@@ -1590,6 +1674,9 @@ pub struct ManagedBuffer<T> {
     kind: ManagedMemoryKind,
 }
 
+// ManagedBuffer owns HIP managed memory and only exposes typed host slices for
+// DevicePod elements. Cross-thread sharing follows the element bounds and ROCm
+// coherence rules documented by ManagedMemoryKind.
 unsafe impl<T: Send> Send for ManagedBuffer<T> {}
 unsafe impl<T: Sync> Sync for ManagedBuffer<T> {}
 
@@ -2153,6 +2240,23 @@ impl<T> DeviceBuffer<T> {
         self.copy_to_host(output.as_mut_slice())
     }
 
+    /// Enqueues a stream-ordered free for this allocation and transfers
+    /// ownership of the buffer to HIP.
+    ///
+    /// # Safety
+    ///
+    /// No queued or future work may read or write this allocation after the
+    /// free reaches `stream`. `stream` must remain valid until HIP reaches the
+    /// free operation, and the allocation must have been allocated by HIP on a
+    /// stream/order compatible with this free.
+    /// Enqueues a stream-ordered free of this device allocation.
+    ///
+    /// # Safety
+    ///
+    /// No previously enqueued work may use this allocation after the free is
+    /// reached on `stream`, and no later host or device access may use this
+    /// buffer after this function takes ownership of it. `stream` must remain
+    /// valid until the free operation has executed.
     pub unsafe fn free_async(mut self, stream: &Stream) -> Result<()> {
         if self.len != 0 && !self.ptr.is_null() {
             let ptr = self.ptr.cast::<c_void>();
@@ -2186,6 +2290,9 @@ pub struct PinnedHostBuffer<T> {
     len: usize,
 }
 
+// PinnedHostBuffer owns page-locked host memory and only exposes initialized
+// typed slices for DevicePod constructors. Cross-thread sharing follows the
+// element bounds for those slices and raw HIP device-pointer aliases.
 unsafe impl<T: Send> Send for PinnedHostBuffer<T> {}
 unsafe impl<T: Sync> Sync for PinnedHostBuffer<T> {}
 
@@ -2303,11 +2410,17 @@ impl<T> Drop for DeviceBuffer<T> {
 }
 
 pub struct Module {
+    inner: Arc<ModuleInner>,
+}
+
+struct ModuleInner {
     raw: HipModule,
 }
 
 // HIP module handles are immutable after load and launches bind the target
 // device before use through `ExecutionContext`.
+unsafe impl Send for ModuleInner {}
+unsafe impl Sync for ModuleInner {}
 unsafe impl Send for Module {}
 unsafe impl Sync for Module {}
 
@@ -2317,15 +2430,24 @@ impl Module {
         unsafe {
             check(hipModuleLoadData(&mut raw, bytes.as_ptr().cast::<c_void>()))?;
         }
-        Ok(Self { raw })
+        Ok(Self {
+            inner: Arc::new(ModuleInner { raw }),
+        })
     }
 
     pub fn function(&self, name: &CStr) -> Result<Function> {
         let mut raw = ptr::null_mut();
         unsafe {
-            check(hipModuleGetFunction(&mut raw, self.raw, name.as_ptr()))?;
+            check(hipModuleGetFunction(
+                &mut raw,
+                self.inner.raw,
+                name.as_ptr(),
+            ))?;
         }
-        Ok(Function { raw })
+        Ok(Function {
+            raw,
+            _module: Arc::clone(&self.inner),
+        })
     }
 
     pub fn global<T>(&self, name: &CStr) -> Result<Global<T>> {
@@ -2335,15 +2457,20 @@ impl Module {
             check(hipModuleGetGlobal(
                 &mut ptr,
                 &mut bytes,
-                self.raw,
+                self.inner.raw,
                 name.as_ptr(),
             ))?;
         }
-        Global::new(ptr.cast::<T>(), bytes, name.to_string_lossy().into_owned())
+        Global::new(
+            ptr.cast::<T>(),
+            bytes,
+            name.to_string_lossy().into_owned(),
+            Arc::clone(&self.inner),
+        )
     }
 }
 
-impl Drop for Module {
+impl Drop for ModuleInner {
     fn drop(&mut self) {
         if !self.raw.is_null() {
             unsafe {
@@ -2355,10 +2482,12 @@ impl Drop for Module {
 
 pub struct Function {
     raw: HipFunction,
+    _module: Arc<ModuleInner>,
 }
 
 // HIP function handles are immutable module entry-point references. Launches
-// bind device/context at the caller layer before use.
+// bind device/context at the caller layer before use. The retained module owner
+// keeps the entry-point handle valid for the lifetime of `Function`.
 unsafe impl Send for Function {}
 unsafe impl Sync for Function {}
 
@@ -2407,6 +2536,22 @@ impl Function {
         )
     }
 
+    /// Launches this module function on the default stream.
+    ///
+    /// # Safety
+    ///
+    /// `grid`, `block`, and `shared_mem_bytes` must be valid for the loaded
+    /// kernel and current device. `params` must contain exactly the ABI
+    /// expected by the kernel, and every pointer referenced by those arguments
+    /// must remain valid until the launch has completed.
+    /// Launches this HIP module function on the null stream.
+    ///
+    /// # Safety
+    ///
+    /// `grid`, `block`, and `shared_mem_bytes` must be valid for the loaded
+    /// kernel. `params` must match the kernel ABI exactly, and every pointed-to
+    /// argument must remain valid until the launch on the null stream has
+    /// completed.
     pub unsafe fn launch(
         &self,
         grid: (u32, u32, u32),
@@ -2417,6 +2562,23 @@ impl Function {
         unsafe { self.launch_on_stream(grid, block, shared_mem_bytes, ptr::null_mut(), params) }
     }
 
+    /// Launches this module function on a HIP stream.
+    ///
+    /// # Safety
+    ///
+    /// `stream` must be valid for the active HIP context. `grid`, `block`, and
+    /// `shared_mem_bytes` must be valid for the loaded kernel and device.
+    /// `params` must contain exactly the ABI expected by the kernel, and every
+    /// pointer referenced by those arguments must remain valid until `stream`
+    /// reaches the launch.
+    /// Launches this HIP module function on `stream`.
+    ///
+    /// # Safety
+    ///
+    /// `grid`, `block`, and `shared_mem_bytes` must be valid for the loaded
+    /// kernel. `params` must match the kernel ABI exactly, every pointed-to
+    /// argument must remain valid until `stream` reaches the launch, and
+    /// `stream` must belong to the active HIP context for this module.
     pub unsafe fn launch_on_stream(
         &self,
         grid: (u32, u32, u32),
@@ -2442,6 +2604,22 @@ impl Function {
         })
     }
 
+    /// Launches this module function cooperatively on a HIP stream.
+    ///
+    /// # Safety
+    ///
+    /// `stream` must be valid for the active HIP context. The kernel must be
+    /// eligible for cooperative launch on the current device, `grid`, `block`,
+    /// and `shared_mem_bytes` must satisfy cooperative-launch limits, `params`
+    /// must match the kernel ABI exactly, and every referenced pointer must
+    /// remain valid until `stream` reaches the launch.
+    /// Launches this HIP module function as a cooperative kernel on `stream`.
+    ///
+    /// # Safety
+    ///
+    /// In addition to the raw launch requirements, the caller must ensure the
+    /// device supports cooperative launch and that the grid can be resident
+    /// according to HIP cooperative-launch limits.
     pub unsafe fn launch_cooperative_on_stream(
         &self,
         grid: (u32, u32, u32),
@@ -2471,14 +2649,17 @@ pub struct Global<T> {
     ptr: *mut T,
     bytes: usize,
     name: String,
+    _module: Arc<ModuleInner>,
     _marker: PhantomData<T>,
 }
 
+// Global retains the owning module so the device symbol pointer remains valid.
+// Typed Send/Sync follow the element bounds used by host copy methods.
 unsafe impl<T: Send> Send for Global<T> {}
 unsafe impl<T: Sync> Sync for Global<T> {}
 
 impl<T> Global<T> {
-    fn new(ptr: *mut T, bytes: usize, name: String) -> Result<Self> {
+    fn new(ptr: *mut T, bytes: usize, name: String, module: Arc<ModuleInner>) -> Result<Self> {
         let element_size = size_of::<T>();
         if element_size == 0 {
             return Err(Error::invalid_value(format!(
@@ -2495,6 +2676,7 @@ impl<T> Global<T> {
             ptr,
             bytes,
             name,
+            _module: module,
             _marker: PhantomData,
         })
     }
@@ -2599,9 +2781,10 @@ mod tests {
     use super::{
         DeviceBuffer, DeviceVirtualMemory, Global, Graph, HIP_ERROR_NOT_SUPPORTED,
         HIP_MEMCPY_DEVICE_TO_DEVICE, ManagedBuffer, MemAccessFlags, MemLocation, MemPool,
-        PinnedHostBuffer, Stream, current_device,
+        ModuleInner, PinnedHostBuffer, Stream, current_device,
     };
     use std::ffi::c_void;
+    use std::sync::Arc;
 
     fn is_not_supported(err: &super::Error) -> bool {
         err.code() == Some(HIP_ERROR_NOT_SUPPORTED)
@@ -2780,6 +2963,42 @@ mod tests {
     }
 
     #[test]
+    fn graph_rejects_cross_graph_allocation_free_before_ffi_if_supported() {
+        let device_id = current_device().expect("current device should be visible");
+        let graph_a = Graph::new().expect("graph A should be created");
+        let graph_b = Graph::new().expect("graph B should be created");
+
+        let allocation = match graph_a.add_mem_alloc_node(&[], device_id, 16) {
+            Ok(allocation) => allocation,
+            Err(err) if is_not_supported(&err) => return,
+            Err(err) => {
+                panic!("graph memory allocation nodes should work or be unsupported: {err}")
+            }
+        };
+
+        let err = unsafe { allocation.add_free_node(&graph_b, &[]) }
+            .expect_err("cross-graph allocation free should fail before FFI");
+        assert!(err.to_string().contains("memory allocation node belongs"));
+    }
+
+    #[test]
+    fn graph_rejects_zero_byte_allocation_before_ffi() {
+        let graph = Graph::new().expect("graph should be created");
+        let err = graph
+            .add_mem_alloc_node(&[], 0, 0)
+            .expect_err("zero-byte graph allocation should fail before FFI");
+        assert!(err.to_string().contains("nonzero bytes"));
+    }
+
+    #[test]
+    fn graph_rejects_null_free_pointer_before_ffi() {
+        let graph = Graph::new().expect("graph should be created");
+        let err = unsafe { graph.add_mem_free_node(&[], std::ptr::null_mut()) }
+            .expect_err("null graph free pointer should fail before FFI");
+        assert!(err.to_string().contains("pointer is null"));
+    }
+
+    #[test]
     fn graph_exec_update_retargets_memcpy_node() {
         let input_a = DeviceBuffer::from_slice(&[5u32, 6, 7, 8]).expect("upload A should work");
         let input_b = DeviceBuffer::from_slice(&[9u32, 10, 11, 12]).expect("upload B should work");
@@ -2829,6 +3048,28 @@ mod tests {
             output.copy_to_vec().expect("download B should work"),
             [9, 10, 11, 12]
         );
+    }
+
+    #[test]
+    fn graph_rejects_cross_graph_dependencies_before_ffi() {
+        let graph_a = Graph::new().expect("graph A should be created");
+        let graph_b = Graph::new().expect("graph B should be created");
+        let node_a = graph_a
+            .add_empty_node(&[])
+            .expect("graph A empty node should work");
+        let node_b = graph_b
+            .add_empty_node(&[])
+            .expect("graph B empty node should work");
+
+        let err = graph_b
+            .add_empty_node(&[node_a])
+            .expect_err("cross-graph dependency should fail");
+        assert!(err.to_string().contains("belongs to graph"));
+
+        let err = graph_b
+            .add_dependency(node_a, node_b)
+            .expect_err("cross-graph dependency edge should fail");
+        assert!(err.to_string().contains("belongs to graph"));
     }
 
     #[test]
@@ -2893,6 +3134,39 @@ mod tests {
     }
 
     #[test]
+    fn virtual_memory_rejects_zero_size_reservation_before_ffi() {
+        let err = match DeviceVirtualMemory::new_for_device(0, 0) {
+            Ok(_) => panic!("zero-size virtual memory reservation should fail before FFI"),
+            Err(err) => err,
+        };
+        assert!(err.to_string().contains("must be nonzero"));
+    }
+
+    #[test]
+    fn virtual_memory_access_flags_reject_invalid_hip_values() {
+        let err = MemAccessFlags::from_raw(99).expect_err("unknown HIP access flags should fail");
+        assert!(err.to_string().contains("unknown memory access flags"));
+
+        let err = MemAccessFlags::from_u64(u64::MAX)
+            .expect_err("out-of-range HIP access flags should fail");
+        assert!(err.to_string().contains("out-of-range memory access flags"));
+    }
+
+    #[test]
+    fn virtual_memory_rounding_rejects_zero_granularity_before_ffi() {
+        let err = super::round_up_to_multiple(4096, 0, "HIP virtual memory allocation")
+            .expect_err("zero VMM granularity should fail before FFI");
+        assert!(err.to_string().contains("granularity must be nonzero"));
+    }
+
+    #[test]
+    fn virtual_memory_rounding_rejects_size_overflow_before_ffi() {
+        let err = super::round_up_to_multiple(usize::MAX, 2, "HIP virtual memory allocation")
+            .expect_err("VMM rounded size overflow should fail before FFI");
+        assert!(err.to_string().contains("size overflow"));
+    }
+
+    #[test]
     fn zero_length_device_buffer_does_not_allocate() {
         let buffer = DeviceBuffer::<u8>::new(0).expect("zero-sized allocation should work");
         assert!(buffer.is_empty());
@@ -2904,7 +3178,10 @@ mod tests {
 
     #[test]
     fn global_size_mismatch_is_error_before_copy() {
-        let global = Global::<u32>::new(std::ptr::null_mut(), 8, "coeffs".into())
+        let module = Arc::new(ModuleInner {
+            raw: std::ptr::null_mut(),
+        });
+        let global = Global::<u32>::new(std::ptr::null_mut(), 8, "coeffs".into(), module)
             .expect("u32 view of eight bytes should be valid");
         let err = global
             .copy_from_slice(&[1])

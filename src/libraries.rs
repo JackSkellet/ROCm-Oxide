@@ -541,6 +541,9 @@ struct DynamicLibrary {
     name: String,
 }
 
+// DynamicLibrary owns a process-local dlopen handle and resolves immutable
+// function pointers. Optional-library handles are opaque ROCm handles whose
+// creation/destruction remains paired in their wrapper Drop implementations.
 unsafe impl Send for DynamicLibrary {}
 unsafe impl Sync for DynamicLibrary {}
 unsafe impl Send for RocBlasFunctions {}
@@ -2603,6 +2606,42 @@ mod tests {
     }
 
     #[test]
+    fn hipblaslt_sgemm_problem_rejects_each_invalid_leading_dimension() {
+        assert!(
+            HipBlasLtMatmulProblem::sgemm_nn_with_leading_dimensions(
+                16, 16, 16, 15, 16, 16, 16, 0,
+            )
+            .expect_err("A leading dimension smaller than m should fail")
+            .to_string()
+            .contains("A leading dimension")
+        );
+        assert!(
+            HipBlasLtMatmulProblem::sgemm_nn_with_leading_dimensions(
+                16, 16, 16, 16, 15, 16, 16, 0,
+            )
+            .expect_err("B leading dimension smaller than k should fail")
+            .to_string()
+            .contains("B leading dimension")
+        );
+        assert!(
+            HipBlasLtMatmulProblem::sgemm_nn_with_leading_dimensions(
+                16, 16, 16, 16, 16, 15, 16, 0,
+            )
+            .expect_err("C leading dimension smaller than m should fail")
+            .to_string()
+            .contains("C leading dimension")
+        );
+        assert!(
+            HipBlasLtMatmulProblem::sgemm_nn_with_leading_dimensions(
+                16, 16, 16, 16, 16, 16, 15, 0,
+            )
+            .expect_err("D leading dimension smaller than m should fail")
+            .to_string()
+            .contains("D leading dimension")
+        );
+    }
+
+    #[test]
     fn rocblas_handle_smoke_if_library_is_available() {
         let Ok(blas) = RocBlas::open() else {
             return;
@@ -2651,6 +2690,22 @@ mod tests {
         if let Some(workspace) = summary.best_workspace_bytes {
             assert!(workspace <= summary.workspace_limit_bytes as usize);
         }
+    }
+
+    #[test]
+    fn hipblaslt_heuristics_reject_nonpositive_algorithm_count_if_library_is_available() {
+        let Ok(lt) = HipBlasLt::open() else {
+            return;
+        };
+        let Ok(handle) = lt.create_handle() else {
+            return;
+        };
+        let problem = HipBlasLtMatmulProblem::sgemm_nn(16, 16, 16, 0)
+            .expect("valid SGEMM descriptor should be accepted");
+        let err = handle
+            .sgemm_nn_heuristics(problem, 0)
+            .expect_err("nonpositive algorithm count should fail before FFI");
+        assert!(err.to_string().contains("requested algorithm count"));
     }
 
     #[test]

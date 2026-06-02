@@ -29,6 +29,9 @@ The offline profile covers:
 
 - formatting checks;
 - verification script syntax;
+- documentation generation with `cargo doc --no-deps`;
+- strict `cargo clippy --all-targets` warnings-as-errors coverage;
+- cargo package dry-run coverage;
 - proc-macro, build-tool, and cargo-wrapper tests that do not need a live GPU.
 
 The quick profile covers:
@@ -38,6 +41,10 @@ The quick profile covers:
 - doctor and pipeline inspection;
 - core generated-binding GPU smoke coverage;
 - `feature_showcase`;
+- external downstream crate compilation through `scripts/consumer-smoke.sh`;
+- `validation_profile` JSON output with ROCm version, selected architecture,
+  device capabilities, optional-library availability, known-profile deviations,
+  and skipped-test reasons;
 - `performance_probe` JSON output;
 - one headless `spectral_lattice` visual artifact.
 
@@ -50,6 +57,8 @@ verification should avoid relying on default test parallelism.
 
 ## CI Gates
 
+Detailed promotion rules are captured in [CI and release gates](release-gates.md).
+
 The standard GitHub Actions workflow runs `scripts/verify.sh --offline` on
 pull requests and pushes to `main`.
 
@@ -61,10 +70,17 @@ ROCm runners labeled:
 
 GPU jobs upload the `target/production-readiness/` directory so logs, JSON
 performance output, and headless visual artifacts are available from the run.
+The `validation_profile.json` artifact is the checked machine profile for that
+run; keep separate artifacts for `gfx1100` and `gfx1201` and compare the
+`known_profile.deviations` and `skipped_tests` fields before promoting a feature
+that depends on topology-specific ROCm capabilities. The current release-gating
+profiles are listed in [Supported ROCm and GPU matrix](supported-rocm-gpu-matrix.md).
 
 ## Hardening Priorities
 
 1. Safety audit:
+   - detailed audit status is captured in
+     [Unsafe and FFI audit](unsafe-audit.md);
    - every public `unsafe` API needs a precise safety contract;
    - every FFI wrapper needs ownership, lifetime, and thread-safety notes;
    - graph allocations, VMM mappings, COMGR/HIPRTC cache entries, rocPRIM

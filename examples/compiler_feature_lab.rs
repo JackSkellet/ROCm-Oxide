@@ -130,7 +130,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
         for key in window.get_keys_pressed(KeyRepeat::No) {
             match key {
-                Key::Key1 => state.selected = 0.min(state.probes.len().saturating_sub(1)),
+                Key::Key1 => state.selected = 0,
                 Key::Key2 => state.selected = 1.min(state.probes.len().saturating_sub(1)),
                 Key::Key3 => state.selected = 2.min(state.probes.len().saturating_sub(1)),
                 Key::Key4 => state.selected = 3.min(state.probes.len().saturating_sub(1)),
@@ -205,73 +205,74 @@ fn rerun_probes(state: &mut AppState) {
 fn run_probes() -> Result<Vec<FeatureProbe>, Box<dyn std::error::Error>> {
     let device = Device::first()?;
     let kernels = generated::DeviceKernels::load_embedded(&device)?;
-    let mut probes = Vec::new();
-    probes.push(probe_or_error(
-        FeatureKind::RuntimeBasics,
-        "Runtime basics",
-        run_runtime_basics_probe(&kernels),
-    ));
-    probes.push(probe_or_error(
-        FeatureKind::LaunchContracts,
-        "Launch contracts",
-        run_launch_contract_probe(&kernels),
-    ));
-    probes.push(probe_or_error(
-        FeatureKind::VisualKernels,
-        "Visual kernels",
-        run_visual_kernel_probe(&kernels),
-    ));
-    probes.push(probe_or_error(
-        FeatureKind::LayoutClosure,
-        "Layout and closures",
-        run_layout_closure_probe(&kernels),
-    ));
-    probes.push(probe_or_error(
-        FeatureKind::MathIntrinsics,
-        "Math intrinsics",
-        run_math_probe(&kernels),
-    ));
-    probes.push(probe_or_error(
-        FeatureKind::ReturnValue,
-        "Return-by-value",
-        run_return_probe(&kernels),
-    ));
-    probes.push(probe_or_error(
-        FeatureKind::CastMatrix,
-        "Conversion matrix",
-        run_cast_probe(&kernels),
-    ));
-    probes.push(probe_or_error(
-        FeatureKind::HostReference,
-        "Host reference capture",
-        run_host_reference_probe(&device, &kernels),
-    ));
-    probes.push(probe_or_error(
-        FeatureKind::SyncScope,
-        "Atomic syncscope",
-        run_syncscope_probe(&kernels),
-    ));
-    probes.push(probe_or_error(
-        FeatureKind::LdsCollectives,
-        "LDS and collectives",
-        run_lds_collectives_probe(&kernels),
-    ));
-    probes.push(probe_or_error(
-        FeatureKind::DeviceApi,
-        "Wave and device API",
-        run_device_api_probe(&device, &kernels),
-    ));
-    probes.push(probe_or_error(
-        FeatureKind::GraphOperations,
-        "Graphs and operations",
-        run_graph_operation_probe(&device, &kernels),
-    ));
-    probes.push(probe_or_error(
-        FeatureKind::RocmLibraries,
-        "ROCm libraries",
-        Ok(run_library_probe()),
-    ));
-    probes.push(debug_info_probe(&device));
+    let mut probes = vec![
+        probe_or_error(
+            FeatureKind::RuntimeBasics,
+            "Runtime basics",
+            run_runtime_basics_probe(&kernels),
+        ),
+        probe_or_error(
+            FeatureKind::LaunchContracts,
+            "Launch contracts",
+            run_launch_contract_probe(&kernels),
+        ),
+        probe_or_error(
+            FeatureKind::VisualKernels,
+            "Visual kernels",
+            run_visual_kernel_probe(&kernels),
+        ),
+        probe_or_error(
+            FeatureKind::LayoutClosure,
+            "Layout and closures",
+            run_layout_closure_probe(&kernels),
+        ),
+        probe_or_error(
+            FeatureKind::MathIntrinsics,
+            "Math intrinsics",
+            run_math_probe(&kernels),
+        ),
+        probe_or_error(
+            FeatureKind::ReturnValue,
+            "Return-by-value",
+            run_return_probe(&kernels),
+        ),
+        probe_or_error(
+            FeatureKind::CastMatrix,
+            "Conversion matrix",
+            run_cast_probe(&kernels),
+        ),
+        probe_or_error(
+            FeatureKind::HostReference,
+            "Host reference capture",
+            run_host_reference_probe(&device, &kernels),
+        ),
+        probe_or_error(
+            FeatureKind::SyncScope,
+            "Atomic syncscope",
+            run_syncscope_probe(&kernels),
+        ),
+        probe_or_error(
+            FeatureKind::LdsCollectives,
+            "LDS and collectives",
+            run_lds_collectives_probe(&kernels),
+        ),
+        probe_or_error(
+            FeatureKind::DeviceApi,
+            "Wave and device API",
+            run_device_api_probe(&device, &kernels),
+        ),
+        probe_or_error(
+            FeatureKind::GraphOperations,
+            "Graphs and operations",
+            run_graph_operation_probe(&device, &kernels),
+        ),
+        probe_or_error(
+            FeatureKind::RocmLibraries,
+            "ROCm libraries",
+            Ok(run_library_probe()),
+        ),
+        debug_info_probe(&device),
+    ];
     let overview = overview_probe(&device, &probes);
     probes.insert(0, overview);
     Ok(probes)
@@ -1599,11 +1600,11 @@ fn draw_return_view(
     scale: f32,
     elapsed: Duration,
 ) {
-    let pulse = ((elapsed.as_secs_f32() * 2.0).sin() * 0.5 + 0.5) as f32;
+    let pulse = (elapsed.as_secs_f32() * 2.0).sin() * 0.5 + 0.5;
     draw_value_bars(frame, rect, &probe.values, scale, CYAN, AMBER);
     for (index, value) in probe.values.iter().take(8).enumerate() {
         let x = rect.x + 46 + index * ((rect.w - 92) / 8);
-        let y = rect.y + 54 + ((*value as usize ^ index * 31) % 54);
+        let y = rect.y + 54 + (((*value as usize) ^ (index * 31)) % 54);
         let color = blend(CYAN, GREEN, pulse);
         fill_rect(frame, Rect::new(x, y, 34, 34), color);
         stroke_rect(frame, Rect::new(x, y, 34, 34), TEXT);

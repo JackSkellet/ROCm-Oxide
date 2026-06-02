@@ -27,8 +27,8 @@ fn main() -> Result<()> {
 
     println!("ROCm-Oxide GPU performance probe on {}", device.arch());
     println!(
-        "{:<30} {:>10} {:>10} {:>14}  {}",
-        "kernel", "gpu ms", "est FPS", "occupancy", "flags"
+        "{:<30} {:>10} {:>10} {:>14}  flags",
+        "kernel", "gpu ms", "est FPS", "occupancy"
     );
     println!("{:-<92}", "");
 

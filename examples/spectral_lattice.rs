@@ -2211,14 +2211,12 @@ impl ResourceSnapshot {
                 on_off(libraries.rocblas.available),
                 on_off(libraries.rocfft.available)
             ),
-            parity_line: format!(
-                "{}",
-                if parity.cluster_launch.requires_runtime_capability {
-                    "parity: cooperative launch path"
-                } else {
-                    "parity: stream tiled path"
-                }
-            ),
+            parity_line: (if parity.cluster_launch.requires_runtime_capability {
+                "parity: cooperative launch path"
+            } else {
+                "parity: stream tiled path"
+            })
+            .to_string(),
         })
     }
 }
@@ -2722,7 +2720,7 @@ fn draw_overlay(
         0xdce8f4,
     );
 
-    for index in 0..MODES.len() {
+    for (index, mode) in MODES.iter().enumerate() {
         let rect = scale_rect(mode_rect(index), scale);
         let active = index == state.mode;
         draw_button(
@@ -2730,7 +2728,7 @@ fn draw_overlay(
             size,
             scale,
             rect,
-            MODES[index],
+            mode,
             if active { 0x2b8ee8 } else { 0x1a3045 },
             active,
         );

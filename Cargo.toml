@@ -2,8 +2,13 @@
 name = "rocm-oxide"
 version = "0.1.0"
 edition = "2024"
+rust-version = "1.85"
 description = "ROCm-Oxide: a Rust-hosted ROCm/HIPRTC runtime and Rust device-code prototype."
+documentation = "https://docs.rs/rocm-oxide"
 license = "MIT OR Apache-2.0"
+readme = "README.md"
+keywords = ["rocm", "hip", "gpu", "rust", "amdgpu"]
+categories = ["api-bindings", "development-tools::ffi", "hardware-support"]
 
 [build-dependencies]
 
