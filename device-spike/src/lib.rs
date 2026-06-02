@@ -1759,6 +1759,103 @@ pub unsafe extern "C" fn window_fx(
 }
 
 // rocm-oxide: len(frame)=pixel_count
+// rocm-oxide: len(input)=pixel_count
+#[kernel]
+pub unsafe extern "C" fn matrix_lens_fx(
+    frame: gpu::DeviceSliceMut<u32>,
+    input: gpu::DeviceSlice<u32>,
+    width: u32,
+    height: u32,
+    pixel_count: usize,
+    frame_index: u32,
+    mode: u32,
+) {
+    let i = gpu::global_id_x();
+    if width == 0 || height == 0 || i >= pixel_count || i >= frame.len() || i >= input.len() {
+        return;
+    }
+
+    let x = (i as u32) % width;
+    let y = (i as u32) / width;
+    let cx = (width as f32) * 0.5;
+    let cy = (height as f32) * 0.5;
+    let aspect = (width as f32) / (height as f32);
+    let nx = ((x as f32) - cx) / cx.max(1.0);
+    let ny = ((y as f32) - cy) / cy.max(1.0);
+    let r2 = nx * nx + ny * ny;
+    let edge = clamp_f32((1.0 - r2) * 1.35, 0.0, 1.0);
+    let wave = gpu::math::sin_f32(nx * 10.0 + ny * 7.0 + (frame_index as f32) * 0.035);
+    let refract = (0.045 + wave * 0.018) * edge;
+    let sx = clamp_f32(
+        (x as f32) + nx * refract * (width as f32) + wave * 3.0,
+        0.0,
+        (width - 1) as f32,
+    ) as u32;
+    let sy = clamp_f32(
+        (y as f32) + ny * refract * (height as f32) - wave * 2.0,
+        0.0,
+        (height - 1) as f32,
+    ) as u32;
+    let base = unsafe { sample_frame(input.as_ptr(), width, height, sx, sy) };
+    let left = unsafe { sample_frame(input.as_ptr(), width, height, sx.saturating_sub(1), sy) };
+    let right = unsafe { sample_frame(input.as_ptr(), width, height, min_u32(sx + 1, width - 1), sy) };
+    let up = unsafe { sample_frame(input.as_ptr(), width, height, sx, sy.saturating_sub(1)) };
+    let down = unsafe { sample_frame(input.as_ptr(), width, height, sx, min_u32(sy + 1, height - 1)) };
+    let lum = luminance(base) as u32;
+    let edge_strength =
+        clamp_i32(abs_i32(luminance(left) - luminance(right)) + abs_i32(luminance(up) - luminance(down)), 0, 255)
+            as u32;
+
+    let column = x >> 3;
+    let row = y >> 3;
+    let seed = hash32(column.wrapping_mul(747_796_405).wrapping_add(row * 289).wrapping_add(mode));
+    let speed = 1 + (seed & 7);
+    let head = frame_index.wrapping_mul(speed).wrapping_add(seed >> 8) % height;
+    let tail = (height + y).wrapping_sub(head) % height;
+    let rain = if tail < 96 {
+        255u32.saturating_sub(tail * 2)
+    } else {
+        0
+    };
+    let glyph = if ((seed >> ((x & 7) + (frame_index & 3))) ^ y) & 7 < 3 {
+        48
+    } else {
+        0
+    };
+
+    let m = mode & 3;
+    let mut rgb = if m == 1 {
+        let glass = mix_color(base, 0x163d2e, 0.30 + edge * 0.25);
+        let ca = min_u32(edge_strength + rain / 4, 255);
+        let r = clamp_i32(((glass >> 16) & 255) as i32 + (wave * 26.0) as i32, 0, 255) as u32;
+        let g = min_u32(((glass >> 8) & 255) + ca / 2, 255);
+        let b = min_u32((glass & 255) + ca, 255);
+        (r << 16) | (g << 8) | b
+    } else if m == 2 {
+        let heat = min_u32(lum + edge_strength + rain / 2, 255);
+        wheel((170u32.saturating_sub(heat >> 1)).wrapping_add(frame_index * 2) & 255, heat)
+    } else if m == 3 {
+        let wire = min_u32(edge_strength * 2 + rain / 3, 255);
+        (wire << 16) | (min_u32(lum / 3 + wire, 255) << 8) | min_u32(lum + wire, 255)
+    } else {
+        let green = min_u32(lum + rain + glyph, 255);
+        let red = min_u32((lum >> 3) + edge_strength / 5, 80);
+        let blue = min_u32((lum >> 2) + edge_strength / 3, 120);
+        (red << 16) | (green << 8) | blue
+    };
+
+    let border = clamp_f32((r2 - 0.72) * 9.0, 0.0, 1.0);
+    if border > 0.0 {
+        rgb = mix_color(rgb, 0x91ffb4, border * 0.55);
+    }
+    let vignette = clamp_f32(1.16 - r2 * 0.42 * aspect.min(1.4), 0.38, 1.0);
+    let r = (((rgb >> 16) & 255) as f32 * vignette) as u32;
+    let g = (((rgb >> 8) & 255) as f32 * vignette) as u32;
+    let b = ((rgb & 255) as f32 * vignette) as u32;
+    unsafe { frame.write_unchecked(i, (r << 16) | (g << 8) | b) };
+}
+
+// rocm-oxide: len(frame)=pixel_count
 // rocm-oxide: len(color)=pixel_count/4
 // rocm-oxide: len(depth)=pixel_count/4
 #[kernel]

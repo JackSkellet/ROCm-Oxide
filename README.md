@@ -78,6 +78,9 @@ cargo run --example rust_device_generated_bindings
 ## Notable examples
 
 - **`spectral_lattice`**: interactive visual GPU workbench (multiple render/compute paths, GUI controls, headless frame export, CPU/OpenGL/Vulkan present paths)
+- **`matrix_lens`**: Vulkan-only pass-through lens demo that captures the
+  monitor region under the window and renders matrix/glass/thermal/xray effects
+  on the GPU
 - **`compiler_feature_lab`**: GUI for probing compiler/runtime/device feature slices
 - **`performance_probe`**: emits timing/resource snapshots and JSON benchmark output
 
@@ -88,6 +91,9 @@ cargo run --example spectral_lattice
 cargo run --example spectral_lattice -- --frames 3 --resolution 4k --fps-limit 120
 cargo run --example spectral_lattice -- --present gl --resolution 1440p --fps-limit uncapped
 cargo run --example spectral_lattice -- --present vulkan --resolution 1440p --fps-limit uncapped
+
+cargo run --example matrix_lens -- --resolution 720p --mode matrix
+cargo run --example matrix_lens -- --frames 30 --resolution 540p --output target/matrix_lens.png
 
 cargo run --example compiler_feature_lab
 cargo run --example compiler_feature_lab -- --frames 1
@@ -104,6 +110,9 @@ on the GPU and composite the same interactive controls through a small textured
 overlay panel instead of reading the full frame back to the host every frame.
 The Vulkan overlay panel is rasterized on a bounded worker and presents the
 latest ready texture so CPU UI drawing does not block the GPU presentation path.
+`matrix_lens` is Vulkan-only and uses monitor-region capture keyed from the SDL
+window position, then uploads new capture frames asynchronously while the HIP
+kernel and Vulkan presenter keep rendering the latest available image.
 
 ---
 
