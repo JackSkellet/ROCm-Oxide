@@ -180,8 +180,36 @@ struct DemoArgs {
     frames: Option<u32>,
     output: PathBuf,
     mode: usize,
+    capture_mode: CaptureMode,
     size: RenderSize,
     fps_limit: usize,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum CaptureMode {
+    Auto,
+    DmaBuf,
+    Video,
+    Pattern,
+}
+
+impl CaptureMode {
+    fn uses_dmabuf(self) -> bool {
+        matches!(self, Self::Auto | Self::DmaBuf)
+    }
+
+    fn uses_video(self) -> bool {
+        matches!(self, Self::Auto | Self::Video)
+    }
+
+    fn label(self) -> &'static str {
+        match self {
+            Self::Auto => "auto",
+            Self::DmaBuf => "dmabuf",
+            Self::Video => "video",
+            Self::Pattern => "pattern",
+        }
+    }
 }
 
 #[derive(Clone, Copy)]
@@ -299,7 +327,11 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let pixel_count = args.size.pixel_count();
     let device_input = DeviceBuffer::<u32>::new(pixel_count)?;
     let mut host_input = vec![0u32; pixel_count];
-    fill_boot_pattern(&mut host_input, args.size);
+    if args.capture_mode == CaptureMode::Pattern {
+        fill_matrix_fallback(&mut host_input, args.size);
+    } else {
+        fill_boot_pattern(&mut host_input, args.size);
+    }
     device_input.copy_from_host(&host_input)?;
     presenter.copy_device_input_to_shared(&device_input)?;
 
@@ -308,7 +340,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         sequence: 0,
         captures: 0,
         errors: 0,
-        status: "video stream warming up".to_string(),
+        status: initial_capture_status(args.capture_mode).to_string(),
     }));
     let request = Arc::new(Mutex::new(CaptureRequest {
         x: 0,
@@ -318,7 +350,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     }));
     let running = Arc::new(AtomicBool::new(true));
     let frozen = Arc::new(AtomicBool::new(false));
-    let mut gpu_capture = if presenter.supports_dma_buf_import() {
+    let mut gpu_capture = if args.capture_mode.uses_dmabuf() && presenter.supports_dma_buf_import()
+    {
         match GpuCaptureBackend::new() {
             Ok(backend) => {
                 println!(
@@ -328,21 +361,31 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 Some(backend)
             }
             Err(err) => {
-                eprintln!(
-                    "Matrix Lens capture: dma-buf unavailable ({err}); falling back to video stream"
-                );
-                None
+                if args.capture_mode == CaptureMode::DmaBuf {
+                    return Err(format!("Matrix Lens capture: dma-buf unavailable: {err}").into());
+                } else {
+                    eprintln!(
+                        "Matrix Lens capture: dma-buf unavailable ({err}); falling back to video stream"
+                    );
+                    None
+                }
             }
         }
+    } else if args.capture_mode.uses_dmabuf() {
+        if args.capture_mode == CaptureMode::DmaBuf {
+            return Err(other_error(
+                "Matrix Lens capture: Vulkan dma-buf import unsupported",
+            ));
+        } else {
+            eprintln!(
+                "Matrix Lens capture: Vulkan dma-buf import unsupported; falling back to video stream"
+            );
+            None
+        }
     } else {
-        eprintln!(
-            "Matrix Lens capture: Vulkan dma-buf import unsupported; falling back to video stream"
-        );
         None
     };
-    let mut capture_thread = if gpu_capture.is_some() {
-        None
-    } else {
+    let mut capture_thread = if gpu_capture.is_none() && args.capture_mode.uses_video() {
         Some(spawn_video_capture_thread(
             args.size,
             Arc::clone(&shared),
@@ -350,6 +393,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             Arc::clone(&running),
             Arc::clone(&frozen),
         ))
+    } else {
+        None
     };
 
     let start = Instant::now();
@@ -436,7 +481,14 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                         gpu_errors = gpu_errors.wrapping_add(1);
                         capture_status = format!("gpu capture kept previous frame: {err}");
                         if gpu_errors >= 3 {
-                            switch_to_video_stream = true;
+                            if args.capture_mode.uses_video() {
+                                switch_to_video_stream = true;
+                            } else if args.capture_mode == CaptureMode::DmaBuf {
+                                return Err(format!(
+                                    "Matrix Lens capture: dma-buf failed after {gpu_errors} attempts: {err}"
+                                )
+                                .into());
+                            }
                         }
                     }
                 }
@@ -497,8 +549,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             last_capture_count = captures;
             last_fps = Instant::now();
             presenter.window.set_title(&format!(
-                "ROCm-Oxide Matrix Lens Vulkan | {} | render {:.1} capture {:.1} | input {:.2} present {:.2} | {} seq {} | errors {} | {}",
+                "ROCm-Oxide Matrix Lens Vulkan | {} | {} | render {:.1} capture {:.1} | input {:.2} present {:.2} | {} seq {} | errors {} | {}",
                 MODES[mode],
+                args.capture_mode.label(),
                 render_fps,
                 capture_fps,
                 copy_ms,
@@ -2041,10 +2094,20 @@ fn pace_frame(frame_start: Instant, fps_limit: usize) {
     }
 }
 
+fn initial_capture_status(capture_mode: CaptureMode) -> &'static str {
+    match capture_mode {
+        CaptureMode::Auto => "capture warming up",
+        CaptureMode::DmaBuf => "dma-buf capture warming up",
+        CaptureMode::Video => "video stream warming up",
+        CaptureMode::Pattern => "pattern input",
+    }
+}
+
 fn parse_args() -> Result<DemoArgs, Box<dyn std::error::Error>> {
     let mut frames = None;
     let mut output = PathBuf::from(DEFAULT_OUTPUT);
     let mut mode = 0usize;
+    let mut capture_mode = CaptureMode::Auto;
     let mut size = RESOLUTION_PRESETS[0].size;
     let mut fps_limit = DEFAULT_FPS_LIMIT;
     let mut args = std::env::args().skip(1);
@@ -2068,6 +2131,12 @@ fn parse_args() -> Result<DemoArgs, Box<dyn std::error::Error>> {
                     .ok_or_else(|| "--mode requires a mode".to_string())?;
                 mode = parse_mode(&value)?;
             }
+            "--capture" | "--capture-mode" => {
+                let value = args.next().ok_or_else(|| {
+                    "--capture requires auto, dmabuf, video, or pattern".to_string()
+                })?;
+                capture_mode = parse_capture_mode(&value)?;
+            }
             "--resolution" | "--res" => {
                 let value = args
                     .next()
@@ -2082,7 +2151,7 @@ fn parse_args() -> Result<DemoArgs, Box<dyn std::error::Error>> {
             }
             "--help" | "-h" => {
                 println!(
-                    "Usage: cargo run --example matrix_lens -- [--frames N] [--mode matrix|glass|thermal|xray] [--resolution 540p|720p|1080p|WIDTHxHEIGHT] [--fps-limit FPS|uncapped]"
+                    "Usage: cargo run --example matrix_lens -- [--frames N] [--mode matrix|glass|thermal|xray] [--capture auto|dmabuf|video|pattern] [--resolution 540p|720p|1080p|WIDTHxHEIGHT] [--fps-limit FPS|uncapped]"
                 );
                 std::process::exit(0);
             }
@@ -2093,6 +2162,7 @@ fn parse_args() -> Result<DemoArgs, Box<dyn std::error::Error>> {
         frames,
         output,
         mode,
+        capture_mode,
         size,
         fps_limit,
     })
@@ -2113,6 +2183,19 @@ fn parse_mode(value: &str) -> Result<usize, Box<dyn std::error::Error>> {
         .ok_or_else(|| {
             format!("unknown mode `{value}`; expected matrix, glass, thermal, or xray").into()
         })
+}
+
+fn parse_capture_mode(value: &str) -> Result<CaptureMode, Box<dyn std::error::Error>> {
+    match value.to_ascii_lowercase().as_str() {
+        "auto" => Ok(CaptureMode::Auto),
+        "dmabuf" | "dma-buf" | "gpu" => Ok(CaptureMode::DmaBuf),
+        "video" | "stream" => Ok(CaptureMode::Video),
+        "pattern" | "synthetic" | "fallback" => Ok(CaptureMode::Pattern),
+        _ => Err(format!(
+            "unknown capture mode `{value}`; expected auto, dmabuf, video, or pattern"
+        )
+        .into()),
+    }
 }
 
 fn parse_resolution(value: &str) -> Result<RenderSize, Box<dyn std::error::Error>> {
@@ -2141,6 +2224,197 @@ fn parse_fps_limit(value: &str) -> Result<usize, Box<dyn std::error::Error>> {
         return Ok(0);
     }
     Ok(value.parse::<usize>()?)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn video_frame_2x2() -> VideoFrame {
+        VideoFrame::new(
+            2,
+            2,
+            vec![
+                0x10, 0x20, 0x30, 0xff, 0x40, 0x50, 0x60, 0xff, 0x70, 0x80, 0x90, 0xff, 0xa0, 0xb0,
+                0xc0, 0xff,
+            ],
+        )
+    }
+
+    fn monitor_key(width: u32, height: u32) -> MonitorKey {
+        MonitorKey {
+            id: 1,
+            x: 0,
+            y: 0,
+            width,
+            height,
+        }
+    }
+
+    #[test]
+    fn parse_capture_mode_accepts_expected_names() {
+        assert_eq!(parse_capture_mode("auto").unwrap(), CaptureMode::Auto);
+        assert_eq!(parse_capture_mode("dmabuf").unwrap(), CaptureMode::DmaBuf);
+        assert_eq!(parse_capture_mode("dma-buf").unwrap(), CaptureMode::DmaBuf);
+        assert_eq!(parse_capture_mode("video").unwrap(), CaptureMode::Video);
+        assert_eq!(parse_capture_mode("pattern").unwrap(), CaptureMode::Pattern);
+    }
+
+    #[test]
+    fn video_frame_to_pixels_scales_monitor_space_to_frame_pixels() {
+        let frame = video_frame_2x2();
+        let request = CaptureRequest {
+            x: 0,
+            y: 0,
+            width: 4,
+            height: 4,
+        };
+        let size = RenderSize {
+            width: 4,
+            height: 4,
+        };
+        let mut output = vec![0; size.pixel_count()];
+
+        let status = video_frame_to_pixels(
+            &frame,
+            request,
+            size,
+            monitor_key(4, 4),
+            "test",
+            &mut output,
+        )
+        .expect("frame conversion should succeed");
+
+        assert_eq!(status, "video stream test 2x2 -> 4x4");
+        assert_eq!(
+            output,
+            vec![
+                0x102030, 0x102030, 0x405060, 0x405060, 0x102030, 0x102030, 0x405060, 0x405060,
+                0x708090, 0x708090, 0xa0b0c0, 0xa0b0c0, 0x708090, 0x708090, 0xa0b0c0, 0xa0b0c0,
+            ]
+        );
+    }
+
+    #[test]
+    fn video_frame_to_pixels_blacks_pixels_outside_monitor_crop() {
+        let frame = video_frame_2x2();
+        let request = CaptureRequest {
+            x: -1,
+            y: -1,
+            width: 3,
+            height: 3,
+        };
+        let size = RenderSize {
+            width: 3,
+            height: 3,
+        };
+        let mut output = vec![0xdead_beef; size.pixel_count()];
+
+        video_frame_to_pixels(
+            &frame,
+            request,
+            size,
+            monitor_key(2, 2),
+            "test",
+            &mut output,
+        )
+        .expect("partial monitor overlap should succeed");
+
+        assert_eq!(
+            output,
+            vec![0, 0, 0, 0, 0x102030, 0x405060, 0, 0x708090, 0xa0b0c0]
+        );
+    }
+
+    #[test]
+    fn video_frame_to_pixels_rejects_wrong_output_length() {
+        let frame = video_frame_2x2();
+        let request = CaptureRequest {
+            x: 0,
+            y: 0,
+            width: 2,
+            height: 2,
+        };
+        let size = RenderSize {
+            width: 2,
+            height: 2,
+        };
+        let mut output = vec![0; 3];
+
+        let err = video_frame_to_pixels(
+            &frame,
+            request,
+            size,
+            monitor_key(2, 2),
+            "test",
+            &mut output,
+        )
+        .expect_err("wrong output length should fail");
+
+        assert!(
+            err.to_string()
+                .contains("video output has 3 pixels, expected 4")
+        );
+    }
+
+    #[test]
+    fn video_frame_to_pixels_rejects_short_frame_buffer() {
+        let frame = VideoFrame::new(2, 2, vec![0; 15]);
+        let request = CaptureRequest {
+            x: 0,
+            y: 0,
+            width: 2,
+            height: 2,
+        };
+        let size = RenderSize {
+            width: 2,
+            height: 2,
+        };
+        let mut output = vec![0; size.pixel_count()];
+
+        let err = video_frame_to_pixels(
+            &frame,
+            request,
+            size,
+            monitor_key(2, 2),
+            "test",
+            &mut output,
+        )
+        .expect_err("short raw frame should fail");
+
+        assert!(
+            err.to_string()
+                .contains("video frame has 15 bytes, expected at least 16")
+        );
+    }
+
+    #[test]
+    fn video_frame_to_pixels_rejects_non_overlapping_window() {
+        let frame = video_frame_2x2();
+        let request = CaptureRequest {
+            x: 5,
+            y: 5,
+            width: 2,
+            height: 2,
+        };
+        let size = RenderSize {
+            width: 2,
+            height: 2,
+        };
+        let mut output = vec![0; size.pixel_count()];
+
+        let err = video_frame_to_pixels(
+            &frame,
+            request,
+            size,
+            monitor_key(2, 2),
+            "test",
+            &mut output,
+        )
+        .expect_err("outside request should fail");
+
+        assert_eq!(err.to_string(), "window is outside capturable monitor");
+    }
 }
 
 fn other_error(message: impl Into<String>) -> Box<dyn std::error::Error> {

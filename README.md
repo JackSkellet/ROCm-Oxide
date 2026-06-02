@@ -94,7 +94,8 @@ cargo run --example spectral_lattice -- --present gl --resolution 1440p --fps-li
 cargo run --example spectral_lattice -- --present vulkan --resolution 1440p --fps-limit uncapped
 
 cargo run --example matrix_lens -- --resolution 720p --mode matrix
-cargo run --example matrix_lens -- --frames 30 --resolution 540p --output target/matrix_lens.png
+cargo run --example matrix_lens -- --capture video --resolution 720p --mode matrix
+cargo run --example matrix_lens -- --frames 30 --capture pattern --resolution 540p --output target/matrix_lens.png
 
 cargo run --example compiler_feature_lab
 cargo run --example compiler_feature_lab -- --frames 1
@@ -117,7 +118,9 @@ image into Vulkan, copies it into a HIP-imported Vulkan input buffer, and render
 directly into the HIP-imported Vulkan output buffer before presentation. If the
 compositor or driver cannot provide that GPU path, the demo uses a persistent
 xcap video recorder and crops the newest streamed frame instead of issuing
-per-frame screenshots.
+per-frame screenshots. Use `--capture auto|dmabuf|video|pattern` to force a
+specific input path; `pattern` avoids compositor capture entirely for bounded
+test runs.
 
 ---
 
