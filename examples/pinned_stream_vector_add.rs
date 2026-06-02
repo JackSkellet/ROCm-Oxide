@@ -22,9 +22,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         PinnedHostBuffer::from_slice(&(0..n).map(|i| (i as f32) * 3.0).collect::<Vec<_>>())?;
     let mut out_host = PinnedHostBuffer::<f32>::new_zeroed(n)?;
 
-    let d_a = DeviceBuffer::<f32>::new_async(&stream, n)?;
+    let d_a = unsafe { DeviceBuffer::<f32>::new_async(&stream, n)? };
     let d_b = DeviceBuffer::<f32>::new(n)?;
-    let d_out = DeviceBuffer::<f32>::new_async(&stream, n)?;
+    let d_out = unsafe { DeviceBuffer::<f32>::new_async(&stream, n)? };
     d_a.copy_from_pinned_host(&a_host)?;
     unsafe {
         d_b.copy_from_pinned_host_async(&stream, &b_host)?;

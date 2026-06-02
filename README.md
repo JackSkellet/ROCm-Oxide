@@ -166,6 +166,8 @@ cargo run --manifest-path tools/cargo-rocm-oxide/Cargo.toml -- rocm-oxide inspec
 cargo run --manifest-path tools/cargo-rocm-oxide/Cargo.toml -- rocm-oxide run --example rust_device_generated_bindings
 cargo run --manifest-path tools/cargo-rocm-oxide/Cargo.toml -- rocm-oxide pipeline
 cargo run --manifest-path tools/cargo-rocm-oxide/Cargo.toml -- rocm-oxide profile
+cargo run --manifest-path tools/cargo-rocm-oxide/Cargo.toml -- rocm-oxide verify --offline
+cargo run --manifest-path tools/cargo-rocm-oxide/Cargo.toml -- rocm-oxide verify --quick
 ```
 
 When installed as `cargo-rocm-oxide`, these become `cargo rocm-oxide ...`.
@@ -195,6 +197,7 @@ When installed as `cargo-rocm-oxide`, these become `cargo rocm-oxide ...`.
 - [CUDA book adaptation notes](docs/cuda-oxide-book-rocm-adaptation.md)
 - [Future work](docs/cuda-future-work.md)
 - [Implementation tasks](docs/implementation-tasks.md)
+- [Production readiness](docs/production-readiness.md)
 
 ### Debugging
 
@@ -204,18 +207,24 @@ When installed as `cargo-rocm-oxide`, these become `cargo rocm-oxide ...`.
 
 ## Roadmap focus
 
-The next major objective is practical parity with the user-facing CUDA-Oxide feature set, adapted to ROCm-native capabilities (not CUDA binary/PTX/NVVM compatibility).
+The current objective is production readiness. ROCm-Oxide should keep practical
+parity with the user-facing CUDA-Oxide feature set, but new work now needs to
+harden APIs, safety contracts, diagnostics, validation, and release practices.
 
 High-priority areas:
 
-- backend correctness and kernel lowering robustness,
-- runtime orchestration (graphs, pools, stream ordering),
-- and cross-device / host-memory behavior consistency.
+- repeatable verification through `cargo rocm-oxide verify`;
+- public API stability boundaries;
+- unsafe/FFI safety contracts and negative tests;
+- cross-machine validation for `gfx1100` and `gfx1201`;
+- actionable diagnostics for toolchain, ABI, HIP, COMGR, and optional-library
+  failures.
 
 See:
 
 - [CUDA-Oxide supported features matrix](https://nvlabs.github.io/cuda-oxide/appendix/supported-features.html)
 - [Parity checklist](docs/cuda-oxide-parity-checklist.md)
+- [Production readiness](docs/production-readiness.md)
 
 ---
 

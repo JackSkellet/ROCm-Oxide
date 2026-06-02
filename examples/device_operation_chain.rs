@@ -26,11 +26,13 @@ fn vector_add_operation(
         let module = device.compile_hip_source(KERNEL)?;
         let kernel = module.kernel(c"vector_add")?;
 
-        let d_a = DeviceBuffer::<f32>::new_async(context.stream(), n)?;
-        let d_b = DeviceBuffer::<f32>::new_async(context.stream(), n)?;
-        let d_out = DeviceBuffer::<f32>::new_async(context.stream(), n)?;
-        d_a.copy_from_host_async(context.stream(), &a)?;
-        d_b.copy_from_host_async(context.stream(), &b)?;
+        let d_a = unsafe { DeviceBuffer::<f32>::new_async(context.stream(), n)? };
+        let d_b = unsafe { DeviceBuffer::<f32>::new_async(context.stream(), n)? };
+        let d_out = unsafe { DeviceBuffer::<f32>::new_async(context.stream(), n)? };
+        unsafe {
+            d_a.copy_from_host_async(context.stream(), &a)?;
+            d_b.copy_from_host_async(context.stream(), &b)?;
+        }
 
         let config = LaunchConfig::for_num_elems(n);
         let mut out_ptr = d_out.as_mut_ptr();
@@ -48,7 +50,9 @@ fn vector_add_operation(
         }
 
         let mut out = vec![0.0f32; n];
-        d_out.copy_to_host_async(context.stream(), &mut out)?;
+        unsafe {
+            d_out.copy_to_host_async(context.stream(), &mut out)?;
+        }
         Ok(out)
     }
 }

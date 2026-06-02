@@ -1560,6 +1560,30 @@ pub struct DeviceBuffer<T> {
 unsafe impl<T: Send> Send for DeviceBuffer<T> {}
 unsafe impl<T: Sync> Sync for DeviceBuffer<T> {}
 
+/// Plain-old-data element type that can be safely represented by zeroed host
+/// memory and copied to/from device memory as raw bytes.
+///
+/// # Safety
+///
+/// Implementors must guarantee that every bit pattern produced by zeroed memory
+/// and GPU byte copies is a valid value of the type, and that the type has no
+/// destructor, references, or hidden ownership/lifetime invariants.
+pub unsafe trait DevicePod: Copy + Send + Sync + 'static {}
+
+macro_rules! impl_device_pod {
+    ($($ty:ty),* $(,)?) => {
+        $(
+            unsafe impl DevicePod for $ty {}
+        )*
+    };
+}
+
+impl_device_pod!(
+    u8, u16, u32, u64, u128, usize, i8, i16, i32, i64, i128, isize, f32, f64,
+);
+
+unsafe impl<T: DevicePod, const N: usize> DevicePod for [T; N] {}
+
 pub struct ManagedBuffer<T> {
     ptr: *mut T,
     len: usize,
@@ -1569,7 +1593,7 @@ pub struct ManagedBuffer<T> {
 unsafe impl<T: Send> Send for ManagedBuffer<T> {}
 unsafe impl<T: Sync> Sync for ManagedBuffer<T> {}
 
-impl<T> ManagedBuffer<T> {
+impl<T: DevicePod> ManagedBuffer<T> {
     pub fn new_zeroed(len: usize) -> Result<Self> {
         Self::new_zeroed_with_kind(len, ManagedMemoryKind::FineGrain)
     }
@@ -1650,7 +1674,7 @@ impl<T> ManagedBuffer<T> {
     }
 }
 
-impl<T: Copy> ManagedBuffer<T> {
+impl<T: DevicePod> ManagedBuffer<T> {
     pub fn from_slice(input: &[T]) -> Result<Self> {
         let mut buffer = Self::new_zeroed(input.len())?;
         buffer.as_mut_slice().copy_from_slice(input);
@@ -1721,7 +1745,15 @@ impl<T> DeviceBuffer<T> {
         })
     }
 
-    pub fn new_async(stream: &Stream, len: usize) -> Result<Self> {
+    /// Enqueues a stream-ordered device allocation.
+    ///
+    /// # Safety
+    ///
+    /// The returned allocation must only be used by work ordered after this
+    /// allocation on `stream` until the stream reaches the allocation. The
+    /// stream and any memory pool selected by HIP for async allocation must
+    /// remain valid until that point.
+    pub unsafe fn new_async(stream: &Stream, len: usize) -> Result<Self> {
         let bytes = checked_allocation_bytes::<T>(len, "device")?;
         if bytes == 0 {
             return Ok(Self {
@@ -1745,7 +1777,14 @@ impl<T> DeviceBuffer<T> {
         })
     }
 
-    pub fn new_from_pool_async(stream: &Stream, pool: MemPool, len: usize) -> Result<Self> {
+    /// Enqueues a stream-ordered device allocation from `pool`.
+    ///
+    /// # Safety
+    ///
+    /// The returned allocation must only be used by work ordered after this
+    /// allocation on `stream` until the stream reaches the allocation. `stream`
+    /// and `pool` must remain valid until that point.
+    pub unsafe fn new_from_pool_async(stream: &Stream, pool: MemPool, len: usize) -> Result<Self> {
         let bytes = checked_allocation_bytes::<T>(len, "pooled device")?;
         if bytes == 0 {
             return Ok(Self {
@@ -1790,7 +1829,13 @@ impl<T> DeviceBuffer<T> {
         }
     }
 
-    pub fn copy_from_host_async(&self, stream: &Stream, input: &[T]) -> Result<()> {
+    /// Enqueues a host-to-device copy from borrowed host memory.
+    ///
+    /// # Safety
+    ///
+    /// `self`, `stream`, and `input` must remain valid until `stream` reaches
+    /// this copy. `input` must not be mutated for that duration.
+    pub unsafe fn copy_from_host_async(&self, stream: &Stream, input: &[T]) -> Result<()> {
         validate_slice_len("async host-to-device source", input.len(), self.len)?;
         let bytes = std::mem::size_of_val(input);
         if bytes == 0 {
@@ -1823,7 +1868,14 @@ impl<T> DeviceBuffer<T> {
         }
     }
 
-    pub fn copy_to_host_async(&self, stream: &Stream, output: &mut [T]) -> Result<()> {
+    /// Enqueues a device-to-host copy into borrowed host memory.
+    ///
+    /// # Safety
+    ///
+    /// `self`, `stream`, and `output` must remain valid until `stream` reaches
+    /// this copy. `output` must not be read, written, or aliased for that
+    /// duration.
+    pub unsafe fn copy_to_host_async(&self, stream: &Stream, output: &mut [T]) -> Result<()> {
         validate_slice_len("async device-to-host destination", output.len(), self.len)?;
         let bytes = std::mem::size_of_val(output);
         if bytes == 0 {
@@ -1861,7 +1913,18 @@ impl<T> DeviceBuffer<T> {
     ///
     /// The source and destination buffers must stay alive until `stream`
     /// reaches this copy.
-    pub fn copy_from_device_async(&self, stream: &Stream, input: &DeviceBuffer<T>) -> Result<()> {
+    /// Enqueues a device-to-device copy into this buffer.
+    ///
+    /// # Safety
+    ///
+    /// The source buffer, destination buffer, and `stream` must stay alive
+    /// until `stream` reaches this copy. The source and destination must not
+    /// alias.
+    pub unsafe fn copy_from_device_async(
+        &self,
+        stream: &Stream,
+        input: &DeviceBuffer<T>,
+    ) -> Result<()> {
         validate_slice_len("async device-to-device source", input.len, self.len)?;
         let bytes = checked_allocation_bytes::<T>(self.len, "async device-to-device copy")?;
         if bytes == 0 {
@@ -1885,10 +1948,17 @@ impl<T> DeviceBuffer<T> {
 
     /// Enqueues a copy from this buffer into another device buffer.
     ///
-    /// The source and destination buffers must stay alive until `stream`
-    /// reaches this copy.
-    pub fn copy_to_device_async(&self, stream: &Stream, output: &DeviceBuffer<T>) -> Result<()> {
-        output.copy_from_device_async(stream, self)
+    /// # Safety
+    ///
+    /// The source buffer, destination buffer, and `stream` must stay alive
+    /// until `stream` reaches this copy. The source and destination must not
+    /// alias.
+    pub unsafe fn copy_to_device_async(
+        &self,
+        stream: &Stream,
+        output: &DeviceBuffer<T>,
+    ) -> Result<()> {
+        unsafe { output.copy_from_device_async(stream, self) }
     }
 
     /// Fills the device allocation with a byte pattern.
@@ -1904,7 +1974,12 @@ impl<T> DeviceBuffer<T> {
     }
 
     /// Enqueues a byte-pattern fill of the device allocation.
-    pub fn memset_async(&self, stream: &Stream, value: u8) -> Result<()> {
+    ///
+    /// # Safety
+    ///
+    /// `self` and `stream` must remain valid until `stream` reaches this
+    /// memset.
+    pub unsafe fn memset_async(&self, stream: &Stream, value: u8) -> Result<()> {
         let bytes = checked_allocation_bytes::<T>(self.len, "async device memset")?;
         if bytes == 0 {
             return Ok(());
@@ -1925,8 +2000,13 @@ impl<T> DeviceBuffer<T> {
     }
 
     /// Enqueues a zero-byte fill of the device allocation.
-    pub fn set_zero_async(&self, stream: &Stream) -> Result<()> {
-        self.memset_async(stream, 0)
+    ///
+    /// # Safety
+    ///
+    /// `self` and `stream` must remain valid until `stream` reaches this
+    /// memset.
+    pub unsafe fn set_zero_async(&self, stream: &Stream) -> Result<()> {
+        unsafe { self.memset_async(stream, 0) }
     }
 
     /// Copies this buffer into another device-visible pointer.
@@ -2035,8 +2115,11 @@ impl<T> DeviceBuffer<T> {
         &self,
         stream: &Stream,
         input: &PinnedHostBuffer<T>,
-    ) -> Result<()> {
-        self.copy_from_host_async(stream, input.as_slice())
+    ) -> Result<()>
+    where
+        T: DevicePod,
+    {
+        unsafe { self.copy_from_host_async(stream, input.as_slice()) }
     }
 
     /// Enqueues a device-to-host copy into pinned host memory.
@@ -2049,15 +2132,24 @@ impl<T> DeviceBuffer<T> {
         &self,
         stream: &Stream,
         output: &mut PinnedHostBuffer<T>,
-    ) -> Result<()> {
-        self.copy_to_host_async(stream, output.as_mut_slice())
+    ) -> Result<()>
+    where
+        T: DevicePod,
+    {
+        unsafe { self.copy_to_host_async(stream, output.as_mut_slice()) }
     }
 
-    pub fn copy_from_pinned_host(&self, input: &PinnedHostBuffer<T>) -> Result<()> {
+    pub fn copy_from_pinned_host(&self, input: &PinnedHostBuffer<T>) -> Result<()>
+    where
+        T: DevicePod,
+    {
         self.copy_from_host(input.as_slice())
     }
 
-    pub fn copy_to_pinned_host(&self, output: &mut PinnedHostBuffer<T>) -> Result<()> {
+    pub fn copy_to_pinned_host(&self, output: &mut PinnedHostBuffer<T>) -> Result<()>
+    where
+        T: DevicePod,
+    {
         self.copy_to_host(output.as_mut_slice())
     }
 
@@ -2097,7 +2189,7 @@ pub struct PinnedHostBuffer<T> {
 unsafe impl<T: Send> Send for PinnedHostBuffer<T> {}
 unsafe impl<T: Sync> Sync for PinnedHostBuffer<T> {}
 
-impl<T> PinnedHostBuffer<T> {
+impl<T: DevicePod> PinnedHostBuffer<T> {
     pub fn new_zeroed(len: usize) -> Result<Self> {
         Self::new_zeroed_with_flags(len, 0)
     }
@@ -2166,7 +2258,7 @@ impl<T> PinnedHostBuffer<T> {
     }
 }
 
-impl<T: Copy> PinnedHostBuffer<T> {
+impl<T: DevicePod> PinnedHostBuffer<T> {
     pub fn from_slice(input: &[T]) -> Result<Self> {
         let mut buffer = Self::new_zeroed(input.len())?;
         buffer.as_mut_slice().copy_from_slice(input);

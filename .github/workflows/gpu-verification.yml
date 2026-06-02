@@ -1,0 +1,52 @@
+name: GPU Verification
+
+on:
+  workflow_dispatch:
+
+jobs:
+  gpu-production-gate:
+    name: ${{ matrix.gpu_arch }} ${{ matrix.profile }} gate
+    runs-on:
+      - self-hosted
+      - linux
+      - rocm
+      - ${{ matrix.gpu_arch }}
+    timeout-minutes: 120
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - gpu_arch: gfx1100
+            profile: quick
+          - gpu_arch: gfx1100
+            profile: full
+          - gpu_arch: gfx1201
+            profile: quick
+          - gpu_arch: gfx1201
+            profile: full
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install Rust toolchain
+        run: rustup toolchain install nightly --component rust-src --component clippy --component rustfmt
+
+      - name: Show Rust toolchain
+        run: rustup show
+
+      - name: Show ROCm environment
+        run: |
+          command -v rocminfo
+          rocminfo | grep -E 'Name:|Marketing Name:|gfx' || true
+
+      - name: Run GPU verification
+        run: scripts/verify.sh --${{ matrix.profile }}
+
+      - name: Upload production readiness artifacts
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: production-readiness-${{ matrix.gpu_arch }}-${{ matrix.profile }}
+          path: target/production-readiness
+          if-no-files-found: ignore

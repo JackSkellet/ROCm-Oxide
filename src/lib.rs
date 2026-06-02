@@ -7,7 +7,7 @@ pub mod profiling;
 mod runtime;
 
 pub use hip::{
-    DeviceBuffer, DeviceVirtualMemory, Event, Global, ManagedBuffer, ManagedMemoryKind,
+    DeviceBuffer, DevicePod, DeviceVirtualMemory, Event, Global, ManagedBuffer, ManagedMemoryKind,
     MemAccessFlags, MemAllocationGranularity, MemLocation, MemPool, OwnedMemPool, PinnedHostBuffer,
     Stream,
 };

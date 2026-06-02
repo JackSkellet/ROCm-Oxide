@@ -7,6 +7,44 @@ features on top of stronger contracts.
 
 ## Active Sequence
 
+- [ ] Production readiness sequence from
+      [production-readiness.md](production-readiness.md):
+  - [x] define a repeatable quick/full verification gate through
+        `scripts/verify.sh` and `cargo rocm-oxide verify`
+  - [x] split verification into offline, GPU-quick, and GPU-full profiles so
+        ordinary CI can run without a live ROCm device
+  - [x] write the production-readiness contract and verification coverage
+  - [x] add command-router tests for `cargo rocm-oxide verify`
+  - [x] add `.github/workflows/ci.yml` for offline production checks
+  - [x] add a self-hosted/manual GPU workflow for `gfx1100` and `gfx1201`
+        running quick and full verification profiles
+  - [ ] audit public `unsafe` APIs and FFI wrappers for explicit safety,
+        ownership, lifetime, thread-safety, and drop-order contracts
+  - [x] require a `DevicePod` marker for safe zeroed managed and pinned host
+        buffers so arbitrary `T` is not exposed as initialized host-visible
+        memory
+  - [x] make enqueue-only buffer allocation, copy, and memset APIs unsafe where
+        callers must keep streams, host buffers, device buffers, memory pools,
+        and outputs alive until the stream reaches the work
+  - [ ] enforce module-owned function/global lifetimes through lifetimes or
+        retained module inners
+  - [ ] tighten graph node/allocation tokens so safe APIs cannot mix stale or
+        cross-graph dependencies
+  - [ ] add negative tests for invalid graph allocation/free order, VMM
+        map/unmap/access misuse, undersized rocPRIM temporary storage, COMGR
+        cache key mismatch, and hipBLASLt invalid descriptor inputs
+  - [ ] classify public modules as stable, experimental, or internal, then hide
+        or document unstable surfaces before downstream code depends on them
+  - [ ] turn machine profiles into checked validation artifacts for `gfx1100`
+        and `gfx1201`, including skipped-test reasons and ROCm capability
+        differences
+  - [ ] harden diagnostics for missing ROCm tools, unsupported GPU arch, bad
+        kernel ABI, unsupported memory kind, missing library symbols, and
+        HIPRTC/COMGR compile failures
+  - [ ] define CI and release gates for CPU-only checks, GPU checks,
+        documentation, versioning, and known-limitations notes
+  - [ ] add release basics: license files, changelog, contributing guide,
+        security policy, supported ROCm/GPU matrix, and package metadata
 - [x] ASAP cuda-oxide feature parity sequence from
       [NVIDIA's supported features matrix](https://nvlabs.github.io/cuda-oxide/appendix/supported-features.html):
   - [x] Compiler type/control-flow parity:

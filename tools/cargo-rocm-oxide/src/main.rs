@@ -30,6 +30,7 @@ fn run() -> Result<(), String> {
         "inspect" => inspect(&args),
         "pipeline" => pipeline(&args),
         "profile" => profile(&args),
+        "verify" => verify(&args),
         "new" => new_project(&args),
         "help" | "--help" | "-h" => {
             print_help();
@@ -48,6 +49,7 @@ fn print_help() {
     cargo rocm-oxide inspect [metadata.json]
     cargo rocm-oxide pipeline [--build]
     cargo rocm-oxide profile [--trace] [--name NAME] [--pmc COUNTER[,COUNTER...]] [--output-directory DIR] [-- <program> ...]
+    cargo rocm-oxide verify [--offline|--quick|--full]
     cargo rocm-oxide new <path>"
     );
 }
@@ -137,6 +139,13 @@ fn inspect(args: &[OsString]) -> Result<(), String> {
             .ok_or_else(|| "no generated metadata found; run `cargo rocm-oxide build` first".to_string())?
     };
     run_build_tool(["--inspect-metadata"], &[metadata.into_os_string()])
+}
+
+fn verify(args: &[OsString]) -> Result<(), String> {
+    let root = workspace_root()?;
+    let mut command = Command::new(root.join("scripts/verify.sh"));
+    command.args(args).current_dir(&root);
+    run_status(command, "run ROCm-Oxide verification gate")
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
