@@ -99,7 +99,9 @@ cargo run --example performance_probe -- --json target/performance_probe.json
 imports its `OPAQUE_FD` handle into HIP, and copies the rendered frame
 device-to-device into that shared buffer before Vulkan blits it to the swapchain.
 `--present gl` keeps the HIP/OpenGL pixel-buffer path, while the default remains
-the CPU-readback compatibility path.
+the CPU-readback compatibility path. GL and Vulkan presentation keep the frame
+on the GPU and composite the same interactive controls through a small textured
+overlay panel instead of reading the full frame back to the host every frame.
 
 ---
 

@@ -10,6 +10,7 @@ use rocm_oxide::{
 };
 use sdl2::event::Event as SdlEvent;
 use sdl2::keyboard::Keycode;
+use sdl2::mouse::MouseButton as SdlMouseButton;
 use std::ffi::{CStr, CString, c_int, c_uint, c_void};
 use std::os::fd::{FromRawFd, OwnedFd};
 use std::path::{Path, PathBuf};
@@ -185,6 +186,7 @@ struct GlPresenter {
     present_scale: usize,
     texture: GLuint,
     pbo: GLuint,
+    overlay_texture: GLuint,
     vao: GLuint,
     program: GLuint,
     resource: HipGraphicsResource,
@@ -218,6 +220,10 @@ struct VulkanPresenter {
     frame_image: vk::Image,
     frame_memory: vk::DeviceMemory,
     frame_image_initialized: bool,
+    overlay_buffer: vk::Buffer,
+    overlay_memory: vk::DeviceMemory,
+    overlay_mapped_ptr: *mut u32,
+    overlay_bytes: usize,
     shared_buffer: vk::Buffer,
     shared_memory: vk::DeviceMemory,
     hip_external_memory: HipExternalMemory,
@@ -233,9 +239,21 @@ struct VulkanSharedMemory {
     bytes: usize,
 }
 
+struct VulkanOverlayMemory {
+    buffer: vk::Buffer,
+    memory: vk::DeviceMemory,
+    mapped_ptr: *mut u32,
+    bytes: usize,
+}
+
 struct MappedGlBuffer {
     ptr: *mut u32,
     len: usize,
+}
+
+struct OverlayFrame {
+    size: RenderSize,
+    pixels: Vec<u32>,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -297,6 +315,48 @@ impl Rect {
     }
 }
 
+impl OverlayFrame {
+    fn new(render_size: RenderSize) -> Self {
+        let size = overlay_size_for(render_size);
+        Self {
+            size,
+            pixels: vec![0; size.pixel_count()],
+        }
+    }
+
+    fn resize(&mut self, render_size: RenderSize) {
+        let size = overlay_size_for(render_size);
+        if self.size != size {
+            self.size = size;
+            self.pixels.resize(size.pixel_count(), 0);
+        }
+    }
+
+    fn draw(&mut self, state: &DemoState, resources: &ResourceSnapshot) {
+        self.pixels.fill(0);
+        draw_overlay(&mut self.pixels, self.size, state, resources);
+        for pixel in &mut self.pixels {
+            if *pixel != 0 {
+                *pixel |= 0xff00_0000;
+            }
+        }
+    }
+
+    fn byte_len(&self) -> Result<usize, Box<dyn std::error::Error>> {
+        self.pixels
+            .len()
+            .checked_mul(std::mem::size_of::<u32>())
+            .ok_or_else(|| other_error("overlay byte length overflows usize"))
+    }
+}
+
+fn overlay_size_for(render_size: RenderSize) -> RenderSize {
+    RenderSize::new(
+        (PANEL_W * ui_scale(render_size)).min(render_size.width),
+        render_size.height,
+    )
+}
+
 fn prefer_x11_for_rocm_gl_interop(present_backend: PresentBackend) {
     if present_backend != PresentBackend::Gl || std::env::var_os("SDL_VIDEODRIVER").is_some() {
         return;
@@ -354,10 +414,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     }
 
     if args.present_backend == PresentBackend::Gl {
-        return run_gl_present(&args, &kernels, buffers, state);
+        return run_gl_present(&args, &device, &kernels, buffers, state, resources);
     }
     if args.present_backend == PresentBackend::Vulkan {
-        return run_vulkan_present(&args, &kernels, buffers, state);
+        return run_vulkan_present(&args, &device, &kernels, buffers, state, resources);
     }
 
     if let Some(frames) = args.frames {
@@ -494,13 +554,16 @@ fn create_window(
 
 fn run_gl_present(
     args: &DemoArgs,
+    device: &Device,
     kernels: &generated::DeviceKernels,
     mut buffers: DemoBuffers,
     mut state: DemoState,
+    mut resources: ResourceSnapshot,
 ) -> Result<(), Box<dyn std::error::Error>> {
     let sdl = sdl2::init().map_err(other_error)?;
     let mut presenter = GlPresenter::new(&sdl, buffers.size, state.present_scale, state.fps_limit)?;
     let mut events = sdl.event_pump().map_err(other_error)?;
+    let mut overlay = OverlayFrame::new(buffers.size);
     let start = Instant::now();
     let run_start = Instant::now();
     let mut last_fps = Instant::now();
@@ -512,7 +575,13 @@ fn run_gl_present(
     while frame_budget != Some(0) {
         let frame_start = Instant::now();
         for event in events.poll_iter() {
-            if !handle_sdl_event(event, &mut state, kernels, &buffers.short) {
+            if !handle_sdl_event(
+                event,
+                &presenter.window,
+                &mut state,
+                kernels,
+                &buffers.short,
+            ) {
                 frame_budget = Some(0);
                 break;
             }
@@ -523,6 +592,8 @@ fn run_gl_present(
 
         if state.render_size != buffers.size {
             buffers = DemoBuffers::new(state.render_size)?;
+            resources = ResourceSnapshot::new(device, kernels, buffers.size.pixel_count())?;
+            overlay.resize(buffers.size);
             presenter.recreate_frame_resources(buffers.size, state.present_scale)?;
             state.status = format!("resolution set to {}", display_label(&state));
         } else if state.present_scale != presenter.present_scale {
@@ -541,9 +612,11 @@ fn run_gl_present(
         last_use_post = use_post;
         state.gpu_ms = gpu_ms;
         let source = display_source(&buffers, use_post);
-        let (interop_ms, present_ms) = presenter.present_device_frame(source)?;
+        let draw_start = Instant::now();
+        overlay.draw(&state, &resources);
+        state.draw_ms = draw_start.elapsed().as_secs_f64() * 1000.0;
+        let (interop_ms, present_ms) = presenter.present_device_frame(source, &overlay)?;
         state.copy_ms = interop_ms;
-        state.draw_ms = 0.0;
         state.present_ms = present_ms;
 
         if state.save_requested {
@@ -551,6 +624,7 @@ fn run_gl_present(
             let copy_start = Instant::now();
             copy_display_frame(&buffers, use_post, &mut host_frame)?;
             state.copy_ms = copy_start.elapsed().as_secs_f64() * 1000.0;
+            draw_overlay(host_frame.as_mut_slice(), buffers.size, &state, &resources);
             save_png(&args.output, host_frame.as_slice(), buffers.size)?;
             state.status = format!("saved {}", args.output.display());
             state.save_requested = false;
@@ -585,6 +659,7 @@ fn run_gl_present(
         let elapsed = run_start.elapsed().as_secs_f64().max(f64::EPSILON);
         let mut host_frame = PinnedHostBuffer::<u32>::new_zeroed(buffers.size.pixel_count())?;
         copy_display_frame(&buffers, last_use_post, &mut host_frame)?;
+        draw_overlay(host_frame.as_mut_slice(), buffers.size, &state, &resources);
         save_png(&args.output, host_frame.as_slice(), buffers.size)?;
         println!(
             "saved Spectral Lattice GL preview after {} frame(s): {}",
@@ -607,14 +682,17 @@ fn run_gl_present(
 
 fn run_vulkan_present(
     args: &DemoArgs,
+    device: &Device,
     kernels: &generated::DeviceKernels,
     mut buffers: DemoBuffers,
     mut state: DemoState,
+    mut resources: ResourceSnapshot,
 ) -> Result<(), Box<dyn std::error::Error>> {
     let sdl = sdl2::init().map_err(other_error)?;
     let mut presenter =
         VulkanPresenter::new(&sdl, buffers.size, state.present_scale, state.fps_limit)?;
     let mut events = sdl.event_pump().map_err(other_error)?;
+    let mut overlay = OverlayFrame::new(buffers.size);
     let start = Instant::now();
     let run_start = Instant::now();
     let mut last_fps = Instant::now();
@@ -626,7 +704,13 @@ fn run_vulkan_present(
     while frame_budget != Some(0) {
         let frame_start = Instant::now();
         for event in events.poll_iter() {
-            if !handle_sdl_event(event, &mut state, kernels, &buffers.short) {
+            if !handle_sdl_event(
+                event,
+                &presenter.window,
+                &mut state,
+                kernels,
+                &buffers.short,
+            ) {
                 frame_budget = Some(0);
                 break;
             }
@@ -637,6 +721,8 @@ fn run_vulkan_present(
 
         if state.render_size != buffers.size {
             buffers = DemoBuffers::new(state.render_size)?;
+            resources = ResourceSnapshot::new(device, kernels, buffers.size.pixel_count())?;
+            overlay.resize(buffers.size);
             presenter.recreate_frame_resources(buffers.size, state.present_scale)?;
             state.status = format!("resolution set to {}", display_label(&state));
         } else if state.present_scale != presenter.present_scale {
@@ -655,9 +741,11 @@ fn run_vulkan_present(
         last_use_post = use_post;
         state.gpu_ms = gpu_ms;
         let source = display_source(&buffers, use_post);
-        let (interop_ms, present_ms) = presenter.present_device_frame(source)?;
+        let draw_start = Instant::now();
+        overlay.draw(&state, &resources);
+        state.draw_ms = draw_start.elapsed().as_secs_f64() * 1000.0;
+        let (interop_ms, present_ms) = presenter.present_device_frame(source, &overlay)?;
         state.copy_ms = interop_ms;
-        state.draw_ms = 0.0;
         state.present_ms = present_ms;
 
         if state.save_requested {
@@ -665,6 +753,7 @@ fn run_vulkan_present(
             let copy_start = Instant::now();
             copy_display_frame(&buffers, use_post, &mut host_frame)?;
             state.copy_ms = copy_start.elapsed().as_secs_f64() * 1000.0;
+            draw_overlay(host_frame.as_mut_slice(), buffers.size, &state, &resources);
             save_png(&args.output, host_frame.as_slice(), buffers.size)?;
             state.status = format!("saved {}", args.output.display());
             state.save_requested = false;
@@ -699,6 +788,7 @@ fn run_vulkan_present(
         let elapsed = run_start.elapsed().as_secs_f64().max(f64::EPSILON);
         let mut host_frame = PinnedHostBuffer::<u32>::new_zeroed(buffers.size.pixel_count())?;
         copy_display_frame(&buffers, last_use_post, &mut host_frame)?;
+        draw_overlay(host_frame.as_mut_slice(), buffers.size, &state, &resources);
         save_png(&args.output, host_frame.as_slice(), buffers.size)?;
         println!(
             "saved Spectral Lattice Vulkan preview after {} frame(s): {}",
@@ -721,6 +811,7 @@ fn run_vulkan_present(
 
 fn handle_sdl_event(
     event: SdlEvent,
+    window: &sdl2::video::Window,
     state: &mut DemoState,
     kernels: &generated::DeviceKernels,
     short_frame: &DeviceBuffer<u32>,
@@ -732,8 +823,50 @@ fn handle_sdl_event(
             repeat: false,
             ..
         } => handle_sdl_key(key, state, kernels, short_frame),
+        SdlEvent::MouseButtonDown {
+            mouse_btn: SdlMouseButton::Left,
+            x,
+            y,
+            ..
+        } => {
+            if let Some((x, y)) = sdl_buffer_mouse_pos(window, state.render_size, x, y) {
+                handle_slider_drag(state, x, y);
+                handle_click(state, kernels, short_frame, x, y);
+            }
+            true
+        }
+        SdlEvent::MouseMotion {
+            mousestate, x, y, ..
+        } => {
+            if mousestate.left()
+                && let Some((x, y)) = sdl_buffer_mouse_pos(window, state.render_size, x, y)
+            {
+                handle_slider_drag(state, x, y);
+            }
+            true
+        }
         _ => true,
     }
+}
+
+fn sdl_buffer_mouse_pos(
+    window: &sdl2::video::Window,
+    size: RenderSize,
+    mx: i32,
+    my: i32,
+) -> Option<(usize, usize)> {
+    let (win_w, win_h) = window.size();
+    if win_w == 0 || win_h == 0 {
+        return None;
+    }
+
+    let x = ((mx.max(0) as f64) * size.width as f64 / win_w as f64)
+        .floor()
+        .clamp(0.0, (size.width - 1) as f64) as usize;
+    let y = ((my.max(0) as f64) * size.height as f64 / win_h as f64)
+        .floor()
+        .clamp(0.0, (size.height - 1) as f64) as usize;
+    Some((x, y))
 }
 
 fn handle_sdl_key(
@@ -902,6 +1035,10 @@ impl VulkanPresenter {
             frame_image: vk::Image::null(),
             frame_memory: vk::DeviceMemory::null(),
             frame_image_initialized: false,
+            overlay_buffer: vk::Buffer::null(),
+            overlay_memory: vk::DeviceMemory::null(),
+            overlay_mapped_ptr: ptr::null_mut(),
+            overlay_bytes: 0,
             shared_buffer: vk::Buffer::null(),
             shared_memory: vk::DeviceMemory::null(),
             hip_external_memory: ptr::null_mut(),
@@ -955,6 +1092,7 @@ impl VulkanPresenter {
         let present_mode = choose_present_mode(&present_modes);
         let extent = choose_swapchain_extent(&self.window, surface_caps, size, present_scale)?;
         let image_count = swapchain_image_count(surface_caps);
+        let overlay_size = overlay_size_for(size);
 
         let swapchain_info = vk::SwapchainCreateInfoKHR::default()
             .surface(self.surface)
@@ -975,6 +1113,7 @@ impl VulkanPresenter {
         };
         let swapchain_images = unsafe { self.swapchain_loader.get_swapchain_images(swapchain)? };
         let shared = self.create_shared_memory(byte_len)?;
+        let overlay = self.create_overlay_memory(frame_byte_len_usize(overlay_size)?)?;
         let (frame_image, frame_memory) = self.create_frame_image(size, surface_format.format)?;
         let command_pool_info = vk::CommandPoolCreateInfo::default()
             .flags(vk::CommandPoolCreateFlags::RESET_COMMAND_BUFFER)
@@ -1006,6 +1145,10 @@ impl VulkanPresenter {
         self.frame_image = frame_image;
         self.frame_memory = frame_memory;
         self.frame_image_initialized = false;
+        self.overlay_buffer = overlay.buffer;
+        self.overlay_memory = overlay.memory;
+        self.overlay_mapped_ptr = overlay.mapped_ptr;
+        self.overlay_bytes = overlay.bytes;
         self.shared_buffer = shared.buffer;
         self.shared_memory = shared.memory;
         self.hip_external_memory = shared.hip_external_memory;
@@ -1017,6 +1160,7 @@ impl VulkanPresenter {
     fn present_device_frame(
         &mut self,
         source: &DeviceBuffer<u32>,
+        overlay: &OverlayFrame,
     ) -> Result<(f64, f64), Box<dyn std::error::Error>> {
         let interop_start = Instant::now();
         unsafe {
@@ -1033,6 +1177,7 @@ impl VulkanPresenter {
         unsafe {
             source.copy_to_device_ptr(self.hip_mapped_ptr, source.len())?;
         }
+        self.upload_overlay(overlay)?;
         let interop_ms = interop_start.elapsed().as_secs_f64() * 1000.0;
 
         let present_start = Instant::now();
@@ -1057,7 +1202,7 @@ impl VulkanPresenter {
             self.device
                 .reset_command_buffer(self.command_buffer, vk::CommandBufferResetFlags::empty())?;
         }
-        self.record_present_commands(image_index as usize)?;
+        self.record_present_commands(image_index as usize, overlay.size)?;
 
         let wait_stages = [vk::PipelineStageFlags::TRANSFER];
         let wait_semaphores = [self.image_available];
@@ -1098,6 +1243,7 @@ impl VulkanPresenter {
     fn record_present_commands(
         &mut self,
         image_index: usize,
+        overlay_size: RenderSize,
     ) -> Result<(), Box<dyn std::error::Error>> {
         let swapchain_image = self.swapchain_images[image_index];
         let begin = vk::CommandBufferBeginInfo::default()
@@ -1207,6 +1353,27 @@ impl VulkanPresenter {
             );
         }
 
+        let overlay_copy = vk::BufferImageCopy::default()
+            .buffer_offset(0)
+            .buffer_row_length(overlay_size.width as u32)
+            .buffer_image_height(overlay_size.height as u32)
+            .image_subresource(color_subresource_layers())
+            .image_offset(vk::Offset3D { x: 0, y: 0, z: 0 })
+            .image_extent(vk::Extent3D {
+                width: overlay_size.width as u32,
+                height: overlay_size.height as u32,
+                depth: 1,
+            });
+        unsafe {
+            self.device.cmd_copy_buffer_to_image(
+                self.command_buffer,
+                self.overlay_buffer,
+                swapchain_image,
+                vk::ImageLayout::TRANSFER_DST_OPTIMAL,
+                std::slice::from_ref(&overlay_copy),
+            );
+        }
+
         self.image_barrier(
             swapchain_image,
             vk::ImageLayout::TRANSFER_DST_OPTIMAL,
@@ -1222,6 +1389,27 @@ impl VulkanPresenter {
         }
         self.frame_image_initialized = true;
         self.swapchain_image_initialized[image_index] = true;
+        Ok(())
+    }
+
+    fn upload_overlay(&mut self, overlay: &OverlayFrame) -> Result<(), Box<dyn std::error::Error>> {
+        let required_bytes = overlay.byte_len()?;
+        if self.overlay_bytes < required_bytes {
+            return Err(other_error(format!(
+                "Vulkan overlay buffer is too small: got {} bytes, need {} bytes",
+                self.overlay_bytes, required_bytes
+            )));
+        }
+        if self.overlay_mapped_ptr.is_null() {
+            return Err(other_error("Vulkan overlay buffer is not mapped"));
+        }
+        unsafe {
+            ptr::copy_nonoverlapping(
+                overlay.pixels.as_ptr(),
+                self.overlay_mapped_ptr,
+                overlay.pixels.len(),
+            );
+        }
         Ok(())
     }
 
@@ -1341,6 +1529,71 @@ impl VulkanPresenter {
         })
     }
 
+    fn create_overlay_memory(
+        &self,
+        bytes: usize,
+    ) -> Result<VulkanOverlayMemory, Box<dyn std::error::Error>> {
+        let buffer_info = vk::BufferCreateInfo::default()
+            .size(bytes as vk::DeviceSize)
+            .usage(vk::BufferUsageFlags::TRANSFER_SRC)
+            .sharing_mode(vk::SharingMode::EXCLUSIVE);
+        let buffer = unsafe { self.device.create_buffer(&buffer_info, None)? };
+        let requirements = unsafe { self.device.get_buffer_memory_requirements(buffer) };
+        let memory_type_index = find_memory_type(
+            self.memory_properties,
+            requirements.memory_type_bits,
+            vk::MemoryPropertyFlags::HOST_VISIBLE | vk::MemoryPropertyFlags::HOST_COHERENT,
+        )?;
+        let alloc_info = vk::MemoryAllocateInfo::default()
+            .allocation_size(requirements.size)
+            .memory_type_index(memory_type_index);
+        let memory = match unsafe { self.device.allocate_memory(&alloc_info, None) } {
+            Ok(memory) => memory,
+            Err(err) => {
+                unsafe {
+                    self.device.destroy_buffer(buffer, None);
+                }
+                return Err(other_error(format!(
+                    "Vulkan overlay buffer allocation failed: {err:?}"
+                )));
+            }
+        };
+        if let Err(err) = unsafe { self.device.bind_buffer_memory(buffer, memory, 0) } {
+            unsafe {
+                self.device.free_memory(memory, None);
+                self.device.destroy_buffer(buffer, None);
+            }
+            return Err(other_error(format!(
+                "Vulkan overlay buffer bind failed: {err:?}"
+            )));
+        }
+        let mapped = match unsafe {
+            self.device.map_memory(
+                memory,
+                0,
+                bytes as vk::DeviceSize,
+                vk::MemoryMapFlags::empty(),
+            )
+        } {
+            Ok(mapped) => mapped.cast::<u32>(),
+            Err(err) => {
+                unsafe {
+                    self.device.free_memory(memory, None);
+                    self.device.destroy_buffer(buffer, None);
+                }
+                return Err(other_error(format!(
+                    "Vulkan overlay buffer map failed: {err:?}"
+                )));
+            }
+        };
+        Ok(VulkanOverlayMemory {
+            buffer,
+            memory,
+            mapped_ptr: mapped,
+            bytes,
+        })
+    }
+
     fn create_frame_image(
         &self,
         size: RenderSize,
@@ -1418,6 +1671,18 @@ impl VulkanPresenter {
                 self.device.free_memory(self.frame_memory, None);
                 self.frame_memory = vk::DeviceMemory::null();
             }
+            if self.overlay_memory != vk::DeviceMemory::null() {
+                self.device.unmap_memory(self.overlay_memory);
+                self.overlay_mapped_ptr = ptr::null_mut();
+            }
+            if self.overlay_buffer != vk::Buffer::null() {
+                self.device.destroy_buffer(self.overlay_buffer, None);
+                self.overlay_buffer = vk::Buffer::null();
+            }
+            if self.overlay_memory != vk::DeviceMemory::null() {
+                self.device.free_memory(self.overlay_memory, None);
+                self.overlay_memory = vk::DeviceMemory::null();
+            }
             if self.image_available != vk::Semaphore::null() {
                 self.device.destroy_semaphore(self.image_available, None);
                 self.image_available = vk::Semaphore::null();
@@ -1444,6 +1709,7 @@ impl VulkanPresenter {
             self.swapchain_image_initialized.clear();
             self.frame_image_initialized = false;
             self.shared_bytes = 0;
+            self.overlay_bytes = 0;
         }
     }
 }
@@ -1743,10 +2009,12 @@ impl GlPresenter {
             gl::GenVertexArrays(1, &mut vao);
             gl::BindVertexArray(vao);
             gl::UseProgram(program);
-            let sampler = CString::new("u_frame")?;
-            let location = gl::GetUniformLocation(program, sampler.as_ptr());
-            if location >= 0 {
-                gl::Uniform1i(location, 0);
+            for (name, unit) in [("u_frame", 0), ("u_overlay", 1)] {
+                let sampler = CString::new(name)?;
+                let location = gl::GetUniformLocation(program, sampler.as_ptr());
+                if location >= 0 {
+                    gl::Uniform1i(location, unit);
+                }
             }
         }
         check_gl("create GL presenter")?;
@@ -1758,6 +2026,7 @@ impl GlPresenter {
             present_scale,
             texture: 0,
             pbo: 0,
+            overlay_texture: 0,
             vao,
             program,
             resource: ptr::null_mut(),
@@ -1787,7 +2056,11 @@ impl GlPresenter {
         let byte_len = gl_frame_byte_len(size)?;
         let width = gl_size(size.width, "frame width")?;
         let height = gl_size(size.height, "frame height")?;
+        let overlay_size = overlay_size_for(size);
+        let overlay_width = gl_size(overlay_size.width, "overlay width")?;
+        let overlay_height = gl_size(overlay_size.height, "overlay height")?;
         let mut texture = 0;
+        let mut overlay_texture = 0;
         let mut pbo = 0;
         unsafe {
             gl::GenTextures(1, &mut texture);
@@ -1811,6 +2084,32 @@ impl GlPresenter {
                 gl::RGBA8 as GLint,
                 width,
                 height,
+                0,
+                gl::BGRA,
+                gl::UNSIGNED_BYTE,
+                ptr::null(),
+            );
+
+            gl::GenTextures(1, &mut overlay_texture);
+            gl::BindTexture(gl::TEXTURE_2D, overlay_texture);
+            gl::TexParameteri(gl::TEXTURE_2D, gl::TEXTURE_MIN_FILTER, gl::NEAREST as GLint);
+            gl::TexParameteri(gl::TEXTURE_2D, gl::TEXTURE_MAG_FILTER, gl::NEAREST as GLint);
+            gl::TexParameteri(
+                gl::TEXTURE_2D,
+                gl::TEXTURE_WRAP_S,
+                gl::CLAMP_TO_EDGE as GLint,
+            );
+            gl::TexParameteri(
+                gl::TEXTURE_2D,
+                gl::TEXTURE_WRAP_T,
+                gl::CLAMP_TO_EDGE as GLint,
+            );
+            gl::TexImage2D(
+                gl::TEXTURE_2D,
+                0,
+                gl::RGBA8 as GLint,
+                overlay_width,
+                overlay_height,
                 0,
                 gl::BGRA,
                 gl::UNSIGNED_BYTE,
@@ -1844,6 +2143,7 @@ impl GlPresenter {
         if let Err(err) = register {
             unsafe {
                 gl::DeleteBuffers(1, &pbo);
+                gl::DeleteTextures(1, &overlay_texture);
                 gl::DeleteTextures(1, &texture);
             }
             return Err(err);
@@ -1853,6 +2153,7 @@ impl GlPresenter {
         self.present_scale = present_scale;
         self.texture = texture;
         self.pbo = pbo;
+        self.overlay_texture = overlay_texture;
         self.resource = resource;
         Ok(())
     }
@@ -1860,6 +2161,7 @@ impl GlPresenter {
     fn present_device_frame(
         &mut self,
         source: &DeviceBuffer<u32>,
+        overlay: &OverlayFrame,
     ) -> Result<(f64, f64), Box<dyn std::error::Error>> {
         let interop_start = Instant::now();
         let mapped = self.map_buffer()?;
@@ -1892,6 +2194,23 @@ impl GlPresenter {
             gl::BindBuffer(gl::PIXEL_UNPACK_BUFFER, 0);
         }
         check_gl("upload GL texture from HIP-mapped PBO")?;
+        unsafe {
+            gl::ActiveTexture(gl::TEXTURE1);
+            gl::BindTexture(gl::TEXTURE_2D, self.overlay_texture);
+            gl::PixelStorei(gl::UNPACK_ALIGNMENT, 4);
+            gl::TexSubImage2D(
+                gl::TEXTURE_2D,
+                0,
+                0,
+                0,
+                gl_size(overlay.size.width, "overlay width")?,
+                gl_size(overlay.size.height, "overlay height")?,
+                gl::BGRA,
+                gl::UNSIGNED_BYTE,
+                overlay.pixels.as_ptr().cast(),
+            );
+        }
+        check_gl("upload GL overlay texture")?;
         let interop_ms = interop_start.elapsed().as_secs_f64() * 1000.0;
 
         let present_start = Instant::now();
@@ -1901,8 +2220,18 @@ impl GlPresenter {
             gl::ClearColor(0.0, 0.0, 0.0, 1.0);
             gl::Clear(gl::COLOR_BUFFER_BIT);
             gl::UseProgram(self.program);
+            let fraction_name = CString::new("u_overlay_panel_fraction")?;
+            let fraction_location = gl::GetUniformLocation(self.program, fraction_name.as_ptr());
+            if fraction_location >= 0 {
+                gl::Uniform1f(
+                    fraction_location,
+                    overlay.size.width as f32 / self.size.width.max(1) as f32,
+                );
+            }
             gl::ActiveTexture(gl::TEXTURE0);
             gl::BindTexture(gl::TEXTURE_2D, self.texture);
+            gl::ActiveTexture(gl::TEXTURE1);
+            gl::BindTexture(gl::TEXTURE_2D, self.overlay_texture);
             gl::BindVertexArray(self.vao);
             gl::DrawArrays(gl::TRIANGLES, 0, 3);
         }
@@ -1966,6 +2295,10 @@ impl GlPresenter {
                 gl::DeleteBuffers(1, &self.pbo);
                 self.pbo = 0;
             }
+            if self.overlay_texture != 0 {
+                gl::DeleteTextures(1, &self.overlay_texture);
+                self.overlay_texture = 0;
+            }
             if self.texture != 0 {
                 gl::DeleteTextures(1, &self.texture);
                 self.texture = 0;
@@ -2005,9 +2338,18 @@ void main() {
     const FRAGMENT: &str = r#"#version 330 core
 in vec2 v_uv;
 uniform sampler2D u_frame;
+uniform sampler2D u_overlay;
+uniform float u_overlay_panel_fraction;
 out vec4 color;
 void main() {
-    color = texture(u_frame, vec2(v_uv.x, 1.0 - v_uv.y));
+    vec2 frame_uv = vec2(v_uv.x, 1.0 - v_uv.y);
+    vec4 frame = texture(u_frame, frame_uv);
+    float panel = max(u_overlay_panel_fraction, 0.0001);
+    if (v_uv.x <= panel) {
+        vec4 overlay = texture(u_overlay, vec2(v_uv.x / panel, frame_uv.y));
+        frame = mix(frame, vec4(overlay.rgb, 1.0), overlay.a);
+    }
+    color = frame;
 }
 "#;
 

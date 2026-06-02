@@ -277,9 +277,9 @@ Local probes:
   - [x] fall back to local or system `rocprofv3 --pmc Wavefronts` when ROCm Compute Profiler is unavailable
   - [x] add `cargo rocm-oxide profile --trace` for `rocprofv3 --sys-trace --stats` HIP/HSA/runtime trace collection
   - [x] detect missing profiler binaries cleanly and allow `ROCM_OXIDE_PROFILER` overrides
-- [ ] GPU-native presentation path for `spectral_lattice`:
+- [x] GPU-native presentation path for `spectral_lattice`:
   - [x] add a scaled minifb presentation mode so `720p` can present as a 1440p-sized window and `1080p` can present as a 4K-sized window without native-resolution readback
   - [x] add an optional `--present gl` path that copies the selected device buffer into a HIP-registered OpenGL PBO and presents it through a texture
   - [x] avoid full-frame VRAM-to-host readback every frame for GL-backed 1440p and 4K interactive runs
   - [x] keep the existing CPU readback path for headless PNG export and simple compatibility smoke tests
-  - [ ] fold the CPU-drawn overlay controls into the GL path or replace them with GPU/textured controls
+  - [x] fold the CPU-drawn overlay controls into the GL path or replace them with GPU/textured controls
