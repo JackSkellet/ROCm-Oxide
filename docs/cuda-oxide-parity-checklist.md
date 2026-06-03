@@ -21,7 +21,7 @@ Primary upstream reference:
 - [x] Host-side launch-shape validation.
 - [x] Source-level per-buffer length contracts.
 - [x] Generated validation for mixed-resolution buffer lengths.
-- [x] Device-side `DeviceSlice<T>` and `DeviceSliceMut<T>` ABI for simple kernels.
+- [x] Device-side `DeviceSlice<T>` and `DeviceSliceMut<T>` ABI for generated kernels.
 - [x] Generated host bindings scalarize device slices to pointer/length launch args.
 - [x] Generated mutable-buffer alias rejection.
 - [x] `rocm-oxide-build --doctor` prerequisite check.
@@ -99,14 +99,15 @@ Primary upstream reference:
         and host-native atomics make the access pattern valid
   - [x] default `repr(Rust)` struct layout matching from rustc layout facts
   - [x] dynamic field offset and padding metadata for generated bindings
-- [ ] Compiler type-system parity:
+- [x] Compiler type-system parity:
   - [x] enum, `Option`, `Result`, and custom discriminant GPU smoke coverage
   - [x] struct literals, field access, and pass-by-value `repr(C)`/default
         `repr(Rust)` binding tests
   - [x] return-by-value tests
   - [x] array construction, constant indexing, runtime indexing, and mutable
         array lowering
-  - [ ] SIMD/vector register helper type once a real AMDGPU use case is chosen
+  - [x] `Vec2f`/`Vec3f` vector helper types with generated GPU smoke coverage
+  - [x] packed `F16x2` bit-lane helper with generated GPU smoke coverage
   - [x] slice scalarization at kernel boundaries for `DeviceSlice<T>` and
         `DeviceSliceMut<T>`
 - [x] Closure parity:
@@ -129,6 +130,8 @@ Primary upstream reference:
   - [x] COMGR compile/link backend for persistent code-object caching
   - [x] ROCm replacement for CUDA LTOIR/nvJitLink interop using AMD LLVM IR,
         HIP modules, and ROCm libraries
+  - [x] unsafe non-owning raw HIP module/function handles plus owning device
+        ordinals for foreign HIP interop
   - [x] debug-info and debugger workflow equivalent for ROCgdb or ROCm-native
         tooling
 - [x] Runtime safety parity:
@@ -155,7 +158,8 @@ Primary upstream reference:
   - [x] VGPR/SGPR counts from code object metadata
 - [x] Runtime safety:
   - [x] fallible allocation-size overflow errors instead of panics
-  - [x] stream-ordered allocation/free where supported by HIP
+  - [x] stream-ordered allocation/free where supported by HIP, including
+        async-aware drop cleanup for `DeviceBuffer`
   - [x] GPU-side memset and device-to-device buffer copies
   - [x] negative launch tests for generated buffer/block contracts
   - [x] pinned-buffer synchronous copy helpers
@@ -184,7 +188,9 @@ Primary upstream reference:
   - [x] typed device slices for pointer/length kernel ABI
   - [x] basic `u32` atomics
   - [x] explicit memory-scope atomics
-  - [x] math intrinsic lowering
+  - [x] math intrinsic lowering for `sqrt`, `rsqrt`, `sin`, `cos`, `atan`,
+        `atan2`, NaN literals, NaN-propagating `minimum`/`maximum`, and
+        CUDA-style one-NaN `fmin`/`fmax`
   - [x] broader typed atomics for signed integer and 64-bit integer operations by
         memory scope
   - [x] supported float atomic add/load/store operations by memory scope
@@ -203,6 +209,8 @@ Primary upstream reference:
         GPU printf plus selectable device clock counters
 - [x] Compiler completeness:
   - [x] support more pointer-producing IR ops beyond `getelementptr`
+  - [x] regression fixtures for private `alloca` memory and pointer-valued
+        global loads during address-space rewriting
   - [x] preserve source signature and contract spans in diagnostics
   - [x] catch device-codegen panics and emit actionable diagnostics
   - [x] generic helper monomorphization tests with diagnostics for exported generic kernels

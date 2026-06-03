@@ -18,6 +18,12 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let device = Device::first()?;
     let module = device.compile_hip_source(KERNEL)?;
     let kernel = module.kernel(c"scale_vec")?;
+    assert_eq!(module.device_ordinal(), device.ordinal());
+    assert_eq!(kernel.device_ordinal(), device.ordinal());
+    unsafe {
+        assert!(!module.as_raw_hip_module().is_null());
+        assert!(!kernel.as_raw_hip_function().is_null());
+    }
     let scale = module.global::<f32>(c"scale_factor")?;
     scale.set(2.5)?;
 

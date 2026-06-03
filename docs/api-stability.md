@@ -10,6 +10,9 @@ The root `rocm_oxide::*` re-exports are the preferred user-facing API for host
 runtime work:
 
 - device discovery and loading: `Device`, `Module`, `Kernel`;
+- module/function interop: unsafe non-owning `Module::as_raw_hip_module` and
+  `Kernel::as_raw_hip_function` accessors, plus `device_ordinal` so callers can
+  bind the owning HIP device before foreign interop calls;
 - launch configuration and validation: `Dim3`, `LaunchConfig`,
   `LaunchRecommendation`, `KernelMetadata`, `KernelResource`, and validation
   helpers used by generated bindings;
@@ -27,7 +30,8 @@ These modules and re-exports are public for examples, generated bindings, and
 ROCm feature exploration, but their exact shape is not stable yet:
 
 - `hip`: low-level HIP wrappers, explicit graph APIs, memory pools, VMM, module
-  globals, and raw launch escape hatches;
+  globals, unsafe non-owning raw module/function handles, and raw launch escape
+  hatches;
 - `hiprtc`: runtime compiler backends and specialization cache internals;
 - `libraries`: optional ROCm library interop for rocBLAS, rocFFT, rocPRIM,
   hipBLASLt, COMGR, and related handles/descriptors;

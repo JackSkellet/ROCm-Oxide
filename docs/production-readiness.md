@@ -72,8 +72,9 @@ Detailed promotion rules are captured in [CI and release gates](release-gates.md
 The standard GitHub Actions workflow runs `scripts/verify.sh --host-ci` on pull
 requests and pushes to `main`.
 
-The manual GPU workflow runs the ROCm offline gate plus quick and full
-verification on self-hosted Linux ROCm runners labeled:
+The manual GPU workflow runs the ROCm offline quality gate on the `gfx1201`
+runner, then runs quick and full GPU verification on self-hosted Linux ROCm
+runners labeled:
 
 - `self-hosted`, `linux`, `rocm`, `gfx1100`;
 - `self-hosted`, `linux`, `rocm`, `gfx1201`.

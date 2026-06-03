@@ -392,4 +392,23 @@ mod tests {
         assert_eq!(result, (2, 5));
         Ok(())
     }
+
+    #[test]
+    fn device_operation_error_after_async_enqueue_cleans_up_buffers() -> Result<()> {
+        let device = crate::Device::first()?;
+        let context = ExecutionContext::new(&device)?;
+        let result = (|context: &ExecutionContext| -> Result<()> {
+            let buffer = unsafe { crate::DeviceBuffer::<u32>::new_async(context.stream(), 4)? };
+            unsafe {
+                buffer.set_zero_async(context.stream())?;
+            }
+            Err(crate::Error::Async("injected failure".into()))
+        })
+        .sync_on(&context);
+
+        assert!(matches!(result, Err(crate::Error::Async(_))));
+        let buffer = crate::DeviceBuffer::from_slice(&[1u32, 2, 3, 4])?;
+        assert_eq!(buffer.copy_to_vec()?, [1, 2, 3, 4]);
+        Ok(())
+    }
 }

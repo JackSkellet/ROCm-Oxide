@@ -33,6 +33,10 @@ Covered surfaces:
 - Module-owned `Function` and `Global<T>` handles retain the loaded module
   owner, so `hipModuleUnload` cannot run while function or global handles still
   exist.
+- Raw module/function handle accessors are unsafe and non-owning: callers must
+  keep the owning `Module`/`Kernel` alive, must not unload or destroy the raw
+  handles through foreign APIs, and must make the reported `device_ordinal()`
+  current before passing the handle to HIP interop calls.
 - Graph nodes and graph memory allocations carry graph membership tokens so
   safe graph builders reject cross-graph dependencies before entering HIP.
 - Device-side raw helpers are explicitly documented as GPU-only escape hatches:

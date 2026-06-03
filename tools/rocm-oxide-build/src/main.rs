@@ -5357,6 +5357,84 @@ pub unsafe extern "C" fn pointer_ops(out: *mut u32, fallback: *mut u32, cond: bo
     }
 
     #[test]
+    fn preserves_private_alloca_ref_memory_while_rewriting_global_ops() {
+        let input = r#"; ModuleID = 'sample'
+target triple = "amdgcn-amd-amdhsa"
+
+define void @stack_then_global(ptr noundef %out, i32 noundef %value) unnamed_addr #0 {
+start:
+  %slot = alloca i32, align 4
+  store i32 %value, ptr %slot, align 4
+  %local = load i32, ptr %slot, align 4
+  %dst = getelementptr inbounds i32, ptr %out, i64 1
+  store i32 %local, ptr %dst, align 4
+  ret void
+}
+
+attributes #0 = { nounwind "target-cpu"="gfx1201" }
+"#;
+        let decls = kernel_map(
+            r#"
+#[kernel]
+pub unsafe extern "C" fn stack_then_global(out: *mut u32, value: u32) {}
+"#,
+        );
+        let kernels = decls.keys().cloned().collect::<BTreeSet<_>>();
+        let output = transform_ir(input, &kernels, &decls, &BTreeMap::new())
+            .expect("transform should succeed");
+        assert!(output.contains("ptr addrspace(1) noundef %out"));
+        assert!(output.contains("%slot = alloca i32, align 4"));
+        assert!(output.contains("store i32 %value, ptr %slot, align 4"));
+        assert!(output.contains("%local = load i32, ptr %slot, align 4"));
+        assert!(
+            output.contains("%dst = getelementptr inbounds i32, ptr addrspace(1) %out, i64 1")
+        );
+        assert!(output.contains("store i32 %local, ptr addrspace(1) %dst"));
+        assert!(!output.contains("ptr addrspace(1) %slot"));
+    }
+
+    #[test]
+    fn propagates_global_address_space_through_pointer_valued_loads() {
+        let input = r#"; ModuleID = 'sample'
+target triple = "amdgcn-amd-amdhsa"
+
+define void @pointer_load(ptr noundef %ptrs, ptr noundef %fallback, i1 noundef %cond) unnamed_addr #0 {
+start:
+  %slot = getelementptr inbounds ptr, ptr %ptrs, i64 0
+  %loaded = load ptr, ptr %slot, align 8
+  %selected = select i1 %cond, ptr %loaded, ptr %fallback
+  %dst = getelementptr inbounds i32, ptr %selected, i64 1
+  store i32 9, ptr %dst, align 4
+  ret void
+}
+
+attributes #0 = { nounwind "target-cpu"="gfx1201" }
+"#;
+        let decls = kernel_map(
+            r#"
+#[kernel]
+pub unsafe extern "C" fn pointer_load(ptrs: *mut *mut u32, fallback: *mut u32, cond: bool) {}
+"#,
+        );
+        let kernels = decls.keys().cloned().collect::<BTreeSet<_>>();
+        let output = transform_ir(input, &kernels, &decls, &BTreeMap::new())
+            .expect("transform should succeed");
+        assert!(
+            output.contains("%slot = getelementptr inbounds ptr, ptr addrspace(1) %ptrs, i64 0")
+        );
+        assert!(
+            output.contains("%loaded = load ptr addrspace(1), ptr addrspace(1) %slot, align 8")
+        );
+        assert!(output.contains(
+            "%selected = select i1 %cond, ptr addrspace(1) %loaded, ptr addrspace(1) %fallback"
+        ));
+        assert!(
+            output.contains("%dst = getelementptr inbounds i32, ptr addrspace(1) %selected, i64 1")
+        );
+        assert!(output.contains("store i32 9, ptr addrspace(1) %dst"));
+    }
+
+    #[test]
     fn rejects_unsupported_pointer_integer_casts_with_source_span() {
         let input = r#"; ModuleID = 'sample'
 target triple = "amdgcn-amd-amdhsa"

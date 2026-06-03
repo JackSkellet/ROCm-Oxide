@@ -190,6 +190,7 @@ cargo run --manifest-path tools/cargo-rocm-oxide/Cargo.toml -- rocm-oxide profil
 cargo run --manifest-path tools/cargo-rocm-oxide/Cargo.toml -- rocm-oxide verify --host-ci
 cargo run --manifest-path tools/cargo-rocm-oxide/Cargo.toml -- rocm-oxide verify --offline
 cargo run --manifest-path tools/cargo-rocm-oxide/Cargo.toml -- rocm-oxide verify --quick
+cargo run --manifest-path tools/cargo-rocm-oxide/Cargo.toml -- rocm-oxide verify --full
 ```
 
 When installed as `cargo-rocm-oxide`, these become `cargo rocm-oxide ...`.

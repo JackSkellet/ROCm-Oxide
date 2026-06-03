@@ -53,12 +53,12 @@ The generated bindings continue to validate nonzero grid/block dimensions,
 ## Kernel ABI
 
 cuda-oxide scalarizes slices and exposes safe `DisjointSlice` bounds checks.
-ROCm-Oxide now has the first AMD device-side slice ABI. Kernels can accept
-`rocm_oxide_device::DeviceSlice<T>` and `DeviceSliceMut<T>`; generated host
-bindings accept `DeviceBuffer<T>` values, pass pointer/length pairs to HIP, and
-validate lengths plus obvious mutable-buffer aliasing before launch. The simple
-`add_one`, `vector_add`, and `affine_transform` kernels use this path first. The
-larger image, upscaling, stress, and raytrace kernels still need conversion.
+ROCm-Oxide has the AMD device-side slice ABI for generated kernels. Kernels can
+accept `rocm_oxide_device::DeviceSlice<T>` and `DeviceSliceMut<T>`; generated
+host bindings accept `DeviceBuffer<T>` values, pass pointer/length pairs to HIP,
+and validate lengths plus obvious mutable-buffer aliasing before launch. The
+simple kernels and larger image, upscaling, stress, and raytrace paths all use
+this pointer/length ABI.
 
 ## Memory And Synchronization
 
@@ -84,8 +84,9 @@ it" with `DeviceOperation`. ROCm-Oxide already has the same shape:
 - `StreamPool` round-robin scheduling
 - `DeviceFuture::wait` and `Future` support
 
-The AMD next step is typed generated-kernel operations, so a binding can return a
-lazy operation instead of launching immediately.
+Generated bindings can now also return lazy `DeviceOperation` jobs and add
+validated HIP graph nodes. The next work is hardening safety diagnostics and
+consumer-project tooling around those paths.
 
 ## CUDA-Only Features
 

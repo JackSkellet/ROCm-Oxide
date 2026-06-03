@@ -20,9 +20,10 @@ Rules for using it safely:
   its pointer. Generated `DeviceOperation` bindings retain their module and
   `Arc<DeviceBuffer<_>>` arguments in `KernelLaunchCompletion` for this reason.
 - Prefer `free_async` for buffers allocated with `new_async` or
-  `new_from_pool_async`. Dropping a `DeviceBuffer` uses a synchronous `hipFree`,
-  so callers should synchronize first when outstanding stream work may still use
-  the pointer.
+  `new_from_pool_async` when explicit ordering is useful. Async-created
+  `DeviceBuffer` values retain their allocation stream; dropping one enqueues a
+  matching `hipFreeAsync` on that stream and waits for the cleanup so error paths
+  after async enqueues do not fall back to unordered `hipFree`.
 - Host slices passed to async copies must stay alive and unmodified until the
   stream reaches the copy. Pinned host buffers make this ordering explicit and
   are preferred for sustained async transfer paths.

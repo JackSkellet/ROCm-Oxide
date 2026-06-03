@@ -991,6 +991,10 @@ fn round_up_to_multiple(value: usize, granularity: usize, label: &str) -> Result
 }
 
 pub struct Stream {
+    inner: Arc<StreamInner>,
+}
+
+pub(crate) struct StreamInner {
     raw: HipStream,
 }
 
@@ -999,6 +1003,8 @@ pub struct Stream {
 // enqueued work.
 unsafe impl Send for Stream {}
 unsafe impl Sync for Stream {}
+unsafe impl Send for StreamInner {}
+unsafe impl Sync for StreamInner {}
 
 impl Stream {
     pub fn new() -> Result<Self> {
@@ -1006,27 +1012,31 @@ impl Stream {
         unsafe {
             check(hipStreamCreate(&mut raw))?;
         }
-        Ok(Self { raw })
+        Ok(Self {
+            inner: Arc::new(StreamInner { raw }),
+        })
     }
 
-    pub const fn null() -> Self {
+    pub fn null() -> Self {
         Self {
-            raw: ptr::null_mut(),
+            inner: Arc::new(StreamInner {
+                raw: ptr::null_mut(),
+            }),
         }
     }
 
     pub fn synchronize(&self) -> Result<()> {
-        unsafe { check(hipStreamSynchronize(self.raw)) }
+        unsafe { check(hipStreamSynchronize(self.inner.raw)) }
     }
 
     pub fn begin_capture(&self, mode: StreamCaptureMode) -> Result<()> {
-        unsafe { check(hipStreamBeginCapture(self.raw, mode.as_raw())) }
+        unsafe { check(hipStreamBeginCapture(self.inner.raw, mode.as_raw())) }
     }
 
     pub fn end_capture(&self) -> Result<Graph> {
         let mut raw = ptr::null_mut();
         unsafe {
-            check(hipStreamEndCapture(self.raw, &mut raw))?;
+            check(hipStreamEndCapture(self.inner.raw, &mut raw))?;
         }
         Ok(Graph {
             raw,
@@ -1035,11 +1045,15 @@ impl Stream {
     }
 
     pub fn as_raw(&self) -> HipStream {
-        self.raw
+        self.inner.raw
+    }
+
+    pub(crate) fn retained_inner(&self) -> Arc<StreamInner> {
+        Arc::clone(&self.inner)
     }
 }
 
-impl Drop for Stream {
+impl Drop for StreamInner {
     fn drop(&mut self) {
         if !self.raw.is_null() {
             unsafe {
@@ -1635,6 +1649,7 @@ impl Drop for Event {
 pub struct DeviceBuffer<T> {
     ptr: *mut T,
     len: usize,
+    drop_stream: Option<Arc<StreamInner>>,
 }
 
 // DeviceBuffer owns a device allocation and never creates host references to
@@ -1786,6 +1801,7 @@ impl<T> DeviceBuffer<T> {
             return Ok(Self {
                 ptr: NonNull::<T>::dangling().as_ptr(),
                 len,
+                drop_stream: None,
             });
         }
 
@@ -1801,6 +1817,7 @@ impl<T> DeviceBuffer<T> {
         Ok(Self {
             ptr: ptr.cast::<T>(),
             len,
+            drop_stream: None,
         })
     }
 
@@ -1810,6 +1827,7 @@ impl<T> DeviceBuffer<T> {
             return Ok(Self {
                 ptr: NonNull::<T>::dangling().as_ptr(),
                 len,
+                drop_stream: None,
             });
         }
 
@@ -1829,6 +1847,7 @@ impl<T> DeviceBuffer<T> {
         Ok(Self {
             ptr: ptr.cast::<T>(),
             len,
+            drop_stream: None,
         })
     }
 
@@ -1846,6 +1865,7 @@ impl<T> DeviceBuffer<T> {
             return Ok(Self {
                 ptr: NonNull::<T>::dangling().as_ptr(),
                 len,
+                drop_stream: None,
             });
         }
 
@@ -1854,6 +1874,7 @@ impl<T> DeviceBuffer<T> {
             if let Err(err) = check(hipMallocAsync(&mut ptr, bytes, stream.as_raw())) {
                 if !ptr.is_null() {
                     let _ = hipFreeAsync(ptr, stream.as_raw());
+                    let _ = hipStreamSynchronize(stream.as_raw());
                 }
                 return Err(err);
             }
@@ -1861,6 +1882,7 @@ impl<T> DeviceBuffer<T> {
         Ok(Self {
             ptr: ptr.cast::<T>(),
             len,
+            drop_stream: Some(stream.retained_inner()),
         })
     }
 
@@ -1877,6 +1899,7 @@ impl<T> DeviceBuffer<T> {
             return Ok(Self {
                 ptr: NonNull::<T>::dangling().as_ptr(),
                 len,
+                drop_stream: None,
             });
         }
 
@@ -1890,6 +1913,7 @@ impl<T> DeviceBuffer<T> {
             )) {
                 if !ptr.is_null() {
                     let _ = hipFreeAsync(ptr, stream.as_raw());
+                    let _ = hipStreamSynchronize(stream.as_raw());
                 }
                 return Err(err);
             }
@@ -1897,6 +1921,7 @@ impl<T> DeviceBuffer<T> {
         Ok(Self {
             ptr: ptr.cast::<T>(),
             len,
+            drop_stream: Some(stream.retained_inner()),
         })
     }
 
@@ -2240,15 +2265,6 @@ impl<T> DeviceBuffer<T> {
         self.copy_to_host(output.as_mut_slice())
     }
 
-    /// Enqueues a stream-ordered free for this allocation and transfers
-    /// ownership of the buffer to HIP.
-    ///
-    /// # Safety
-    ///
-    /// No queued or future work may read or write this allocation after the
-    /// free reaches `stream`. `stream` must remain valid until HIP reaches the
-    /// free operation, and the allocation must have been allocated by HIP on a
-    /// stream/order compatible with this free.
     /// Enqueues a stream-ordered free of this device allocation.
     ///
     /// # Safety
@@ -2260,10 +2276,10 @@ impl<T> DeviceBuffer<T> {
     pub unsafe fn free_async(mut self, stream: &Stream) -> Result<()> {
         if self.len != 0 && !self.ptr.is_null() {
             let ptr = self.ptr.cast::<c_void>();
-            self.ptr = ptr::null_mut();
             unsafe {
                 check(hipFreeAsync(ptr, stream.as_raw()))?;
             }
+            self.ptr = ptr::null_mut();
         }
         Ok(())
     }
@@ -2282,6 +2298,10 @@ impl<T> DeviceBuffer<T> {
 
     pub fn is_empty(&self) -> bool {
         self.len == 0
+    }
+
+    pub fn is_stream_ordered_allocation(&self) -> bool {
+        self.drop_stream.is_some()
     }
 }
 
@@ -2403,7 +2423,17 @@ impl<T> Drop for DeviceBuffer<T> {
     fn drop(&mut self) {
         if self.len != 0 && !self.ptr.is_null() {
             unsafe {
-                let _ = hipFree(self.ptr.cast::<c_void>());
+                let ptr = self.ptr.cast::<c_void>();
+                if let Some(stream) = self.drop_stream.as_ref() {
+                    if hipFreeAsync(ptr, stream.raw) == HIP_SUCCESS {
+                        let _ = hipStreamSynchronize(stream.raw);
+                    } else {
+                        let _ = hipStreamSynchronize(stream.raw);
+                        let _ = hipFree(ptr);
+                    }
+                } else {
+                    let _ = hipFree(ptr);
+                }
             }
         }
     }
@@ -2433,6 +2463,16 @@ impl Module {
         Ok(Self {
             inner: Arc::new(ModuleInner { raw }),
         })
+    }
+
+    /// Returns the owned HIP module handle without transferring ownership.
+    ///
+    /// The handle remains valid only while this `Module` or handles derived from
+    /// it are alive. Callers must not unload or otherwise take ownership of the
+    /// returned handle, and must make the owning HIP device/context current
+    /// before passing it to foreign HIP APIs.
+    pub unsafe fn as_raw(&self) -> HipModule {
+        self.inner.raw
     }
 
     pub fn function(&self, name: &CStr) -> Result<Function> {
@@ -2492,6 +2532,16 @@ unsafe impl Send for Function {}
 unsafe impl Sync for Function {}
 
 impl Function {
+    /// Returns the HIP function handle without transferring ownership.
+    ///
+    /// The returned entry-point handle is kept valid by this `Function`, which
+    /// retains the owning module. Callers must not use it after dropping this
+    /// value or the module handles that keep it alive, and must make the owning
+    /// HIP device/context current before passing it to foreign HIP APIs.
+    pub unsafe fn as_raw(&self) -> HipFunction {
+        self.raw
+    }
+
     pub fn occupancy_max_potential_block_size(
         &self,
         dynamic_shared_mem_per_block: u32,
@@ -2799,6 +2849,15 @@ mod tests {
     }
 
     #[test]
+    fn async_device_allocation_size_overflow_is_error_before_ffi() {
+        let stream = Stream::new().expect("stream should be created");
+        let Err(err) = (unsafe { DeviceBuffer::<u16>::new_async(&stream, usize::MAX) }) else {
+            panic!("overflow should fail");
+        };
+        assert!(err.to_string().contains("allocation size overflow"));
+    }
+
+    #[test]
     fn pinned_allocation_size_overflow_is_error() {
         let Err(err) = PinnedHostBuffer::<u16>::new_zeroed(usize::MAX) else {
             panic!("overflow should fail");
@@ -2854,6 +2913,55 @@ mod tests {
             buffer.copy_to_vec().expect("download should work"),
             [0, 0, 0]
         );
+    }
+
+    #[test]
+    fn async_device_buffer_records_stream_ordered_allocation() {
+        let sync_buffer = DeviceBuffer::<u32>::new(1).expect("sync allocation should work");
+        assert!(!sync_buffer.is_stream_ordered_allocation());
+
+        let stream = Stream::new().expect("stream should be created");
+        let async_buffer = unsafe { DeviceBuffer::<u32>::new_async(&stream, 1) }
+            .expect("async allocation should work");
+        assert!(async_buffer.is_stream_ordered_allocation());
+    }
+
+    #[test]
+    fn async_device_buffer_drop_keeps_stream_alive_until_copy_finishes() {
+        let stream = Stream::new().expect("stream should be created");
+        let input = [3u32, 5, 8, 13];
+        let mut output = [0u32; 4];
+        let buffer = unsafe { DeviceBuffer::<u32>::new_async(&stream, input.len()) }
+            .expect("async allocation should work");
+
+        unsafe {
+            buffer
+                .copy_from_host_async(&stream, &input)
+                .expect("async upload should work");
+            buffer
+                .copy_to_host_async(&stream, &mut output)
+                .expect("async download should work");
+        }
+        drop(stream);
+        drop(buffer);
+
+        assert_eq!(output, input);
+    }
+
+    #[test]
+    fn explicit_async_free_consumes_buffer_without_drop_free() {
+        let stream = Stream::new().expect("stream should be created");
+        let buffer = unsafe { DeviceBuffer::<u32>::new_async(&stream, 4) }
+            .expect("async allocation should work");
+        unsafe {
+            buffer
+                .set_zero_async(&stream)
+                .expect("async zero should work");
+            buffer
+                .free_async(&stream)
+                .expect("async free should be enqueued");
+        }
+        stream.synchronize().expect("stream should finish");
     }
 
     #[test]

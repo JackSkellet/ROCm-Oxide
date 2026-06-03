@@ -151,7 +151,9 @@ features on top of stronger contracts.
   - [x] connect host-visible marked globals to typed host views
 - [x] Math intrinsic lowering:
   - [x] map common `f32`/`f64` math calls to AMDGPU/ROCm-supported lowering
-  - [x] add tests for `sqrt`, `rsqrt`, `sin`, `cos`, `atan`, min/max, and NaN behavior
+  - [x] add tests for `sqrt`, `rsqrt`, `sin`, `cos`, `atan`, `atan2`,
+        NaN-propagating min/max, one-NaN `fmin`/`fmax`, signed-zero ordering,
+        and NaN literal helpers
 - [x] Explicit memory-scope atomics:
   - [x] expose workgroup/device/system scope where ROCm supports it
   - [x] keep relaxed/basic atomics as the compatibility path
@@ -240,6 +242,10 @@ Local probes:
   - [x] expose synchronous and stream-ordered device-to-device `DeviceBuffer` copies
   - [x] expose synchronous and stream-ordered byte-pattern memset plus `set_zero`
   - [x] remove the `spectral_lattice` atomic histogram reset's per-frame host zero upload
+- [x] Raw module/function interop:
+  - [x] expose unsafe non-owning HIP module and function handles
+  - [x] retain ownership/drop with ROCm-Oxide and expose owning device ordinals
+  - [x] cover raw handles in runtime tests and the module-global example
 - [x] Multi-device and host-memory coherence:
   - [x] model coarse/fine-grained memory pools and host visibility
   - [x] add pinned, managed, and peer-memory contract tests
@@ -261,6 +267,11 @@ Local probes:
   - [x] prefer explicit tool overrides, `ROCM_PATH`/`HIP_PATH`, `/opt/rocm`, then `PATH`
   - [x] validate `llc`, `clang`, `llvm-readelf`, `llvm-objdump`, `rocminfo`, and `rocm_agent_enumerator`
   - [x] emit one doctor report with versions, target arch, `rust-src`, and build-std status
+- [x] Memory-lowering regression fixtures:
+  - [x] preserve private `alloca`/reference load-store memory while rewriting
+        global pointer operations
+  - [x] propagate address spaces through pointer-valued global loads, selects,
+        and downstream GEP/store operations
 
 ### P2: ROCm-Specific Feature Parity
 

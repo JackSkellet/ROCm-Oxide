@@ -593,7 +593,7 @@ fn run_math_probe(
     kernels: &generated::DeviceKernels,
 ) -> Result<FeatureProbe, Box<dyn std::error::Error>> {
     let math_input = DeviceBuffer::from_slice(&[4.0f32, 0.0, 1.0, -1.0])?;
-    let math_out = DeviceBuffer::<f32>::new(16)?;
+    let math_out = DeviceBuffer::<f32>::new(30)?;
     unsafe {
         kernels.math_intrinsics(LaunchConfig::for_num_elems(1), &math_out, &math_input)?;
     }
@@ -608,16 +608,40 @@ fn run_math_probe(
         && close_to(math[8], 0.5, 0.0001)
         && math[12] == 1.0
         && math[13] == 1.0
-        && math[14] == 1.0;
+        && math[14] == 1.0
+        && close_to(math[16], 3.0, 0.0001)
+        && close_to(math[17], std::f32::consts::FRAC_PI_4, 0.002)
+        && close_to(
+            math[18],
+            std::f32::consts::FRAC_PI_2 + std::f32::consts::FRAC_PI_4,
+            0.002,
+        )
+        && close_to(math[19], -std::f32::consts::FRAC_PI_2, 0.0001)
+        && close_to(
+            math[20],
+            std::f32::consts::FRAC_PI_2 + std::f32::consts::FRAC_PI_4,
+            0.002,
+        )
+        && math[21] == 1.0
+        && math[22] == 1.0
+        && close_to(math[23], 0.0, 0.0001)
+        && close_to(math[24], 1.0, 0.0001)
+        && close_to(math[25], 1.0, 0.0001)
+        && math[26] == 1.0
+        && math[27] == 1.0
+        && math[28] == 1.0
+        && math[29] == 1.0;
     Ok(FeatureProbe {
         kind: FeatureKind::MathIntrinsics,
         title: "Math intrinsics".to_string(),
         status: if ok {
-            "f32/f64 math helpers and NaN paths match expected values".to_string()
+            "f32/f64 math helpers, atan2, fmin/fmax, and NaN paths match".to_string()
         } else {
             "math intrinsic output mismatch".to_string()
         },
-        detail: "sqrt, rsqrt, sin, cos, atan, min/max, f64 mirrors, and NaN sentinels".to_string(),
+        detail:
+            "sqrt, rsqrt, sin, cos, atan/atan2, min/max, fmin/fmax, f64 mirrors, and NaN sentinels"
+                .to_string(),
         ok,
         values: math.iter().map(|value| value.to_bits() as u64).collect(),
     })
@@ -1586,7 +1610,7 @@ fn draw_math_view(
     draw_wrapped_text(
         frame,
         Rect::new(rect.x + 28, rect.y + 24, rect.w - 56, 34),
-        "The probe checks f32/f64 intrinsics plus NaN sentinel paths.",
+        "The probe checks f32/f64 intrinsics, atan2, fmin/fmax, and NaN sentinel paths.",
         TEXT,
         1,
         2,

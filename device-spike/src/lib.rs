@@ -253,7 +253,7 @@ pub unsafe extern "C" fn affine_transform(
     }
 }
 
-// rocm-oxide: len(out)=16
+// rocm-oxide: len(out)=30
 // rocm-oxide: len(input)=4
 #[kernel]
 pub unsafe extern "C" fn math_intrinsics(
@@ -271,6 +271,9 @@ pub unsafe extern "C" fn math_intrinsics(
     let nan = gpu::math::sqrt_f32(negative);
     let min_nan = gpu::math::min_f32(nan, one);
     let max_nan = gpu::math::max_f32(one, nan);
+    let literal_nan_f32 = gpu::math::nan_f32();
+    let literal_nan_f64 = gpu::math::nan_f64();
+    let negative_zero = -zero;
 
     unsafe {
         out.write_unchecked(0, gpu::math::sqrt_f32(positive));
@@ -289,6 +292,68 @@ pub unsafe extern "C" fn math_intrinsics(
         out.write_unchecked(13, if min_nan != min_nan { 1.0 } else { 0.0 });
         out.write_unchecked(14, if max_nan != max_nan { 1.0 } else { 0.0 });
         out.write_unchecked(15, gpu::math::min_f64(-2.0, 3.0) as f32);
+        out.write_unchecked(16, gpu::math::max_f64(-2.0, 3.0) as f32);
+        out.write_unchecked(17, gpu::math::atan2_f32(one, one));
+        out.write_unchecked(18, gpu::math::atan2_f32(one, -one));
+        out.write_unchecked(19, gpu::math::atan2_f32(negative, zero));
+        out.write_unchecked(20, gpu::math::atan2_f64(one as f64, -one as f64) as f32);
+        out.write_unchecked(
+            21,
+            if literal_nan_f32 != literal_nan_f32 {
+                1.0
+            } else {
+                0.0
+            },
+        );
+        out.write_unchecked(
+            22,
+            if literal_nan_f64 != literal_nan_f64 {
+                1.0
+            } else {
+                0.0
+            },
+        );
+        out.write_unchecked(23, gpu::math::atan2_f32(zero, zero));
+        out.write_unchecked(24, gpu::math::fmin_f32(nan, one));
+        out.write_unchecked(25, gpu::math::fmax_f32(one, nan));
+        out.write_unchecked(
+            26,
+            if gpu::math::fmin_f64(literal_nan_f64, one as f64) == one as f64
+                && gpu::math::fmax_f64(one as f64, literal_nan_f64) == one as f64
+            {
+                1.0
+            } else {
+                0.0
+            },
+        );
+        out.write_unchecked(
+            27,
+            if gpu::math::fmin_f32(negative_zero, zero).to_bits() == negative_zero.to_bits() {
+                1.0
+            } else {
+                0.0
+            },
+        );
+        out.write_unchecked(
+            28,
+            if gpu::math::fmax_f32(negative_zero, zero).to_bits() == zero.to_bits() {
+                1.0
+            } else {
+                0.0
+            },
+        );
+        out.write_unchecked(
+            29,
+            if gpu::math::fmin_f64(-(zero as f64), zero as f64).to_bits()
+                == (-(zero as f64)).to_bits()
+                && gpu::math::fmax_f64(-(zero as f64), zero as f64).to_bits()
+                    == (zero as f64).to_bits()
+            {
+                1.0
+            } else {
+                0.0
+            },
+        );
     }
 }
 
@@ -990,6 +1055,38 @@ pub unsafe extern "C" fn device_api_breadth_probe(
     }
 
     let _ = barrier.arrive_and_wait();
+}
+
+// rocm-oxide: len(out)=10
+#[kernel]
+pub unsafe extern "C" fn simd_vector_probe(out: gpu::DeviceSliceMut<u32>) {
+    if gpu::global_id_x() != 0 {
+        return;
+    }
+
+    let dir = gpu::Vec3f::new(0.0, 2.0, 0.0).normalize_or_zero();
+    let normal = gpu::Vec3f::new(0.0, 1.0, 0.0);
+    let reflected = dir.reflect(normal);
+    let hit = gpu::Vec3f::new(1.0, 2.0, 3.0) + dir * 4.0;
+    let cross = gpu::Vec3f::new(1.0, 0.0, 0.0).cross(normal);
+    let uv = gpu::Vec2f::new(0.25, 0.75).lerp(gpu::Vec2f::splat(1.0), 0.5);
+    let clamped = gpu::Vec3f::new(-2.0, 5.0, 1.5)
+        .mul_components(gpu::Vec3f::splat(1.0))
+        .clamp(gpu::Vec3f::zero(), gpu::Vec3f::splat(3.0));
+    let half_pair = gpu::F16x2::from_halves(0x3c00, 0xc000);
+
+    unsafe {
+        out.write_unchecked(0, dir.length_squared().to_bits());
+        out.write_unchecked(1, reflected.y.to_bits());
+        out.write_unchecked(2, hit.y.to_bits());
+        out.write_unchecked(3, cross.z.to_bits());
+        out.write_unchecked(4, uv.x.to_bits());
+        out.write_unchecked(5, uv.y.to_bits());
+        out.write_unchecked(6, clamped.x.to_bits());
+        out.write_unchecked(7, clamped.y.to_bits());
+        out.write_unchecked(8, half_pair.to_bits());
+        out.write_unchecked(9, half_pair.swap_halves().to_bits());
+    }
 }
 
 #[kernel]

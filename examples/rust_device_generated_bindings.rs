@@ -37,7 +37,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     assert_eq!(add_out.copy_to_vec()?, vec![3.0, 7.5, -1.0, 2.25]);
 
     let math_input = DeviceBuffer::from_slice(&[4.0f32, 0.0, 1.0, -1.0])?;
-    let math_out = DeviceBuffer::<f32>::new(16)?;
+    let math_out = DeviceBuffer::<f32>::new(30)?;
     unsafe {
         kernels.math_intrinsics(LaunchConfig::for_num_elems(1), &math_out, &math_input)?;
     }
@@ -59,6 +59,35 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     assert_eq!(math[13], 1.0, "min_f32 should propagate NaN");
     assert_eq!(math[14], 1.0, "max_f32 should propagate NaN");
     assert_close("min_f64", math[15], -2.0, 0.0001)?;
+    assert_close("max_f64", math[16], 3.0, 0.0001)?;
+    assert_close("atan2_f32_q1", math[17], std::f32::consts::FRAC_PI_4, 0.002)?;
+    assert_close(
+        "atan2_f32_q2",
+        math[18],
+        std::f32::consts::FRAC_PI_2 + std::f32::consts::FRAC_PI_4,
+        0.002,
+    )?;
+    assert_close(
+        "atan2_f32_negative_y_axis",
+        math[19],
+        -std::f32::consts::FRAC_PI_2,
+        0.0001,
+    )?;
+    assert_close(
+        "atan2_f64_q2",
+        math[20],
+        std::f32::consts::FRAC_PI_2 + std::f32::consts::FRAC_PI_4,
+        0.002,
+    )?;
+    assert_eq!(math[21], 1.0, "nan_f32 should produce NaN");
+    assert_eq!(math[22], 1.0, "nan_f64 should produce NaN");
+    assert_close("atan2_f32_origin", math[23], 0.0, 0.0001)?;
+    assert_close("fmin_f32_one_nan", math[24], 1.0, 0.0001)?;
+    assert_close("fmax_f32_one_nan", math[25], 1.0, 0.0001)?;
+    assert_eq!(math[26], 1.0, "f64 fmin/fmax should ignore one NaN");
+    assert_eq!(math[27], 1.0, "fmin_f32 should preserve -0.0 ordering");
+    assert_eq!(math[28], 1.0, "fmax_f32 should preserve +0.0 ordering");
+    assert_eq!(math[29], 1.0, "f64 fmin/fmax should preserve zero ordering");
 
     let atomic_scope_out = DeviceBuffer::<u32>::new(4)?;
     let atomic_counters = DeviceBuffer::from_slice(&[0u32; 3])?;
@@ -189,6 +218,23 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         api_i64_counter.copy_to_vec()?,
         vec![-((active_lanes * 2) as i64)]
     );
+
+    let simd_out = DeviceBuffer::<u32>::new(10)?;
+    unsafe {
+        kernels.simd_vector_probe(LaunchConfig::new(Dim3::x(1), Dim3::x(1)), &simd_out)?;
+    }
+    rocm_oxide::hip::synchronize()?;
+    let simd = simd_out.copy_to_vec()?;
+    assert_eq!(f32::from_bits(simd[0]), 1.0);
+    assert_eq!(f32::from_bits(simd[1]), -1.0);
+    assert_eq!(f32::from_bits(simd[2]), 6.0);
+    assert_eq!(f32::from_bits(simd[3]), 1.0);
+    assert_eq!(f32::from_bits(simd[4]), 0.625);
+    assert_eq!(f32::from_bits(simd[5]), 0.875);
+    assert_eq!(f32::from_bits(simd[6]), 0.0);
+    assert_eq!(f32::from_bits(simd[7]), 3.0);
+    assert_eq!(simd[8], 0xc000_3c00);
+    assert_eq!(simd[9], 0x3c00_c000);
 
     let collective_block_x = 32u32;
     let collective_n = collective_block_x as usize;

@@ -27,6 +27,7 @@ fn run() -> Result<(), String> {
         "doctor" => run_build_tool(["--doctor"], &[]),
         "build" => run_build_tool(std::iter::empty::<&str>(), &args),
         "run" => cargo_run(&args),
+        "debug" => cargo_debug(&args),
         "inspect" => inspect(&args),
         "pipeline" => pipeline(&args),
         "profile" => profile(&args),
@@ -46,8 +47,9 @@ fn print_help() {
     cargo rocm-oxide doctor
     cargo rocm-oxide build [-- --arch <gfx arch>]
     cargo rocm-oxide run [cargo-run-args]
+    cargo rocm-oxide debug [cargo-run-args]
     cargo rocm-oxide inspect [metadata.json]
-    cargo rocm-oxide pipeline [--build]
+    cargo rocm-oxide pipeline [--build] [--crate PATH] [--output-stem NAME]
     cargo rocm-oxide profile [--trace] [--name NAME] [--pmc COUNTER[,COUNTER...]] [--output-directory DIR] [-- <program> ...]
     cargo rocm-oxide verify [--host-ci|--offline|--quick|--full]
     cargo rocm-oxide new <path>"
@@ -58,7 +60,20 @@ fn cargo() -> OsString {
     env::var_os("CARGO").unwrap_or_else(|| OsString::from("cargo"))
 }
 
-fn workspace_root() -> Result<PathBuf, String> {
+fn project_root() -> Result<PathBuf, String> {
+    let mut current =
+        env::current_dir().map_err(|err| format!("failed to read current directory: {err}"))?;
+    loop {
+        if current.join("Cargo.toml").is_file() {
+            return Ok(current);
+        }
+        if !current.pop() {
+            return Err("could not find a Cargo.toml project root".to_string());
+        }
+    }
+}
+
+fn source_workspace_root() -> Result<PathBuf, String> {
     let mut current =
         env::current_dir().map_err(|err| format!("failed to read current directory: {err}"))?;
     loop {
@@ -76,15 +91,16 @@ where
     I: IntoIterator,
     I::Item: AsRef<str>,
 {
-    let root = workspace_root()?;
-    let mut command = Command::new(cargo());
-    command
-        .arg("run")
-        .arg("--quiet")
-        .arg("--manifest-path")
-        .arg(root.join("tools/rocm-oxide-build/Cargo.toml"))
-        .arg("--")
-        .current_dir(&root);
+    let root = project_root()?;
+    run_build_tool_in(&root, fixed_args, passthrough)
+}
+
+fn run_build_tool_in<I>(root: &Path, fixed_args: I, passthrough: &[OsString]) -> Result<(), String>
+where
+    I: IntoIterator,
+    I::Item: AsRef<str>,
+{
+    let mut command = build_tool_command(root)?;
     for arg in fixed_args {
         command.arg(arg.as_ref());
     }
@@ -94,8 +110,51 @@ where
     run_status(command, "run rocm-oxide-build")
 }
 
+fn build_tool_command(root: &Path) -> Result<Command, String> {
+    if let Some(path) = env::var_os("ROCM_OXIDE_BUILD").filter(|value| !value.is_empty()) {
+        let mut command = Command::new(path);
+        command.current_dir(root);
+        return Ok(command);
+    }
+
+    if let Ok(exe) = env::current_exe()
+        && let Some(dir) = exe.parent()
+    {
+        let sibling = dir.join("rocm-oxide-build");
+        if is_executable(&sibling) {
+            let mut command = Command::new(sibling);
+            command.current_dir(root);
+            return Ok(command);
+        }
+    }
+
+    if let Some(path) = find_program_on_path("rocm-oxide-build") {
+        let mut command = Command::new(path);
+        command.current_dir(root);
+        return Ok(command);
+    }
+
+    let source_root = source_workspace_root()?;
+    let mut command = Command::new(cargo());
+    command
+        .arg("run")
+        .arg("--quiet")
+        .arg("--manifest-path")
+        .arg(source_root.join("tools/rocm-oxide-build/Cargo.toml"))
+        .arg("--")
+        .current_dir(root);
+    Ok(command)
+}
+
+fn find_program_on_path(name: &str) -> Option<PathBuf> {
+    let path = env::var_os("PATH")?;
+    env::split_paths(&path)
+        .map(|dir| dir.join(name))
+        .find(|path| is_executable(path))
+}
+
 fn cargo_run(args: &[OsString]) -> Result<(), String> {
-    let root = workspace_root()?;
+    let root = project_root()?;
     let mut command = Command::new(cargo());
     command.arg("run").current_dir(&root);
     for arg in args {
@@ -104,15 +163,28 @@ fn cargo_run(args: &[OsString]) -> Result<(), String> {
     run_status(command, "run host crate")
 }
 
+fn cargo_debug(args: &[OsString]) -> Result<(), String> {
+    let root = project_root()?;
+    let mut command = Command::new(cargo());
+    command
+        .arg("run")
+        .args(args)
+        .env("ROCM_OXIDE_DEVICE_DEBUG", "1")
+        .current_dir(&root);
+    run_status(command, "run host crate with ROCm-Oxide device debug")
+}
+
 fn pipeline(args: &[OsString]) -> Result<(), String> {
-    let root = workspace_root()?;
-    if args.iter().any(|arg| arg == "--build") {
-        run_build_tool(std::iter::empty::<&str>(), &[])?;
+    let root = project_root()?;
+    let args = PipelineArgs::parse(args)?;
+    if args.build {
+        run_build_tool_in(&root, std::iter::empty::<&str>(), &args.build_tool_args())?;
     }
 
     println!("ROCm-Oxide pipeline");
     println!(
-        "1. discover #[kernel] functions in device-spike/src and kernel-bearing path dependencies"
+        "1. discover #[kernel] functions in {} and kernel-bearing path dependencies",
+        args.device_crate.display()
     );
     println!("2. cargo rustc -Z build-std=core --target amdgcn-amd-amdhsa");
     println!("3. rewrite marked Rust functions into AMDGPU/HSA kernels");
@@ -122,27 +194,88 @@ fn pipeline(args: &[OsString]) -> Result<(), String> {
     println!("7. emit metadata, layout-proven device structs, and typed host bindings");
     println!("8. root build.rs copies artifacts into OUT_DIR for host embedding");
 
-    let metadata = find_latest_metadata(&root);
+    let metadata = find_latest_metadata(&root, &args.device_crate, &args.output_stem);
     if let Some(metadata) = metadata {
         println!();
-        run_build_tool(["--inspect-metadata"], &[metadata.into_os_string()])?;
+        run_build_tool_in(&root, ["--inspect-metadata"], &[metadata.into_os_string()])?;
     }
     Ok(())
 }
 
 fn inspect(args: &[OsString]) -> Result<(), String> {
-    let root = workspace_root()?;
+    let root = project_root()?;
     let metadata = if let Some(path) = args.first() {
         PathBuf::from(path)
     } else {
-        find_latest_metadata(&root)
+        find_latest_metadata(
+            &root,
+            Path::new("device-spike"),
+            std::ffi::OsStr::new("rocm_oxide_device_spike"),
+        )
             .ok_or_else(|| "no generated metadata found; run `cargo rocm-oxide build` first".to_string())?
     };
-    run_build_tool(["--inspect-metadata"], &[metadata.into_os_string()])
+    run_build_tool_in(&root, ["--inspect-metadata"], &[metadata.into_os_string()])
+}
+
+struct PipelineArgs {
+    build: bool,
+    device_crate: PathBuf,
+    output_stem: OsString,
+}
+
+impl PipelineArgs {
+    fn parse(args: &[OsString]) -> Result<Self, String> {
+        let mut build = false;
+        let mut device_crate = PathBuf::from("device-spike");
+        let mut output_stem = OsString::from("rocm_oxide_device_spike");
+        let mut index = 0;
+        while index < args.len() {
+            let arg = &args[index];
+            match arg.to_str() {
+                Some("--build") => build = true,
+                Some("--crate") => {
+                    index += 1;
+                    device_crate = PathBuf::from(
+                        args.get(index)
+                            .cloned()
+                            .ok_or_else(|| "--crate requires a path".to_string())?,
+                    );
+                }
+                Some("--output-stem") => {
+                    index += 1;
+                    output_stem = args
+                        .get(index)
+                        .cloned()
+                        .ok_or_else(|| "--output-stem requires a filename stem".to_string())?;
+                }
+                Some("--help") | Some("-h") => {
+                    print_help();
+                    std::process::exit(0);
+                }
+                Some(other) => return Err(format!("unknown pipeline option `{other}`")),
+                None => return Err("pipeline arguments must be valid UTF-8".to_string()),
+            }
+            index += 1;
+        }
+        Ok(Self {
+            build,
+            device_crate,
+            output_stem,
+        })
+    }
+
+    fn build_tool_args(&self) -> Vec<OsString> {
+        vec![
+            OsString::from("--crate"),
+            self.device_crate.clone().into_os_string(),
+            OsString::from("--output-stem"),
+            self.output_stem.clone(),
+        ]
+    }
 }
 
 fn verify(args: &[OsString]) -> Result<(), String> {
-    let root = workspace_root()?;
+    let root = source_workspace_root()?;
     let mut command = Command::new(root.join("scripts/verify.sh"));
     command.args(args).current_dir(&root);
     run_status(command, "run ROCm-Oxide verification gate")
@@ -155,7 +288,7 @@ enum ProfileMode {
 }
 
 fn profile(args: &[OsString]) -> Result<(), String> {
-    let root = workspace_root()?;
+    let root = source_workspace_root()?;
     let mut profile = ProfileArgs::parse(args, &root)?;
     let mut command_args = std::mem::take(&mut profile.command);
     let profiler =
@@ -447,10 +580,13 @@ fn display_command(args: &[OsString]) -> String {
         .join(" ")
 }
 
-fn find_latest_metadata(root: &Path) -> Option<PathBuf> {
-    let path = root.join(
-        "device-spike/target/amdgcn-amd-amdhsa/release/rocm_oxide_device_spike.metadata.json",
-    );
+fn find_latest_metadata(root: &Path, device_crate: &Path, output_stem: &std::ffi::OsStr) -> Option<PathBuf> {
+    let mut file_name = output_stem.to_os_string();
+    file_name.push(".metadata.json");
+    let path = root
+        .join(device_crate)
+        .join("target/amdgcn-amd-amdhsa/release")
+        .join(file_name);
     path.is_file().then_some(path)
 }
 
@@ -463,20 +599,80 @@ fn new_project(args: &[OsString]) -> Result<(), String> {
         return Err(format!("target already exists: {}", path.display()));
     }
 
+    let source_root = source_workspace_root().ok();
+    let runtime_path = source_root
+        .as_ref()
+        .map(|root| root.display().to_string())
+        .unwrap_or_else(|| "..".to_string());
+    let device_api_path = source_root
+        .as_ref()
+        .map(|root| root.join("crates/rocm-oxide-device").display().to_string())
+        .unwrap_or_else(|| "../crates/rocm-oxide-device".to_string());
+    let kernel_macro_path = source_root
+        .as_ref()
+        .map(|root| root.join("crates/rocm-oxide-kernel").display().to_string())
+        .unwrap_or_else(|| "../crates/rocm-oxide-kernel".to_string());
+
     fs::create_dir_all(path.join("src"))
         .map_err(|err| format!("failed to create {}: {err}", path.display()))?;
+    fs::create_dir_all(path.join("device-spike/src"))
+        .map_err(|err| format!("failed to create {}: {err}", path.join("device-spike").display()))?;
     fs::write(
         path.join("Cargo.toml"),
-        r#"[package]
+        format!(
+            r#"[package]
 name = "rocm-oxide-app"
 version = "0.1.0"
 edition = "2024"
 
 [dependencies]
-rocm-oxide = { path = ".." }
-"#,
+rocm-oxide = {{ path = "{runtime_path}" }}
+"#
+        ),
     )
     .map_err(|err| format!("failed to write Cargo.toml: {err}"))?;
+    fs::write(
+        path.join("device-spike/Cargo.toml"),
+        format!(
+            r#"[package]
+name = "rocm-oxide-app-device"
+version = "0.1.0"
+edition = "2024"
+publish = false
+
+[lib]
+crate-type = ["rlib"]
+
+[dependencies]
+rocm-oxide-device = {{ path = "{device_api_path}" }}
+rocm-oxide-kernel = {{ path = "{kernel_macro_path}" }}
+
+[profile.release]
+panic = "abort"
+codegen-units = 1
+lto = false
+"#
+        ),
+    )
+    .map_err(|err| format!("failed to write device-spike/Cargo.toml: {err}"))?;
+    fs::write(
+        path.join("device-spike/src/lib.rs"),
+        r#"#![no_std]
+
+use rocm_oxide_device as gpu;
+use rocm_oxide_kernel::kernel;
+
+// rocm-oxide: len(out)=n
+#[kernel]
+pub unsafe extern "C" fn fill_indices(out: gpu::DeviceSliceMut<u32>, n: usize) {
+    let index = gpu::global_id_x();
+    if index < n {
+        unsafe { out.write_unchecked(index, index as u32) };
+    }
+}
+"#,
+    )
+    .map_err(|err| format!("failed to write device-spike/src/lib.rs: {err}"))?;
     fs::write(
         path.join("src/main.rs"),
         r#"fn main() {

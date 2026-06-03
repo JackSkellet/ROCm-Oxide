@@ -25,6 +25,7 @@ use core::sync::atomic::Ordering;
 use core::{marker::PhantomData, ptr};
 
 pub mod math {
+    const PI_F32: f32 = core::f32::consts::PI;
     const FRAC_PI_2_F32: f32 = core::f32::consts::FRAC_PI_2;
     const FRAC_PI_4_F32: f32 = core::f32::consts::FRAC_PI_4;
     const PI_F64: f64 = core::f64::consts::PI;
@@ -115,6 +116,56 @@ pub mod math {
     }
 
     #[inline(always)]
+    pub fn atan2_f32(y: f32, x: f32) -> f32 {
+        if y != y || x != x {
+            return nan_f32();
+        }
+        if x > 0.0 {
+            return atan_f32(y / x);
+        }
+        if x < 0.0 {
+            let angle = atan_f32(y / x);
+            return if y < 0.0 {
+                angle - PI_F32
+            } else {
+                angle + PI_F32
+            };
+        }
+        if y > 0.0 {
+            FRAC_PI_2_F32
+        } else if y < 0.0 {
+            -FRAC_PI_2_F32
+        } else {
+            0.0
+        }
+    }
+
+    #[inline(always)]
+    pub fn atan2_f64(y: f64, x: f64) -> f64 {
+        if y != y || x != x {
+            return nan_f64();
+        }
+        if x > 0.0 {
+            return atan_f64(y / x);
+        }
+        if x < 0.0 {
+            let angle = atan_f64(y / x);
+            return if y < 0.0 {
+                angle - PI_F64
+            } else {
+                angle + PI_F64
+            };
+        }
+        if y > 0.0 {
+            FRAC_PI_2_F64
+        } else if y < 0.0 {
+            -FRAC_PI_2_F64
+        } else {
+            0.0
+        }
+    }
+
+    #[inline(always)]
     pub fn min_f32(a: f32, b: f32) -> f32 {
         core::intrinsics::minimumf32(a, b)
     }
@@ -132,6 +183,60 @@ pub mod math {
     #[inline(always)]
     pub fn max_f64(a: f64, b: f64) -> f64 {
         core::intrinsics::maximumf64(a, b)
+    }
+
+    #[inline(always)]
+    pub fn fmin_f32(a: f32, b: f32) -> f32 {
+        if a != a {
+            b
+        } else if b != b {
+            a
+        } else {
+            min_f32(a, b)
+        }
+    }
+
+    #[inline(always)]
+    pub fn fmax_f32(a: f32, b: f32) -> f32 {
+        if a != a {
+            b
+        } else if b != b {
+            a
+        } else {
+            max_f32(a, b)
+        }
+    }
+
+    #[inline(always)]
+    pub fn fmin_f64(a: f64, b: f64) -> f64 {
+        if a != a {
+            b
+        } else if b != b {
+            a
+        } else {
+            min_f64(a, b)
+        }
+    }
+
+    #[inline(always)]
+    pub fn fmax_f64(a: f64, b: f64) -> f64 {
+        if a != a {
+            b
+        } else if b != b {
+            a
+        } else {
+            max_f64(a, b)
+        }
+    }
+
+    #[inline(always)]
+    pub fn nan_f32() -> f32 {
+        f32::from_bits(0x7fc0_0000)
+    }
+
+    #[inline(always)]
+    pub fn nan_f64() -> f64 {
+        f64::from_bits(0x7ff8_0000_0000_0000)
     }
 
     #[inline(always)]
@@ -161,6 +266,346 @@ pub mod math {
         x
     }
 }
+
+pub mod vector {
+    use super::math;
+    use core::ops::{Add, Div, Mul, Neg, Sub};
+
+    #[repr(C)]
+    #[derive(Clone, Copy, Default, PartialEq)]
+    pub struct Vec2f {
+        pub x: f32,
+        pub y: f32,
+    }
+
+    impl Vec2f {
+        #[inline(always)]
+        pub const fn new(x: f32, y: f32) -> Self {
+            Self { x, y }
+        }
+
+        #[inline(always)]
+        pub const fn splat(value: f32) -> Self {
+            Self { x: value, y: value }
+        }
+
+        #[inline(always)]
+        pub const fn zero() -> Self {
+            Self::splat(0.0)
+        }
+
+        #[inline(always)]
+        pub const fn from_array(value: [f32; 2]) -> Self {
+            Self {
+                x: value[0],
+                y: value[1],
+            }
+        }
+
+        #[inline(always)]
+        pub const fn to_array(self) -> [f32; 2] {
+            [self.x, self.y]
+        }
+
+        #[inline(always)]
+        pub fn mul_components(self, rhs: Self) -> Self {
+            Self::new(self.x * rhs.x, self.y * rhs.y)
+        }
+
+        #[inline(always)]
+        pub fn min(self, rhs: Self) -> Self {
+            Self::new(math::min_f32(self.x, rhs.x), math::min_f32(self.y, rhs.y))
+        }
+
+        #[inline(always)]
+        pub fn max(self, rhs: Self) -> Self {
+            Self::new(math::max_f32(self.x, rhs.x), math::max_f32(self.y, rhs.y))
+        }
+
+        #[inline(always)]
+        pub fn clamp(self, min: Self, max: Self) -> Self {
+            self.max(min).min(max)
+        }
+
+        #[inline(always)]
+        pub fn dot(self, rhs: Self) -> f32 {
+            self.x * rhs.x + self.y * rhs.y
+        }
+
+        #[inline(always)]
+        pub fn length_squared(self) -> f32 {
+            self.dot(self)
+        }
+
+        #[inline(always)]
+        pub fn length(self) -> f32 {
+            math::sqrt_f32(self.length_squared())
+        }
+
+        #[inline(always)]
+        pub fn normalize_or_zero(self) -> Self {
+            let len_sq = self.length_squared();
+            if len_sq > 0.0 {
+                self * math::rsqrt_f32(len_sq)
+            } else {
+                Self::zero()
+            }
+        }
+
+        #[inline(always)]
+        pub fn lerp(self, rhs: Self, t: f32) -> Self {
+            self + (rhs - self) * t
+        }
+
+        #[inline(always)]
+        pub fn reflect(self, normal: Self) -> Self {
+            self - normal * (2.0 * self.dot(normal))
+        }
+    }
+
+    impl Add for Vec2f {
+        type Output = Self;
+
+        #[inline(always)]
+        fn add(self, rhs: Self) -> Self::Output {
+            Self::new(self.x + rhs.x, self.y + rhs.y)
+        }
+    }
+
+    impl Sub for Vec2f {
+        type Output = Self;
+
+        #[inline(always)]
+        fn sub(self, rhs: Self) -> Self::Output {
+            Self::new(self.x - rhs.x, self.y - rhs.y)
+        }
+    }
+
+    impl Neg for Vec2f {
+        type Output = Self;
+
+        #[inline(always)]
+        fn neg(self) -> Self::Output {
+            Self::new(-self.x, -self.y)
+        }
+    }
+
+    impl Mul<f32> for Vec2f {
+        type Output = Self;
+
+        #[inline(always)]
+        fn mul(self, rhs: f32) -> Self::Output {
+            Self::new(self.x * rhs, self.y * rhs)
+        }
+    }
+
+    impl Div<f32> for Vec2f {
+        type Output = Self;
+
+        #[inline(always)]
+        fn div(self, rhs: f32) -> Self::Output {
+            Self::new(self.x / rhs, self.y / rhs)
+        }
+    }
+
+    #[repr(C)]
+    #[derive(Clone, Copy, Default, PartialEq)]
+    pub struct Vec3f {
+        pub x: f32,
+        pub y: f32,
+        pub z: f32,
+    }
+
+    impl Vec3f {
+        #[inline(always)]
+        pub const fn new(x: f32, y: f32, z: f32) -> Self {
+            Self { x, y, z }
+        }
+
+        #[inline(always)]
+        pub const fn splat(value: f32) -> Self {
+            Self {
+                x: value,
+                y: value,
+                z: value,
+            }
+        }
+
+        #[inline(always)]
+        pub const fn zero() -> Self {
+            Self::splat(0.0)
+        }
+
+        #[inline(always)]
+        pub const fn from_array(value: [f32; 3]) -> Self {
+            Self {
+                x: value[0],
+                y: value[1],
+                z: value[2],
+            }
+        }
+
+        #[inline(always)]
+        pub const fn to_array(self) -> [f32; 3] {
+            [self.x, self.y, self.z]
+        }
+
+        #[inline(always)]
+        pub fn mul_components(self, rhs: Self) -> Self {
+            Self::new(self.x * rhs.x, self.y * rhs.y, self.z * rhs.z)
+        }
+
+        #[inline(always)]
+        pub fn min(self, rhs: Self) -> Self {
+            Self::new(
+                math::min_f32(self.x, rhs.x),
+                math::min_f32(self.y, rhs.y),
+                math::min_f32(self.z, rhs.z),
+            )
+        }
+
+        #[inline(always)]
+        pub fn max(self, rhs: Self) -> Self {
+            Self::new(
+                math::max_f32(self.x, rhs.x),
+                math::max_f32(self.y, rhs.y),
+                math::max_f32(self.z, rhs.z),
+            )
+        }
+
+        #[inline(always)]
+        pub fn clamp(self, min: Self, max: Self) -> Self {
+            self.max(min).min(max)
+        }
+
+        #[inline(always)]
+        pub fn dot(self, rhs: Self) -> f32 {
+            self.x * rhs.x + self.y * rhs.y + self.z * rhs.z
+        }
+
+        #[inline(always)]
+        pub fn cross(self, rhs: Self) -> Self {
+            Self::new(
+                self.y * rhs.z - self.z * rhs.y,
+                self.z * rhs.x - self.x * rhs.z,
+                self.x * rhs.y - self.y * rhs.x,
+            )
+        }
+
+        #[inline(always)]
+        pub fn length_squared(self) -> f32 {
+            self.dot(self)
+        }
+
+        #[inline(always)]
+        pub fn length(self) -> f32 {
+            math::sqrt_f32(self.length_squared())
+        }
+
+        #[inline(always)]
+        pub fn normalize_or_zero(self) -> Self {
+            let len_sq = self.length_squared();
+            if len_sq > 0.0 {
+                self * math::rsqrt_f32(len_sq)
+            } else {
+                Self::zero()
+            }
+        }
+
+        #[inline(always)]
+        pub fn lerp(self, rhs: Self, t: f32) -> Self {
+            self + (rhs - self) * t
+        }
+
+        #[inline(always)]
+        pub fn reflect(self, normal: Self) -> Self {
+            self - normal * (2.0 * self.dot(normal))
+        }
+    }
+
+    impl Add for Vec3f {
+        type Output = Self;
+
+        #[inline(always)]
+        fn add(self, rhs: Self) -> Self::Output {
+            Self::new(self.x + rhs.x, self.y + rhs.y, self.z + rhs.z)
+        }
+    }
+
+    impl Sub for Vec3f {
+        type Output = Self;
+
+        #[inline(always)]
+        fn sub(self, rhs: Self) -> Self::Output {
+            Self::new(self.x - rhs.x, self.y - rhs.y, self.z - rhs.z)
+        }
+    }
+
+    impl Neg for Vec3f {
+        type Output = Self;
+
+        #[inline(always)]
+        fn neg(self) -> Self::Output {
+            Self::new(-self.x, -self.y, -self.z)
+        }
+    }
+
+    impl Mul<f32> for Vec3f {
+        type Output = Self;
+
+        #[inline(always)]
+        fn mul(self, rhs: f32) -> Self::Output {
+            Self::new(self.x * rhs, self.y * rhs, self.z * rhs)
+        }
+    }
+
+    impl Div<f32> for Vec3f {
+        type Output = Self;
+
+        #[inline(always)]
+        fn div(self, rhs: f32) -> Self::Output {
+            Self::new(self.x / rhs, self.y / rhs, self.z / rhs)
+        }
+    }
+
+    #[repr(transparent)]
+    #[derive(Clone, Copy, Default, PartialEq, Eq)]
+    pub struct F16x2(u32);
+
+    impl F16x2 {
+        #[inline(always)]
+        pub const fn from_bits(bits: u32) -> Self {
+            Self(bits)
+        }
+
+        #[inline(always)]
+        pub const fn to_bits(self) -> u32 {
+            self.0
+        }
+
+        #[inline(always)]
+        pub const fn from_halves(lo: u16, hi: u16) -> Self {
+            Self((lo as u32) | ((hi as u32) << 16))
+        }
+
+        #[inline(always)]
+        pub const fn lo_bits(self) -> u16 {
+            self.0 as u16
+        }
+
+        #[inline(always)]
+        pub const fn hi_bits(self) -> u16 {
+            (self.0 >> 16) as u16
+        }
+
+        #[inline(always)]
+        pub const fn swap_halves(self) -> Self {
+            Self::from_halves(self.hi_bits(), self.lo_bits())
+        }
+    }
+}
+
+pub use vector::{F16x2, Vec2f, Vec3f};
 
 pub mod debug {
     use super::amdgpu;

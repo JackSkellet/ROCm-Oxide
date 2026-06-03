@@ -163,6 +163,7 @@ impl Device {
         Ok(Module {
             module,
             limits: self.limits,
+            device_ordinal: self.ordinal,
         })
     }
 
@@ -847,9 +848,26 @@ fn device_buffer_byte_range<T>(
 pub struct Module {
     module: hip::Module,
     limits: DeviceLimits,
+    device_ordinal: i32,
 }
 
 impl Module {
+    /// Returns the underlying HIP module handle without transferring ownership.
+    ///
+    /// This is an interop escape hatch for ROCm APIs that need the raw module.
+    /// The handle remains valid only while this `Module` or kernels/globals
+    /// derived from it keep the module alive. Callers must not unload it and
+    /// must make `device_ordinal()` current before using it with foreign HIP
+    /// APIs.
+    pub unsafe fn as_raw_hip_module(&self) -> hip::HipModule {
+        unsafe { self.module.as_raw() }
+    }
+
+    /// Returns the HIP device ordinal that owns this module.
+    pub fn device_ordinal(&self) -> i32 {
+        self.device_ordinal
+    }
+
     pub fn kernel(&self, name: &CStr) -> Result<Kernel> {
         self.kernel_with_metadata(name, KernelMetadata::default())
     }
@@ -858,6 +876,7 @@ impl Module {
         Ok(Kernel {
             function: self.module.function(name)?,
             limits: self.limits,
+            device_ordinal: self.device_ordinal,
             metadata,
         })
     }
@@ -870,6 +889,7 @@ impl Module {
 pub struct Kernel {
     function: hip::Function,
     limits: DeviceLimits,
+    device_ordinal: i32,
     metadata: KernelMetadata,
 }
 
@@ -877,6 +897,20 @@ unsafe impl Send for Kernel {}
 unsafe impl Sync for Kernel {}
 
 impl Kernel {
+    /// Returns the underlying HIP function handle without transferring ownership.
+    ///
+    /// This is an interop escape hatch for ROCm APIs that need the raw function.
+    /// The handle remains valid only while this `Kernel` is alive. Callers must
+    /// make `device_ordinal()` current before using it with foreign HIP APIs.
+    pub unsafe fn as_raw_hip_function(&self) -> hip::HipFunction {
+        unsafe { self.function.as_raw() }
+    }
+
+    /// Returns the HIP device ordinal that owns this function.
+    pub fn device_ordinal(&self) -> i32 {
+        self.device_ordinal
+    }
+
     pub const fn metadata(&self) -> KernelMetadata {
         self.metadata
     }
@@ -1189,8 +1223,8 @@ fn rocminfo_path() -> PathBuf {
 #[cfg(test)]
 mod tests {
     use super::{
-        AtomicMemoryKind, DeviceLimits, DeviceProperties, Dim3, HostReferenceCaptureVisibility,
-        KernelMetadata, LaunchConfig, SystemScopeAtomicVisibility,
+        AtomicMemoryKind, Device, DeviceLimits, DeviceProperties, Dim3,
+        HostReferenceCaptureVisibility, KernelMetadata, LaunchConfig, SystemScopeAtomicVisibility,
     };
     use crate::hip::{DeviceBuffer, ManagedMemoryKind};
 
@@ -1200,6 +1234,32 @@ mod tests {
         assert_eq!(config.grid, Dim3::x(5));
         assert_eq!(config.block, Dim3::x(256));
         assert_eq!(config.shared_mem_bytes, 0);
+    }
+
+    #[test]
+    fn module_and_kernel_expose_non_owning_raw_hip_handles() {
+        let device = Device::first().expect("device should be visible");
+        let module = device
+            .compile_hip_source(
+                r#"
+extern "C" __global__
+void raw_handle_probe(unsigned int* out) {
+    out[0] = 7;
+}
+"#,
+            )
+            .expect("HIP source should compile");
+
+        assert_eq!(module.device_ordinal(), device.ordinal());
+        let raw_module = unsafe { module.as_raw_hip_module() };
+        assert!(!raw_module.is_null());
+
+        let kernel = module
+            .kernel(c"raw_handle_probe")
+            .expect("kernel should load");
+        assert_eq!(kernel.device_ordinal(), device.ordinal());
+        let raw_function = unsafe { kernel.as_raw_hip_function() };
+        assert!(!raw_function.is_null());
     }
 
     #[test]
