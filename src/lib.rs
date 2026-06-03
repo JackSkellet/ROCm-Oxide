@@ -51,7 +51,8 @@ pub use runtime::{
     OccupancyMaxPotentialBlockSize, Result, SystemScopeAtomicVisibility, validate_block_x,
     validate_buffer_len, validate_cooperative_launch_config,
     validate_cooperative_launch_for_device, validate_cooperative_multi_device_launch_for_device,
-    validate_device_buffers_disjoint, validate_launch_config, validate_launch_config_for_limits,
+    validate_device_buffers_disjoint, validate_generated_artifact_metadata, validate_launch_config,
+    validate_launch_config_for_limits,
 };
 
 #[macro_export]

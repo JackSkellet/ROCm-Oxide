@@ -17,6 +17,14 @@ the source package, rewritten LLVM IR path, object path, and kernel names
 contributed by each input. This keeps the final HSACO, metadata JSON, and typed
 host bindings tied to the same artifact set.
 
+The production verification gate now audits that artifact set after GPU
+verification runs. It requires the recorded link inputs to exist, requires the
+linked HSACO to exist, checks that every `link.objects[*].kernels` entry has a
+matching generated `kernels[*].name` metadata row, and checks that performance
+probe resource rows match the embedded compiler metadata for sampled kernels.
+This closes the easy metadata-drift gap where the runtime could launch current
+bytes while the shipped JSON or bindings described a different link graph.
+
 Runtime loading still uses the HIP module path through `hipModuleLoadData` and
 `hipModuleGetFunction`, because generated bindings already know the kernel
 symbols. AMD's HIP module-management API also exposes library-oriented entry

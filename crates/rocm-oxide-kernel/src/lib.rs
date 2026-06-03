@@ -1,61 +1,28 @@
-use proc_macro::{TokenStream, TokenTree};
+use proc_macro::TokenStream;
+use proc_macro2::{Ident, Span, TokenStream as TokenStream2};
+use quote::{ToTokens, quote};
+use syn::fold::{Fold, fold_type};
+use syn::parse::{Parse, ParseStream};
+use syn::{
+    Error, FnArg, GenericParam, ItemFn, ItemStatic, Pat, PatType, Result, Token, Type,
+    parenthesized,
+};
 
 #[proc_macro_attribute]
 pub fn kernel(attr: TokenStream, item: TokenStream) -> TokenStream {
-    let Some(name) = find_function_name(item.clone()) else {
-        return compile_error("#[kernel] can only be applied to a function");
+    let function = match syn::parse::<ItemFn>(item) {
+        Ok(function) => function,
+        Err(_) => return compile_error("#[kernel] can only be applied to a function"),
     };
 
-    let source = item.to_string();
-    let monomorphizations = match parse_monomorphizations(attr) {
-        Ok(value) => value,
-        Err(err) => return compile_error(&err),
+    let attr = match syn::parse::<KernelAttribute>(attr) {
+        Ok(attr) => attr,
+        Err(err) => return err.to_compile_error().into(),
     };
 
-    if monomorphizations.is_empty() && !function_has_generic_params(&source, &name) {
-        let exported = format!("#[unsafe(export_name = \"{name}\")]\n{source}");
-        return exported
-            .parse()
-            .unwrap_or_else(|_| compile_error("#[kernel] failed to rewrite function"));
-    }
-
-    let signature = match parse_function_signature(&source, &name) {
-        Ok(value) => value,
-        Err(err) => return compile_error(&err),
-    };
-
-    if signature.generic_params.is_empty() {
-        return compile_error("#[kernel(monomorphize(...))] requires a generic function");
-    }
-
-    if monomorphizations.is_empty() {
-        return compile_error(
-            "generic #[kernel] functions require #[kernel(monomorphize(Ty, ...))]",
-        );
-    }
-
-    let mut exported = source;
-    for concrete_types in monomorphizations {
-        if concrete_types.len() != signature.generic_params.len() {
-            return compile_error(&format!(
-                "kernel `{}` expects {} generic argument(s), but monomorphize(...) supplied {}",
-                name,
-                signature.generic_params.len(),
-                concrete_types.len()
-            ));
-        }
-        match generate_monomorphized_kernel_wrapper(&signature, &concrete_types) {
-            Ok(wrapper) => {
-                exported.push('\n');
-                exported.push_str(&wrapper);
-            }
-            Err(err) => return compile_error(&err),
-        }
-    }
-
-    exported
-        .parse()
-        .unwrap_or_else(|_| compile_error("#[kernel] failed to rewrite function"))
+    expand_kernel(function, attr.monomorphizations)
+        .unwrap_or_else(Error::into_compile_error)
+        .into()
 }
 
 #[proc_macro_attribute]
@@ -74,193 +41,259 @@ pub fn shared(_attr: TokenStream, item: TokenStream) -> TokenStream {
 }
 
 fn export_static(attribute: &str, item: TokenStream) -> TokenStream {
-    let Some(name) = find_static_name(item.clone()) else {
-        return compile_error(&format!(
-            "#[{attribute}] can only be applied to a static item"
-        ));
-    };
-
-    let source = item.to_string();
-    let exported = format!("#[used]\n#[unsafe(export_name = \"{name}\")]\n{source}");
-    exported
-        .parse()
-        .unwrap_or_else(|_| compile_error(&format!("#[{attribute}] failed to rewrite static")))
-}
-
-fn find_function_name(tokens: TokenStream) -> Option<String> {
-    let mut saw_fn = false;
-    for token in tokens {
-        if let TokenTree::Ident(ident) = token {
-            if saw_fn {
-                return Some(ident.to_string());
-            }
-            saw_fn = ident.to_string() == "fn";
+    let item = match syn::parse::<ItemStatic>(item) {
+        Ok(item) => item,
+        Err(_) => {
+            return compile_error(&format!(
+                "#[{attribute}] can only be applied to a static item"
+            ));
         }
-    }
-    None
-}
-
-#[derive(Debug)]
-struct FunctionSignature {
-    name: String,
-    generic_params: Vec<String>,
-    args: Vec<FunctionArg>,
-}
-
-#[derive(Debug)]
-struct FunctionArg {
-    source: String,
-    binding_name: String,
-}
-
-fn parse_function_signature(source: &str, name: &str) -> Result<FunctionSignature, String> {
-    let name_pos = source
-        .find(name)
-        .ok_or_else(|| "#[kernel] failed to parse function name".to_string())?;
-    let mut cursor = name_pos + name.len();
-    cursor = skip_ws(source, cursor);
-
-    let generic_params = if source[cursor..].starts_with('<') {
-        let generic_end = find_matching(source, cursor, '<', '>')?;
-        let generic_source = &source[cursor + 1..generic_end];
-        cursor = skip_ws(source, generic_end + 1);
-        parse_generic_params(generic_source)?
-    } else {
-        Vec::new()
     };
 
-    let args_start = source[cursor..]
-        .find('(')
-        .ok_or_else(|| "#[kernel] failed to parse function arguments".to_string())?
-        + cursor;
-    let args_end = find_matching(source, args_start, '(', ')')?;
-    let args = split_top_level(&source[args_start + 1..args_end], ',')
-        .into_iter()
-        .filter(|arg| !arg.trim().is_empty())
-        .map(|arg| {
-            let (pattern, _) = arg
-                .split_once(':')
-                .ok_or_else(|| format!("malformed kernel argument: {arg}"))?;
-            let binding_name = argument_binding_name(pattern)
-                .ok_or_else(|| format!("unsupported kernel argument pattern: {pattern}"))?;
-            Ok(FunctionArg {
-                source: arg.trim().to_string(),
-                binding_name,
-            })
-        })
-        .collect::<Result<Vec<_>, String>>()?;
-
-    Ok(FunctionSignature {
-        name: name.to_string(),
-        generic_params,
-        args,
-    })
+    expand_static_item(item).into()
 }
 
-fn function_has_generic_params(source: &str, name: &str) -> bool {
-    source.find(name).is_some_and(|name_pos| {
-        let cursor = skip_ws(source, name_pos + name.len());
-        source[cursor..].starts_with('<')
-    })
+struct KernelAttribute {
+    monomorphizations: Vec<Vec<Type>>,
 }
 
-fn parse_generic_params(source: &str) -> Result<Vec<String>, String> {
-    split_top_level(source, ',')
-        .into_iter()
-        .filter(|param| !param.trim().is_empty())
-        .map(|param| {
-            let trimmed = param.trim();
-            if trimmed.starts_with('\'') || trimmed.starts_with("const ") {
-                return Err(format!(
-                    "unsupported generic kernel parameter `{trimmed}`; only type parameters are supported"
+impl Parse for KernelAttribute {
+    fn parse(input: ParseStream<'_>) -> Result<Self> {
+        let mut monomorphizations = Vec::new();
+
+        while !input.is_empty() {
+            let ident = input.parse::<Ident>().map_err(|_| {
+                input.error("unsupported #[kernel] argument; expected monomorphize(...)")
+            })?;
+
+            if ident != "monomorphize" {
+                return Err(Error::new(
+                    ident.span(),
+                    format!("unsupported #[kernel] argument `{ident}`; expected monomorphize(...)"),
                 ));
             }
-            let name = trimmed
-                .split(|ch: char| ch == ':' || ch == '=' || ch.is_whitespace())
-                .next()
-                .unwrap_or("")
-                .trim();
-            if is_identifier(name) {
-                Ok(name.to_string())
-            } else {
-                Err(format!("unsupported generic kernel parameter `{trimmed}`"))
+
+            if !input.peek(syn::token::Paren) {
+                return Err(Error::new(
+                    ident.span(),
+                    "expected monomorphize(...) in #[kernel]",
+                ));
+            }
+
+            let content;
+            parenthesized!(content in input);
+            let types = content.parse_terminated(Type::parse, Token![,])?;
+            if types.is_empty() {
+                return Err(Error::new(
+                    ident.span(),
+                    "monomorphize(...) must include at least one type",
+                ));
+            }
+            monomorphizations.push(types.into_iter().collect());
+
+            if input.is_empty() {
+                break;
+            }
+            if !input.peek(Token![,]) {
+                return Err(input.error("unexpected #[kernel] argument tail"));
+            }
+            input.parse::<Token![,]>()?;
+        }
+
+        Ok(Self { monomorphizations })
+    }
+}
+
+fn expand_kernel(function: ItemFn, monomorphizations: Vec<Vec<Type>>) -> Result<TokenStream2> {
+    let function_name = function.sig.ident.to_string();
+    let generic_params = generic_type_params(&function)?;
+
+    if generic_params.is_empty() && monomorphizations.is_empty() {
+        return Ok(quote! {
+            #[unsafe(export_name = #function_name)]
+            #function
+        });
+    }
+
+    if generic_params.is_empty() {
+        return Err(Error::new(
+            function.sig.ident.span(),
+            "#[kernel(monomorphize(...))] requires a generic function",
+        ));
+    }
+
+    if monomorphizations.is_empty() {
+        return Err(Error::new_spanned(
+            &function.sig.generics,
+            "generic #[kernel] functions require #[kernel(monomorphize(Ty, ...))]",
+        ));
+    }
+
+    let wrappers = monomorphizations
+        .iter()
+        .map(|concrete_types| {
+            if concrete_types.len() != generic_params.len() {
+                return Err(Error::new(
+                    function.sig.ident.span(),
+                    format!(
+                        "kernel `{}` expects {} generic argument(s), but monomorphize(...) supplied {}",
+                        function.sig.ident,
+                        generic_params.len(),
+                        concrete_types.len()
+                    ),
+                ));
+            }
+            generate_monomorphized_kernel_wrapper(&function, &generic_params, concrete_types)
+        })
+        .collect::<Result<Vec<_>>>()?;
+
+    Ok(quote! {
+        #function
+        #(#wrappers)*
+    })
+}
+
+fn expand_static_item(item: ItemStatic) -> TokenStream2 {
+    let export_name = item.ident.to_string();
+    quote! {
+        #[used]
+        #[unsafe(export_name = #export_name)]
+        #item
+    }
+}
+
+fn generic_type_params(function: &ItemFn) -> Result<Vec<Ident>> {
+    function
+        .sig
+        .generics
+        .params
+        .iter()
+        .map(|param| match param {
+            GenericParam::Type(param) => Ok(param.ident.clone()),
+            GenericParam::Lifetime(param) => Err(unsupported_generic_param(param)),
+            GenericParam::Const(param) => Err(unsupported_generic_param(param)),
+        })
+        .collect()
+}
+
+fn unsupported_generic_param(param: &impl ToTokens) -> Error {
+    Error::new_spanned(
+        param,
+        format!(
+            "unsupported generic kernel parameter `{}`; only type parameters are supported",
+            param.to_token_stream()
+        ),
+    )
+}
+
+fn generate_monomorphized_kernel_wrapper(
+    function: &ItemFn,
+    generic_params: &[Ident],
+    concrete_types: &[Type],
+) -> Result<TokenStream2> {
+    let export_name = monomorphized_kernel_name(&function.sig.ident.to_string(), concrete_types);
+    let wrapper_ident = Ident::new(&export_name, Span::call_site());
+    let function_ident = &function.sig.ident;
+    let args = monomorphized_args(function, generic_params, concrete_types)?;
+    let wrapper_args = args.iter().map(|arg| &arg.wrapper_arg);
+    let call_args = args.iter().map(|arg| &arg.binding_name);
+
+    Ok(quote! {
+        #[unsafe(export_name = #export_name)]
+        pub unsafe extern "C" fn #wrapper_ident(#(#wrapper_args),*) {
+            unsafe { #function_ident::<#(#concrete_types),*>(#(#call_args),*) }
+        }
+    })
+}
+
+struct MonomorphizedArg {
+    wrapper_arg: PatType,
+    binding_name: Ident,
+}
+
+fn monomorphized_args(
+    function: &ItemFn,
+    generic_params: &[Ident],
+    concrete_types: &[Type],
+) -> Result<Vec<MonomorphizedArg>> {
+    function
+        .sig
+        .inputs
+        .iter()
+        .map(|arg| match arg {
+            FnArg::Receiver(receiver) => Err(Error::new_spanned(
+                receiver,
+                "unsupported kernel argument receiver",
+            )),
+            FnArg::Typed(arg) => {
+                let binding_name = argument_binding_name(&arg.pat)?;
+                let mut wrapper_arg = arg.clone();
+                let mut substituter = TypeSubstituter {
+                    generic_params,
+                    concrete_types,
+                };
+                wrapper_arg.ty = Box::new(substituter.fold_type((*wrapper_arg.ty).clone()));
+                Ok(MonomorphizedArg {
+                    wrapper_arg,
+                    binding_name,
+                })
             }
         })
         .collect()
 }
 
-fn parse_monomorphizations(attr: TokenStream) -> Result<Vec<Vec<String>>, String> {
-    let source = attr.to_string();
-    let mut rest = source.trim();
-    if rest.is_empty() {
-        return Ok(Vec::new());
+fn argument_binding_name(pattern: &Pat) -> Result<Ident> {
+    match pattern {
+        Pat::Ident(pattern)
+            if pattern.by_ref.is_none() && pattern.subpat.is_none() && pattern.attrs.is_empty() =>
+        {
+            Ok(pattern.ident.clone())
+        }
+        _ => Err(Error::new_spanned(
+            pattern,
+            format!(
+                "unsupported kernel argument pattern: {}",
+                pattern.to_token_stream()
+            ),
+        )),
     }
-
-    let mut monomorphizations = Vec::new();
-    while !rest.is_empty() {
-        let Some(after_keyword) = rest.strip_prefix("monomorphize") else {
-            return Err(format!(
-                "unsupported #[kernel] argument `{rest}`; expected monomorphize(...)"
-            ));
-        };
-        let after_keyword = after_keyword.trim_start();
-        if !after_keyword.starts_with('(') {
-            return Err("expected monomorphize(...) in #[kernel]".to_string());
-        }
-        let close = find_matching(after_keyword, 0, '(', ')')?;
-        let concrete_types = split_top_level(&after_keyword[1..close], ',')
-            .into_iter()
-            .map(|ty| ty.trim().to_string())
-            .filter(|ty| !ty.is_empty())
-            .collect::<Vec<_>>();
-        if concrete_types.is_empty() {
-            return Err("monomorphize(...) must include at least one type".to_string());
-        }
-        monomorphizations.push(concrete_types);
-        rest = after_keyword[close + 1..].trim_start();
-        if let Some(next) = rest.strip_prefix(',') {
-            rest = next.trim_start();
-        } else if !rest.is_empty() {
-            return Err(format!("unexpected #[kernel] argument tail `{rest}`"));
-        }
-    }
-    Ok(monomorphizations)
 }
 
-fn generate_monomorphized_kernel_wrapper(
-    signature: &FunctionSignature,
-    concrete_types: &[String],
-) -> Result<String, String> {
-    let export_name = monomorphized_kernel_name(&signature.name, concrete_types);
-    let wrapper_args = signature
-        .args
-        .iter()
-        .map(|arg| substitute_generic_types(&arg.source, &signature.generic_params, concrete_types))
-        .collect::<Vec<_>>()
-        .join(", ");
-    let call_args = signature
-        .args
-        .iter()
-        .map(|arg| arg.binding_name.as_str())
-        .collect::<Vec<_>>()
-        .join(", ");
-    let type_args = concrete_types.join(", ");
-    Ok(format!(
-        "#[unsafe(export_name = \"{export_name}\")]\n\
-         pub unsafe extern \"C\" fn {export_name}({wrapper_args}) {{\n    \
-         unsafe {{ {}::<{type_args}>({call_args}) }}\n\
-         }}\n",
-        signature.name
-    ))
+struct TypeSubstituter<'a> {
+    generic_params: &'a [Ident],
+    concrete_types: &'a [Type],
 }
 
-fn monomorphized_kernel_name(base: &str, concrete_types: &[String]) -> String {
+impl Fold for TypeSubstituter<'_> {
+    fn fold_type(&mut self, ty: Type) -> Type {
+        if let Type::Path(path) = &ty {
+            if path.qself.is_none() && path.path.segments.len() == 1 {
+                let ident = &path.path.segments[0].ident;
+                if let Some(index) = self
+                    .generic_params
+                    .iter()
+                    .position(|generic| generic == ident)
+                {
+                    return self.concrete_types[index].clone();
+                }
+            }
+        }
+
+        fold_type(self, ty)
+    }
+}
+
+fn monomorphized_kernel_name(base: &str, concrete_types: &[Type]) -> String {
     let suffix = concrete_types
         .iter()
-        .map(|ty| sanitize_type_suffix(ty))
+        .map(type_suffix)
         .collect::<Vec<_>>()
         .join("_");
     format!("{base}_{suffix}")
+}
+
+fn type_suffix(ty: &Type) -> String {
+    sanitize_type_suffix(&ty.to_token_stream().to_string())
 }
 
 fn sanitize_type_suffix(ty: &str) -> String {
@@ -278,135 +311,150 @@ fn sanitize_type_suffix(ty: &str) -> String {
     out.trim_matches('_').to_string()
 }
 
-fn substitute_generic_types(
-    source: &str,
-    generic_params: &[String],
-    concrete_types: &[String],
-) -> String {
-    let mut output = String::new();
-    let mut chars = source.char_indices().peekable();
-    while let Some((start, ch)) = chars.next() {
-        if ch == '_' || ch.is_ascii_alphabetic() {
-            let mut end = start + ch.len_utf8();
-            while let Some((next_index, next)) = chars.peek().copied() {
-                if next == '_' || next.is_ascii_alphanumeric() {
-                    chars.next();
-                    end = next_index + next.len_utf8();
-                } else {
-                    break;
-                }
-            }
-            let ident = &source[start..end];
-            if let Some(index) = generic_params.iter().position(|param| param == ident) {
-                output.push_str(&concrete_types[index]);
-            } else {
-                output.push_str(ident);
-            }
-        } else {
-            output.push(ch);
-        }
-    }
-    output
-}
-
-fn argument_binding_name(pattern: &str) -> Option<String> {
-    let trimmed = pattern
-        .trim()
-        .strip_prefix("mut ")
-        .unwrap_or(pattern.trim());
-    is_identifier(trimmed).then(|| trimmed.to_string())
-}
-
-fn skip_ws(source: &str, mut index: usize) -> usize {
-    while source[index..]
-        .chars()
-        .next()
-        .is_some_and(|ch| ch.is_whitespace())
-    {
-        index += source[index..].chars().next().unwrap().len_utf8();
-    }
-    index
-}
-
-fn find_matching(
-    source: &str,
-    open_index: usize,
-    open: char,
-    close: char,
-) -> Result<usize, String> {
-    let mut depth = 0usize;
-    for (index, ch) in source[open_index..].char_indices() {
-        let absolute = open_index + index;
-        if ch == open {
-            depth += 1;
-        } else if ch == close {
-            if close == '>' && source[..absolute].ends_with('-') {
-                continue;
-            }
-            depth = depth.saturating_sub(1);
-            if depth == 0 {
-                return Ok(absolute);
-            }
-        }
-    }
-    Err(format!("missing matching `{close}`"))
-}
-
-fn split_top_level(source: &str, delimiter: char) -> Vec<&str> {
-    let mut parts = Vec::new();
-    let mut start = 0usize;
-    let mut paren = 0usize;
-    let mut angle = 0usize;
-    let mut bracket = 0usize;
-    for (index, ch) in source.char_indices() {
-        match ch {
-            '(' => paren += 1,
-            ')' => paren = paren.saturating_sub(1),
-            '<' => angle += 1,
-            '>' => angle = angle.saturating_sub(1),
-            '[' => bracket += 1,
-            ']' => bracket = bracket.saturating_sub(1),
-            _ if ch == delimiter && paren == 0 && angle == 0 && bracket == 0 => {
-                parts.push(&source[start..index]);
-                start = index + ch.len_utf8();
-            }
-            _ => {}
-        }
-    }
-    parts.push(&source[start..]);
-    parts
-}
-
-fn is_identifier(value: &str) -> bool {
-    let mut chars = value.chars();
-    let Some(first) = chars.next() else {
-        return false;
-    };
-    (first == '_' || first.is_ascii_alphabetic())
-        && chars.all(|ch| ch == '_' || ch.is_ascii_alphanumeric())
-}
-
-fn find_static_name(tokens: TokenStream) -> Option<String> {
-    let mut saw_static = false;
-    let mut saw_mut = false;
-    for token in tokens {
-        if let TokenTree::Ident(ident) = token {
-            let ident = ident.to_string();
-            if saw_static {
-                if ident == "mut" && !saw_mut {
-                    saw_mut = true;
-                    continue;
-                }
-                return Some(ident);
-            }
-            saw_static = ident == "static";
-        }
-    }
-    None
-}
-
 fn compile_error(message: &str) -> TokenStream {
-    format!("compile_error!({message:?});")
-        .parse()
-        .expect("compile_error should parse")
+    quote! {
+        compile_error!(#message);
+    }
+    .into()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use quote::quote;
+    use syn::parse_quote;
+
+    fn normalized(tokens: TokenStream2) -> String {
+        tokens
+            .to_string()
+            .chars()
+            .filter(|ch| !ch.is_whitespace())
+            .collect()
+    }
+
+    fn parse_kernel_attr(tokens: TokenStream2) -> Vec<Vec<Type>> {
+        syn::parse2::<KernelAttribute>(tokens)
+            .expect("kernel attribute should parse")
+            .monomorphizations
+    }
+
+    #[test]
+    fn non_generic_kernel_exports_original_name() {
+        let function: ItemFn = parse_quote! {
+            pub unsafe fn vector_add(out: *mut f32, lhs: *const f32) {}
+        };
+
+        let expanded = expand_kernel(function, Vec::new()).expect("kernel should expand");
+        let text = normalized(expanded);
+
+        assert!(text.contains("#[unsafe(export_name=\"vector_add\")]"));
+        assert!(text.contains("pubunsafefnvector_add"));
+        assert!(!text.contains("extern\"C\"fnvector_add"));
+    }
+
+    #[test]
+    fn generic_kernel_emits_concrete_extern_wrapper() {
+        let function: ItemFn = parse_quote! {
+            unsafe fn fill<T>(out: *mut T, value: T, len: usize) {}
+        };
+        let monomorphizations = parse_kernel_attr(quote! {
+            monomorphize(f32), monomorphize(u32)
+        });
+
+        let expanded = expand_kernel(function, monomorphizations).expect("kernel should expand");
+        let text = normalized(expanded);
+
+        assert!(text.contains("#[unsafe(export_name=\"fill_f32\")]"));
+        assert!(text.contains("pubunsafeextern\"C\"fnfill_f32(out:*mutf32,value:f32,len:usize)"));
+        assert!(text.contains("unsafe{fill::<f32>(out,value,len)}"));
+        assert!(text.contains("#[unsafe(export_name=\"fill_u32\")]"));
+    }
+
+    #[test]
+    fn nested_generic_argument_types_are_substituted() {
+        let function: ItemFn = parse_quote! {
+            unsafe fn reduce<T>(out: *mut T, inputs: Option<*const T>) {}
+        };
+        let monomorphizations = parse_kernel_attr(quote! {
+            monomorphize(f32)
+        });
+
+        let expanded = expand_kernel(function, monomorphizations).expect("kernel should expand");
+        let text = normalized(expanded);
+
+        assert!(text.contains("out:*mutf32"));
+        assert!(text.contains("inputs:Option<*constf32>"));
+        assert!(text.contains("reduce::<f32>(out,inputs)"));
+    }
+
+    #[test]
+    fn unsupported_lifetime_generics_are_clear_errors() {
+        let function: ItemFn = parse_quote! {
+            fn bad<'a>(input: &'a u32) {}
+        };
+
+        let err = match expand_kernel(function, Vec::new()) {
+            Ok(_) => panic!("kernel should reject lifetime"),
+            Err(err) => err,
+        };
+
+        assert!(
+            err.to_string()
+                .contains("unsupported generic kernel parameter")
+        );
+        assert!(
+            err.to_string()
+                .contains("only type parameters are supported")
+        );
+    }
+
+    #[test]
+    fn unsupported_const_generics_are_clear_errors() {
+        let function: ItemFn = parse_quote! {
+            fn bad<const N: usize>(input: [u32; N]) {}
+        };
+
+        let err = match expand_kernel(function, Vec::new()) {
+            Ok(_) => panic!("kernel should reject const generic"),
+            Err(err) => err,
+        };
+
+        assert!(
+            err.to_string()
+                .contains("unsupported generic kernel parameter")
+        );
+        assert!(
+            err.to_string()
+                .contains("only type parameters are supported")
+        );
+    }
+
+    #[test]
+    fn static_attrs_export_the_static_name() {
+        let item: ItemStatic = parse_quote! {
+            pub static mut SCRATCH: u32 = 0;
+        };
+
+        let expanded = expand_static_item(item);
+        let text = normalized(expanded);
+
+        assert!(text.contains("#[used]"));
+        assert!(text.contains("#[unsafe(export_name=\"SCRATCH\")]"));
+        assert!(text.contains("pubstaticmutSCRATCH:u32=0;"));
+    }
+
+    #[test]
+    fn monomorphize_requires_at_least_one_type() {
+        let err = match syn::parse2::<KernelAttribute>(quote! {
+            monomorphize()
+        }) {
+            Ok(_) => panic!("empty monomorphize should fail"),
+            Err(err) => err,
+        };
+
+        assert!(
+            err.to_string()
+                .contains("monomorphize(...) must include at least one type")
+        );
+    }
 }

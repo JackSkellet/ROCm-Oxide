@@ -75,6 +75,32 @@ machine and was previously validated on the `gfx1201` RX 9070 XT profile:
 - `add_one`, using `workitem_id_x`
 - `vector_add`, using `workgroup_id_x` and `workitem_id_x`
 
+## Artifact Validation Gate
+
+`scripts/verify.sh --quick` and `scripts/verify.sh --full` now run an artifact
+audit after compiler metadata, performance JSON, and headless visual outputs are
+produced. The audit checks:
+
+- `validation_profile.json`, `performance_probe.json`, and generated compiler
+  metadata agree on the selected `gfx...` architecture;
+- the generated HSACO, rewritten LLVM IR, relocatable object, and metadata paths
+  recorded in JSON are still present and non-empty;
+- linked kernel provenance under `link.objects` matches the generated kernel
+  metadata table;
+- the generated compiler release manifest records tool paths and versions,
+  HSACO/metadata/bindings/link-object paths, sizes, hashes, and per-kernel
+  resource rows;
+- performance samples have finite timings, occupancy data, resource rows, no
+  spills, no dynamic stack use, and resource values matching compiler metadata;
+- required headless visual artifacts are real PNG files;
+- `target/production-readiness/release_manifest.json` records the validation,
+  performance, compiler-manifest, and visual artifact provenance for the run.
+
+This is a release-bundle consistency gate, not a reproducible-build proof. A
+future multi-architecture release package still needs checked package inputs,
+per-architecture hashes, and accepted performance/resource thresholds before
+bit-for-bit reproducibility and timing regressions can become hard CI failures.
+
 ## Remaining Compiler Work
 
 The current IR post-pass is still a transitional compiler wrapper. It now uses
@@ -88,6 +114,9 @@ layer should:
 - generate or validate kernel metadata and workgroup-size attributes
 - copy resulting `.hsaco`, metadata, and bindings into a host crate build
   directory
+- extend the release manifest into a multi-architecture package that carries
+  every supported `gfx...` code object with checked package inputs, resource
+  baselines, and reproducibility hashes
 
 The fallback remains a restricted Rust frontend that emits LLVM IR directly, but
 the working rustc path is now strong enough to pursue first.

@@ -1,7 +1,9 @@
+use sha2::{Digest, Sha256};
 use std::collections::{BTreeMap, BTreeSet};
 use std::env;
 use std::ffi::OsStr;
 use std::fs;
+use std::io::Read;
 use std::panic::{self, AssertUnwindSafe};
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
@@ -167,6 +169,7 @@ fn run() -> Result<(), String> {
     let hsaco = release_dir.join(format!("{}.hsaco", args.output_stem));
     let metadata = release_dir.join(format!("{}.metadata.json", args.output_stem));
     let bindings = release_dir.join(format!("{}.bindings.rs", args.output_stem));
+    let manifest = release_dir.join(format!("{}.manifest.json", args.output_stem));
 
     let mut link = Command::new(&tools.clang.path);
     link.arg("-target")
@@ -187,6 +190,7 @@ fn run() -> Result<(), String> {
         annotate_dynamic_shared_mem_from_ir(&mut code_object_metadata, kernel_ir)?;
     }
     validate_code_object_metadata(&code_object_metadata, &kernel_names)?;
+    validate_kernel_abi_metadata(&kernels, &device_structs, &code_object_metadata)?;
     write_metadata(
         &metadata,
         &arch,
@@ -203,6 +207,16 @@ fn run() -> Result<(), String> {
         &kernels,
         &device_structs,
         &device_globals,
+        &code_object_metadata,
+    )?;
+    write_release_manifest(
+        &manifest,
+        &arch,
+        &hsaco,
+        &metadata,
+        &bindings,
+        &link_inputs,
+        &tools,
         &code_object_metadata,
     )?;
     println!("{}", hsaco.display());
@@ -343,6 +357,7 @@ fn inspect_metadata(path: &Path) -> Result<(), String> {
     let resources = parse_kernel_resource_rows(&text);
     let kernel_count = resources.len();
     let contract_count = text.matches("\"required_len\":").count();
+    let disjoint_contract_count = text.matches("\"kind\": \"disjoint\"").count();
     let linked_object_count = text.matches("\"package\":").count();
     let device_struct_count = text.matches("\"layout_source\":").count();
     let max_workgroup = max_json_u32(&text, "max_flat_workgroup_size");
@@ -357,6 +372,9 @@ fn inspect_metadata(path: &Path) -> Result<(), String> {
     println!("arch: {arch}");
     println!("kernels: {kernel_count}");
     println!("buffer contracts: {contract_count}");
+    if disjoint_contract_count > 0 {
+        println!("disjoint contracts: {disjoint_contract_count}");
+    }
     println!("linked objects: {linked_object_count}");
     println!("device structs: {device_struct_count}");
     if let Some(value) = max_workgroup {
@@ -992,7 +1010,10 @@ fn env_flag_enabled(value: Option<&OsStr>) -> bool {
     if value.is_empty() {
         return false;
     }
-    !matches!(value.to_ascii_lowercase().as_str(), "0" | "false" | "no" | "off")
+    !matches!(
+        value.to_ascii_lowercase().as_str(),
+        "0" | "false" | "no" | "off"
+    )
 }
 
 fn device_rustflags(arch: &str) -> String {
@@ -1209,10 +1230,7 @@ fn validate_rustc_layout(
     Ok(())
 }
 
-fn layout_field_type_supported(
-    ty: &str,
-    device_struct: &DeviceStruct,
-) -> Result<(), String> {
+fn layout_field_type_supported(ty: &str, device_struct: &DeviceStruct) -> Result<(), String> {
     device_type_layout(ty).map(|_| ()).ok_or_else(|| {
         format!(
             "{}: unsupported field type `{ty}` in device struct `{}`; pass this payload through a DeviceSlice or add explicit layout support before using it by value",
@@ -1224,7 +1242,11 @@ fn layout_field_type_supported(
 fn sanitize_rust_env(command: &mut Command) {
     command
         .env_remove("CARGO_ENCODED_RUSTFLAGS")
+        .env_remove("CLIPPY_ARGS")
+        .env_remove("CLIPPY_CONF_DIR")
+        .env_remove("CARGO_CLIPPY")
         .env_remove("RUSTC")
+        .env_remove("RUSTC_WORKSPACE_WRAPPER")
         .env_remove("RUSTC_WRAPPER")
         .env_remove("RUSTDOC");
 }
@@ -1396,7 +1418,7 @@ fn newest_llvm_ir(deps_dir: &Path, package_name: &str) -> Result<PathBuf, String
 struct KernelDecl {
     name: String,
     args: Vec<KernelArg>,
-    contracts: Vec<BufferContract>,
+    contracts: Vec<KernelContract>,
     span: SourceSpan,
 }
 
@@ -1520,9 +1542,21 @@ enum ArgKind {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-struct BufferContract {
+enum KernelContract {
+    Length(BufferLengthContract),
+    Disjoint(DisjointContract),
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct BufferLengthContract {
     buffer: String,
     required_len: LenExpr,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct DisjointContract {
+    left: String,
+    right: String,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -1708,11 +1742,7 @@ fn kernel_arg_uses_type(arg: &KernelArg, type_name: &str) -> bool {
 }
 
 fn type_leaf_name(ty: &str) -> &str {
-    ty.trim()
-        .rsplit("::")
-        .next()
-        .unwrap_or(ty)
-        .trim()
+    ty.trim().rsplit("::").next().unwrap_or(ty).trim()
 }
 
 fn discover_device_structs_in_dir(
@@ -2363,14 +2393,22 @@ fn parse_device_slice_ty(ty: &str, slice_name: &str) -> Option<String> {
     })
 }
 
-fn parse_contract_comment(line: &str) -> Result<Option<BufferContract>, String> {
+fn parse_contract_comment(line: &str) -> Result<Option<KernelContract>, String> {
     let Some(rest) = line.strip_prefix("// rocm-oxide:") else {
         return Ok(None);
     };
     let rest = rest.trim();
-    let Some(rest) = rest.strip_prefix("len(") else {
-        return Err(format!("unsupported rocm-oxide contract: {line}"));
-    };
+    if let Some(rest) = rest.strip_prefix("len(") {
+        return parse_length_contract(rest, line).map(Some);
+    }
+    if let Some(rest) = rest.strip_prefix("disjoint(") {
+        return parse_disjoint_contract(rest, line).map(Some);
+    }
+
+    Err(format!("unsupported rocm-oxide contract: {line}"))
+}
+
+fn parse_length_contract(rest: &str, line: &str) -> Result<KernelContract, String> {
     let (buffer, rest) = rest
         .split_once(")=")
         .ok_or_else(|| format!("malformed rocm-oxide length contract: {line}"))?;
@@ -2383,11 +2421,44 @@ fn parse_contract_comment(line: &str) -> Result<Option<BufferContract>, String> 
 
     let expr = rest.trim();
     validate_len_expr(expr)?;
-    Ok(Some(BufferContract {
+    Ok(KernelContract::Length(BufferLengthContract {
         buffer: buffer.to_string(),
         required_len: LenExpr {
             source: expr.to_string(),
         },
+    }))
+}
+
+fn parse_disjoint_contract(rest: &str, line: &str) -> Result<KernelContract, String> {
+    let inner = rest
+        .strip_suffix(')')
+        .ok_or_else(|| format!("malformed rocm-oxide disjoint contract: {line}"))?;
+    let buffers = split_top_level(inner, ',')
+        .into_iter()
+        .map(str::trim)
+        .filter(|buffer| !buffer.is_empty())
+        .collect::<Vec<_>>();
+    if buffers.len() != 2 {
+        return Err(format!(
+            "rocm-oxide disjoint contract must name exactly two buffers: {line}"
+        ));
+    }
+    for buffer in &buffers {
+        if !is_identifier(buffer) {
+            return Err(format!(
+                "invalid buffer name in rocm-oxide disjoint contract: {line}"
+            ));
+        }
+    }
+    if buffers[0] == buffers[1] {
+        return Err(format!(
+            "rocm-oxide disjoint contract names the same buffer twice: {line}"
+        ));
+    }
+
+    Ok(KernelContract::Disjoint(DisjointContract {
+        left: buffers[0].to_string(),
+        right: buffers[1].to_string(),
     }))
 }
 
@@ -2405,31 +2476,75 @@ fn validate_contracts(kernel: &KernelDecl) -> Result<(), String> {
         .map(|arg| arg.name.as_str())
         .collect::<BTreeSet<_>>();
 
-    let mut seen = BTreeSet::new();
+    let mut seen_lengths = BTreeSet::new();
+    let mut seen_disjoint = BTreeSet::new();
     for contract in &kernel.contracts {
-        if !seen.insert(contract.buffer.as_str()) {
-            return Err(format!(
-                "duplicate length contract for `{}` in kernel `{}`",
-                contract.buffer, kernel.name
-            ));
-        }
-        if !buffer_args.contains(contract.buffer.as_str()) {
-            return Err(format!(
-                "length contract for `{}` in kernel `{}` does not match a buffer argument",
-                contract.buffer, kernel.name
-            ));
-        }
-        for ident in contract.required_len.identifiers() {
-            if !scalar_args.contains(ident.as_str()) {
-                return Err(format!(
-                    "length contract for `{}` in kernel `{}` references non-scalar `{ident}`",
-                    contract.buffer, kernel.name
-                ));
+        match contract {
+            KernelContract::Length(contract) => {
+                if !seen_lengths.insert(contract.buffer.as_str()) {
+                    return Err(format!(
+                        "duplicate length contract for `{}` in kernel `{}`",
+                        contract.buffer, kernel.name
+                    ));
+                }
+                if !buffer_args.contains(contract.buffer.as_str()) {
+                    return Err(format!(
+                        "length contract for `{}` in kernel `{}` does not match a buffer argument",
+                        contract.buffer, kernel.name
+                    ));
+                }
+                for ident in contract.required_len.identifiers() {
+                    if !scalar_args.contains(ident.as_str()) {
+                        return Err(format!(
+                            "length contract for `{}` in kernel `{}` references non-scalar `{ident}`",
+                            contract.buffer, kernel.name
+                        ));
+                    }
+                }
+            }
+            KernelContract::Disjoint(contract) => {
+                for buffer in [&contract.left, &contract.right] {
+                    if !buffer_args.contains(buffer.as_str()) {
+                        return Err(format!(
+                            "disjoint contract for `{}` and `{}` in kernel `{}` does not match a buffer argument",
+                            contract.left, contract.right, kernel.name
+                        ));
+                    }
+                }
+                let pair = disjoint_pair_key(&contract.left, &contract.right);
+                if !seen_disjoint.insert(pair) {
+                    return Err(format!(
+                        "duplicate disjoint contract for `{}` and `{}` in kernel `{}`",
+                        contract.left, contract.right, kernel.name
+                    ));
+                }
             }
         }
     }
 
     Ok(())
+}
+
+fn disjoint_pair_key(left: &str, right: &str) -> (String, String) {
+    if left <= right {
+        (left.to_string(), right.to_string())
+    } else {
+        (right.to_string(), left.to_string())
+    }
+}
+
+fn length_contracts(contracts: &[KernelContract]) -> impl Iterator<Item = &BufferLengthContract> {
+    contracts.iter().filter_map(|contract| match contract {
+        KernelContract::Length(contract) => Some(contract),
+        KernelContract::Disjoint(_) => None,
+    })
+}
+
+fn disjoint_contracts(contracts: &[KernelContract]) -> impl Iterator<Item = &DisjointContract> {
+    contracts.iter().filter_map(|contract| match contract {
+        KernelContract::Length(_) => None,
+        KernelContract::Disjoint(contract) => Some(contract),
+    })
 }
 
 fn validate_len_expr(expr: &str) -> Result<(), String> {
@@ -3148,9 +3263,7 @@ fn assigned_value(line: &str) -> Option<String> {
 
 fn rewrite_kernel_attributes(line: &str) -> String {
     let mut line = strip_target_memory_effects(&line.replace(" nocreateundeforpoison", ""));
-    if !line.starts_with("attributes #")
-        || !line.contains("\"target-cpu\"=")
-    {
+    if !line.starts_with("attributes #") || !line.contains("\"target-cpu\"=") {
         return line;
     }
     if !line.contains("\"amdgpu-flat-work-group-size\"=") {
@@ -3277,6 +3390,232 @@ fn validate_code_object_metadata(
             missing.join(", ")
         ))
     }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct ExpectedKernelAbiArg {
+    name: String,
+    offset: u32,
+    size: u32,
+    value_kind: &'static str,
+    address_space: Option<&'static str>,
+}
+
+fn validate_kernel_abi_metadata(
+    kernels: &BTreeMap<String, KernelDecl>,
+    device_structs: &BTreeMap<String, DeviceStruct>,
+    metadata: &CodeObjectMetadata,
+) -> Result<(), String> {
+    for kernel in kernels.values() {
+        let kernel_metadata = metadata.kernels.get(&kernel.name).ok_or_else(|| {
+            format!(
+                "{}: linked code object metadata is missing kernel `{}`",
+                kernel.span, kernel.name
+            )
+        })?;
+        let expected = expected_kernel_abi_args(kernel, device_structs, kernel_metadata)?;
+        let user_kernarg_end = expected
+            .iter()
+            .map(|arg| arg.offset.saturating_add(arg.size))
+            .max()
+            .unwrap_or(0);
+        if let Some(size) = kernel_metadata.kernarg_segment_size
+            && size < user_kernarg_end
+        {
+            return Err(format!(
+                "{}: kernel `{}` user ABI needs at least {user_kernarg_end} kernarg bytes, but linked code object reports {size}",
+                kernel.span, kernel.name
+            ));
+        }
+
+        for expected_arg in &expected {
+            let actual = kernel_metadata
+                .args
+                .get(&expected_arg.name)
+                .or_else(|| find_matching_abi_arg(kernel_metadata, expected_arg))
+                .ok_or_else(|| {
+                    let available = kernel_metadata
+                        .args
+                        .keys()
+                        .cloned()
+                        .collect::<Vec<_>>()
+                        .join(", ");
+                    format!(
+                        "{}: kernel `{}` code object metadata is missing user ABI argument `{}`; available args: [{}]",
+                        kernel.span, kernel.name, expected_arg.name, available
+                    )
+                })?;
+            validate_kernel_abi_field(kernel, expected_arg, actual)?;
+        }
+    }
+    Ok(())
+}
+
+fn find_object_arg_for_source_arg<'a>(
+    metadata: &'a KernelObjectMetadata,
+    expected_args: &[ExpectedKernelAbiArg],
+    source_arg_name: &str,
+) -> Option<&'a KernelArgObjectMetadata> {
+    metadata.args.get(source_arg_name).or_else(|| {
+        expected_args
+            .iter()
+            .find(|arg| arg.name == source_arg_name)
+            .and_then(|expected| find_matching_abi_arg(metadata, expected))
+    })
+}
+
+fn find_matching_abi_arg<'a>(
+    metadata: &'a KernelObjectMetadata,
+    expected: &ExpectedKernelAbiArg,
+) -> Option<&'a KernelArgObjectMetadata> {
+    metadata
+        .args
+        .values()
+        .find(|actual| kernel_abi_field_matches(expected, actual))
+}
+
+fn expected_kernel_abi_args(
+    kernel: &KernelDecl,
+    device_structs: &BTreeMap<String, DeviceStruct>,
+    metadata: &KernelObjectMetadata,
+) -> Result<Vec<ExpectedKernelAbiArg>, String> {
+    let mut expected = Vec::new();
+    let mut offset = 0;
+
+    for arg in &kernel.args {
+        match &arg.kind {
+            ArgKind::MutPtr(_) | ArgKind::ConstPtr(_) => {
+                offset = align_up(offset, 8);
+                expected.push(ExpectedKernelAbiArg {
+                    name: arg.name.clone(),
+                    offset,
+                    size: 8,
+                    value_kind: "global_buffer",
+                    address_space: Some("global"),
+                });
+                offset += 8;
+            }
+            ArgKind::MutSlice(_) | ArgKind::ConstSlice(_) => {
+                offset = align_up(offset, 8);
+                expected.push(ExpectedKernelAbiArg {
+                    name: format!("{}.0", arg.name),
+                    offset,
+                    size: 8,
+                    value_kind: "global_buffer",
+                    address_space: Some("global"),
+                });
+                expected.push(ExpectedKernelAbiArg {
+                    name: format!("{}.1", arg.name),
+                    offset: offset + 8,
+                    size: 8,
+                    value_kind: "by_value",
+                    address_space: None,
+                });
+                offset += 16;
+            }
+            ArgKind::Scalar => {
+                if let Some(device_struct) = device_structs.get(type_leaf_name(&arg.ty)) {
+                    if scalar_arg_is_indirect_global_buffer(Some(metadata), &arg.name) {
+                        offset = align_up(offset, 8);
+                        expected.push(ExpectedKernelAbiArg {
+                            name: arg.name.clone(),
+                            offset,
+                            size: 8,
+                            value_kind: "global_buffer",
+                            address_space: Some("global"),
+                        });
+                        offset += 8;
+                    } else {
+                        offset = align_up(offset, device_struct.layout.align);
+                        let base = offset;
+                        for (field_index, field) in device_struct.layout.fields.iter().enumerate() {
+                            let (value_kind, address_space) = if is_raw_pointer_type(&field.ty) {
+                                ("global_buffer", Some("global"))
+                            } else {
+                                ("by_value", None)
+                            };
+                            expected.push(ExpectedKernelAbiArg {
+                                name: format!("{}.{field_index}", arg.name),
+                                offset: base + field.offset,
+                                size: field.size,
+                                value_kind,
+                                address_space,
+                            });
+                        }
+                        offset = base + device_struct.layout.size;
+                    }
+                } else if let Some(size) = primitive_abi_size(&arg.ty) {
+                    offset = align_up(offset, primitive_abi_align(&arg.ty));
+                    expected.push(ExpectedKernelAbiArg {
+                        name: arg.name.clone(),
+                        offset,
+                        size,
+                        value_kind: "by_value",
+                        address_space: None,
+                    });
+                    offset += size;
+                } else {
+                    return Err(format!(
+                        "{}: unsupported by-value kernel argument `{}` with type `{}`; use a primitive scalar, a layout-proven device struct, or pass the payload through a DeviceSlice",
+                        kernel.span, arg.name, arg.ty
+                    ));
+                }
+            }
+        }
+    }
+
+    Ok(expected)
+}
+
+fn validate_kernel_abi_field(
+    kernel: &KernelDecl,
+    expected: &ExpectedKernelAbiArg,
+    actual: &KernelArgObjectMetadata,
+) -> Result<(), String> {
+    if actual.offset != Some(expected.offset) {
+        return Err(format!(
+            "{}: kernel `{}` ABI argument `{}` offset {:?} does not match expected {}",
+            kernel.span, kernel.name, expected.name, actual.offset, expected.offset
+        ));
+    }
+    if actual.size != Some(expected.size) {
+        return Err(format!(
+            "{}: kernel `{}` ABI argument `{}` size {:?} does not match expected {}",
+            kernel.span, kernel.name, expected.name, actual.size, expected.size
+        ));
+    }
+    if actual.value_kind.as_deref() != Some(expected.value_kind) {
+        return Err(format!(
+            "{}: kernel `{}` ABI argument `{}` value_kind {:?} does not match expected {}",
+            kernel.span, kernel.name, expected.name, actual.value_kind, expected.value_kind
+        ));
+    }
+    if actual.address_space.as_deref() != expected.address_space {
+        return Err(format!(
+            "{}: kernel `{}` ABI argument `{}` address_space {:?} does not match expected {:?}",
+            kernel.span, kernel.name, expected.name, actual.address_space, expected.address_space
+        ));
+    }
+    Ok(())
+}
+
+fn kernel_abi_field_matches(
+    expected: &ExpectedKernelAbiArg,
+    actual: &KernelArgObjectMetadata,
+) -> bool {
+    actual.offset == Some(expected.offset)
+        && actual.size == Some(expected.size)
+        && actual.value_kind.as_deref() == Some(expected.value_kind)
+        && actual.address_space.as_deref() == expected.address_space
+}
+
+fn primitive_abi_align(ty: &str) -> u32 {
+    primitive_abi_size(ty).unwrap_or(8).clamp(1, 8)
+}
+
+fn align_up(value: u32, align: u32) -> u32 {
+    let align = align.max(1);
+    value.div_ceil(align) * align
 }
 
 fn annotate_dynamic_shared_mem_from_ir(
@@ -3684,6 +4023,14 @@ fn flush_kernel_arg(
 ) {
     if let Some(name) = arg_name.take() {
         kernel.args.insert(name, std::mem::take(arg));
+    } else if let (Some(offset), Some(value_kind)) = (arg.offset, arg.value_kind.as_deref()) {
+        if !value_kind.starts_with("hidden_") {
+            kernel
+                .args
+                .insert(format!("@offset_{offset}"), std::mem::take(arg));
+        } else {
+            *arg = KernelArgObjectMetadata::default();
+        }
     } else {
         *arg = KernelArgObjectMetadata::default();
     }
@@ -3775,6 +4122,9 @@ fn write_metadata(
             json_escape(&kernel.name)
         ));
         let object_metadata = code_object_metadata.kernels.get(&kernel.name);
+        let expected_abi_args = object_metadata
+            .map(|metadata| expected_kernel_abi_args(kernel, device_structs, metadata))
+            .transpose()?;
         out.push_str("      \"args\": [\n");
         for (arg_index, arg) in kernel.args.iter().enumerate() {
             if arg_index > 0 {
@@ -3790,7 +4140,13 @@ fn write_metadata(
                 json_escape(&arg.ty)
             ));
             out.push_str(&format!("          \"kind\": \"{}\"", arg.kind.as_str()));
-            if let Some(object_arg) = object_metadata.and_then(|m| m.args.get(&arg.name)) {
+            if let Some(object_arg) = object_metadata.and_then(|metadata| {
+                find_object_arg_for_source_arg(
+                    metadata,
+                    expected_abi_args.as_deref().unwrap_or(&[]),
+                    &arg.name,
+                )
+            }) {
                 if let Some(value) = object_arg.address_space.as_deref() {
                     out.push_str(&format!(
                         ",\n          \"address_space\": \"{}\"",
@@ -3827,16 +4183,7 @@ fn write_metadata(
             if contract_index > 0 {
                 out.push_str(",\n");
             }
-            out.push_str("        {\n");
-            out.push_str(&format!(
-                "          \"buffer\": \"{}\",\n",
-                json_escape(&contract.buffer)
-            ));
-            out.push_str(&format!(
-                "          \"required_len\": \"{}\"\n",
-                json_escape(&contract.required_len.source)
-            ));
-            out.push_str("        }");
+            write_kernel_contract_metadata(&mut out, contract);
         }
         out.push_str("\n      ],\n");
         out.push_str("      \"code_object\": ");
@@ -3884,6 +4231,211 @@ fn write_metadata(
     fs::write(path, out).map_err(|err| format!("failed to write {}: {err}", path.display()))
 }
 
+fn write_release_manifest(
+    path: &Path,
+    arch: &str,
+    hsaco: &Path,
+    metadata: &Path,
+    bindings: &Path,
+    link_inputs: &[LinkInput],
+    tools: &ToolPaths,
+    code_object_metadata: &CodeObjectMetadata,
+) -> Result<(), String> {
+    let generated_epoch_ms = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map_err(|err| format!("system clock is before Unix epoch: {err}"))?
+        .as_millis();
+    let mut out = String::new();
+
+    out.push_str("{\n");
+    out.push_str("  \"format\": \"rocm-oxide-release-manifest-v1\",\n");
+    out.push_str(&format!("  \"target\": \"{}\",\n", json_escape(TARGET)));
+    out.push_str(&format!("  \"arch\": \"{}\",\n", json_escape(arch)));
+    out.push_str(&format!(
+        "  \"generated_epoch_ms\": {generated_epoch_ms},\n"
+    ));
+    out.push_str("  \"tools\": {\n");
+    write_manifest_tool(&mut out, "cargo", Path::new("cargo"), "PATH", true)?;
+    write_manifest_tool(&mut out, "rustc", Path::new("rustc"), "PATH", true)?;
+    write_manifest_tool(&mut out, "llc", &tools.llc.path, &tools.llc.source, true)?;
+    write_manifest_tool(
+        &mut out,
+        "clang",
+        &tools.clang.path,
+        &tools.clang.source,
+        true,
+    )?;
+    write_manifest_tool(
+        &mut out,
+        "llvm_readelf",
+        &tools.llvm_readelf.path,
+        &tools.llvm_readelf.source,
+        true,
+    )?;
+    write_manifest_tool(
+        &mut out,
+        "llvm_objdump",
+        &tools.llvm_objdump.path,
+        &tools.llvm_objdump.source,
+        false,
+    )?;
+    out.push_str("  },\n");
+
+    out.push_str("  \"artifacts\": {\n");
+    write_manifest_artifact(&mut out, "hsaco", hsaco, "    ", true)?;
+    write_manifest_artifact(&mut out, "metadata", metadata, "    ", true)?;
+    write_manifest_artifact(&mut out, "bindings", bindings, "    ", false)?;
+    out.push_str("  },\n");
+
+    out.push_str("  \"link\": {\n");
+    out.push_str("    \"objects\": [\n");
+    for (input_index, input) in link_inputs.iter().enumerate() {
+        if input_index > 0 {
+            out.push_str(",\n");
+        }
+        out.push_str("      {\n");
+        out.push_str(&format!(
+            "        \"package\": \"{}\",\n",
+            json_escape(&input.package_name)
+        ));
+        write_manifest_artifact(&mut out, "llvm_ir", &input.llvm_ir, "        ", true)?;
+        write_manifest_artifact(&mut out, "object", &input.object, "        ", true)?;
+        out.push_str("        \"kernels\": [");
+        for (kernel_index, kernel) in input.kernels.iter().enumerate() {
+            if kernel_index > 0 {
+                out.push_str(", ");
+            }
+            out.push_str(&format!("\"{}\"", json_escape(kernel)));
+        }
+        out.push_str("]\n");
+        out.push_str("      }");
+    }
+    out.push_str("\n    ]\n");
+    out.push_str("  },\n");
+
+    out.push_str("  \"kernels\": [\n");
+    for (kernel_index, (name, metadata)) in code_object_metadata.kernels.iter().enumerate() {
+        if kernel_index > 0 {
+            out.push_str(",\n");
+        }
+        out.push_str("    {\n");
+        out.push_str(&format!("      \"name\": \"{}\",\n", json_escape(name)));
+        out.push_str("      \"resources\": ");
+        write_kernel_object_metadata(&mut out, Some(metadata));
+        out.push('\n');
+        out.push_str("    }");
+    }
+    out.push_str("\n  ]\n");
+    out.push_str("}\n");
+
+    fs::write(path, out).map_err(|err| format!("failed to write {}: {err}", path.display()))
+}
+
+fn write_manifest_tool(
+    out: &mut String,
+    key: &str,
+    path: &Path,
+    source: &str,
+    trailing_comma: bool,
+) -> Result<(), String> {
+    let version = first_version_line(path)?;
+    out.push_str(&format!("    \"{}\": {{\n", json_escape(key)));
+    out.push_str(&format!(
+        "      \"path\": \"{}\",\n",
+        json_escape(&path.display().to_string())
+    ));
+    out.push_str(&format!("      \"source\": \"{}\",\n", json_escape(source)));
+    out.push_str(&format!(
+        "      \"version\": \"{}\"\n",
+        json_escape(&version)
+    ));
+    out.push_str("    }");
+    if trailing_comma {
+        out.push(',');
+    }
+    out.push('\n');
+    Ok(())
+}
+
+fn first_version_line(program: &Path) -> Result<String, String> {
+    let output = Command::new(program)
+        .arg("--version")
+        .output()
+        .map_err(|err| format!("failed to run {} --version: {err}", program.display()))?;
+    if !output.status.success() {
+        return Err(format!(
+            "{} --version failed:\n{}",
+            program.display(),
+            String::from_utf8_lossy(&output.stderr)
+        ));
+    }
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    if let Some(line) = stdout.lines().find(|line| !line.trim().is_empty()) {
+        return Ok(line.trim().to_string());
+    }
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    Ok(stderr
+        .lines()
+        .find(|line| !line.trim().is_empty())
+        .unwrap_or("<no version output>")
+        .trim()
+        .to_string())
+}
+
+fn write_manifest_artifact(
+    out: &mut String,
+    key: &str,
+    path: &Path,
+    indent: &str,
+    trailing_comma: bool,
+) -> Result<(), String> {
+    let (size, sha256) = artifact_size_and_sha256(path)?;
+    out.push_str(&format!("{indent}\"{}\": {{\n", json_escape(key)));
+    out.push_str(&format!(
+        "{indent}  \"path\": \"{}\",\n",
+        json_escape(&path.display().to_string())
+    ));
+    out.push_str(&format!("{indent}  \"size\": {size},\n"));
+    out.push_str(&format!("{indent}  \"sha256\": \"{sha256}\"\n"));
+    out.push_str(&format!("{indent}}}"));
+    if trailing_comma {
+        out.push(',');
+    }
+    out.push('\n');
+    Ok(())
+}
+
+fn artifact_size_and_sha256(path: &Path) -> Result<(u64, String), String> {
+    let mut file =
+        fs::File::open(path).map_err(|err| format!("failed to read {}: {err}", path.display()))?;
+    let size = file
+        .metadata()
+        .map_err(|err| format!("failed to stat {}: {err}", path.display()))?
+        .len();
+    let mut hasher = Sha256::new();
+    let mut buffer = [0u8; 16 * 1024];
+    loop {
+        let bytes = file
+            .read(&mut buffer)
+            .map_err(|err| format!("failed to read {}: {err}", path.display()))?;
+        if bytes == 0 {
+            break;
+        }
+        hasher.update(&buffer[..bytes]);
+    }
+    Ok((size, hex_lower(&hasher.finalize())))
+}
+
+fn hex_lower(bytes: &[u8]) -> String {
+    const HEX: &[u8; 16] = b"0123456789abcdef";
+    let mut out = String::with_capacity(bytes.len() * 2);
+    for byte in bytes {
+        out.push(HEX[(byte >> 4) as usize] as char);
+        out.push(HEX[(byte & 0x0f) as usize] as char);
+    }
+    out
+}
+
 fn write_device_struct_metadata(out: &mut String, device_struct: &DeviceStruct) {
     out.push_str("    {\n");
     out.push_str(&format!(
@@ -3902,7 +4454,10 @@ fn write_device_struct_metadata(out: &mut String, device_struct: &DeviceStruct) 
         "      \"abi_size\": {},\n",
         device_struct.layout.size
     ));
-    out.push_str(&format!("      \"align\": {},\n", device_struct.layout.align));
+    out.push_str(&format!(
+        "      \"align\": {},\n",
+        device_struct.layout.align
+    ));
     out.push_str("      \"fields\": [\n");
     for (field_index, field) in device_struct.layout.fields.iter().enumerate() {
         if field_index > 0 {
@@ -3934,6 +4489,34 @@ fn write_device_struct_metadata(out: &mut String, device_struct: &DeviceStruct) 
     }
     out.push_str("\n      ]\n");
     out.push_str("    }");
+}
+
+fn write_kernel_contract_metadata(out: &mut String, contract: &KernelContract) {
+    match contract {
+        KernelContract::Length(contract) => {
+            out.push_str("        {\n");
+            out.push_str("          \"kind\": \"len\",\n");
+            out.push_str(&format!(
+                "          \"buffer\": \"{}\",\n",
+                json_escape(&contract.buffer)
+            ));
+            out.push_str(&format!(
+                "          \"required_len\": \"{}\"\n",
+                json_escape(&contract.required_len.source)
+            ));
+            out.push_str("        }");
+        }
+        KernelContract::Disjoint(contract) => {
+            out.push_str("        {\n");
+            out.push_str("          \"kind\": \"disjoint\",\n");
+            out.push_str(&format!(
+                "          \"buffers\": [\"{}\", \"{}\"]\n",
+                json_escape(&contract.left),
+                json_escape(&contract.right)
+            ));
+            out.push_str("        }");
+        }
+    }
 }
 
 fn write_kernel_object_metadata(out: &mut String, metadata: Option<&KernelObjectMetadata>) {
@@ -4074,11 +4657,15 @@ fn write_bindings(
     out.push_str("#[allow(dead_code)]\n");
     out.push_str("impl DeviceKernels {\n");
     out.push_str("    pub fn load(device: &rocm_oxide::Device, hsaco: impl AsRef<Path>) -> rocm_oxide::Result<Self> {\n");
-    out.push_str("        Self::from_module(std::sync::Arc::new(device.load_code_object_file(hsaco)?))\n");
+    out.push_str("        device.validate_generated_artifacts(DEVICE_METADATA_JSON, DEVICE_KERNEL_RESOURCES)?;\n");
+    out.push_str(
+        "        Self::from_module(std::sync::Arc::new(device.load_code_object_file(hsaco)?))\n",
+    );
     out.push_str("    }\n\n");
     out.push_str(
         "    pub fn load_embedded(device: &rocm_oxide::Device) -> rocm_oxide::Result<Self> {\n",
     );
+    out.push_str("        device.validate_generated_artifacts(DEVICE_METADATA_JSON, DEVICE_KERNEL_RESOURCES)?;\n");
     out.push_str("        Self::from_module(std::sync::Arc::new(device.load_code_object(DEVICE_HSACO_BYTES)?))\n");
     out.push_str("    }\n\n");
     out.push_str("    fn from_module(module: std::sync::Arc<rocm_oxide::Module>) -> rocm_oxide::Result<Self> {\n");
@@ -4412,7 +4999,9 @@ fn generate_kernel_binding(
     out.push_str("    /// Launches without generated buffer, alias, or launch validation.\n");
     out.push_str("    ///\n");
     out.push_str("    /// # Safety\n");
-    out.push_str("    /// The caller must prevalidate the launch config, buffer lengths, aliasing,\n");
+    out.push_str(
+        "    /// The caller must prevalidate the launch config, buffer lengths, aliasing,\n",
+    );
     out.push_str("    /// argument ABI, and all pointer lifetimes for the launched work.\n");
     out.push_str(&format!(
         "    pub unsafe fn {}_unchecked(&self, {}) -> rocm_oxide::Result<()> {{\n",
@@ -4428,10 +5017,14 @@ fn generate_kernel_binding(
     out.push_str("    }\n");
 
     out.push('\n');
-    out.push_str("    /// Launches on a stream without generated buffer, alias, or launch validation.\n");
+    out.push_str(
+        "    /// Launches on a stream without generated buffer, alias, or launch validation.\n",
+    );
     out.push_str("    ///\n");
     out.push_str("    /// # Safety\n");
-    out.push_str("    /// The caller must prevalidate the launch config, buffer lengths, aliasing,\n");
+    out.push_str(
+        "    /// The caller must prevalidate the launch config, buffer lengths, aliasing,\n",
+    );
     out.push_str("    /// argument ABI, pointer lifetimes, and stream/device association.\n");
     out.push_str(&format!(
         "    pub unsafe fn {}_on_stream_unchecked(&self, {}) -> rocm_oxide::Result<()> {{\n",
@@ -4506,7 +5099,9 @@ fn generate_kernel_binding(
             "                kernel.launch_raw_on_stream(context.stream(), config, &mut __params)?;\n",
         );
         out.push_str("            }\n");
-        out.push_str("            let mut __completion = rocm_oxide::KernelLaunchCompletion::new();\n");
+        out.push_str(
+            "            let mut __completion = rocm_oxide::KernelLaunchCompletion::new();\n",
+        );
         out.push_str("            __completion.keep_alive(module);\n");
         out.push_str("            __completion.keep_alive(kernel);\n");
         for arg_name in &keep_alive_arg_names {
@@ -4615,13 +5210,14 @@ fn generate_kernel_validation_lines(
                 .any(|indirect_name| indirect_name == name)
         })
         .collect::<Vec<_>>();
-    if kernel.contracts.is_empty() && has_len_arg {
+    let length_contracts = length_contracts(&kernel.contracts).collect::<Vec<_>>();
+    if length_contracts.is_empty() && has_len_arg {
         for (arg_name, _) in length_buffer_arg_names {
             out.push_str(&format!(
                 "        rocm_oxide::validate_buffer_len(\"{arg_name}\", {arg_name}.len(), n)?;\n"
             ));
         }
-    } else if kernel.contracts.is_empty() && length_buffer_arg_names.len() > 1 {
+    } else if length_contracts.is_empty() && length_buffer_arg_names.len() > 1 {
         let (reference, _) = length_buffer_arg_names[0];
         for (arg_name, _) in length_buffer_arg_names.iter().skip(1) {
             out.push_str(&format!(
@@ -4629,7 +5225,7 @@ fn generate_kernel_validation_lines(
             ));
         }
     }
-    for contract in &kernel.contracts {
+    for contract in length_contracts {
         out.push_str(&format!(
             "        rocm_oxide::validate_buffer_len(\"{}\", {}.len(), {})?;\n",
             contract.buffer,
@@ -4645,28 +5241,51 @@ fn generate_kernel_validation_lines(
     if has_block_x_arg {
         out.push_str("        rocm_oxide::validate_block_x(config, block_x)?;\n");
     }
+    let mut emitted_disjoint_pairs = BTreeSet::new();
     for left_index in 0..buffer_arg_names.len() {
         for right_index in (left_index + 1)..buffer_arg_names.len() {
             let (left_name, left_mut) = &buffer_arg_names[left_index];
             let (right_name, right_mut) = &buffer_arg_names[right_index];
             if *left_mut || *right_mut {
-                let left_arg = if operation_args {
-                    format!("{left_name}.as_ref()")
-                } else {
-                    left_name.clone()
-                };
-                let right_arg = if operation_args {
-                    format!("{right_name}.as_ref()")
-                } else {
-                    right_name.clone()
-                };
-                out.push_str(&format!(
-                    "        rocm_oxide::validate_device_buffers_disjoint(\"{left_name}\", {left_arg}, \"{right_name}\", {right_arg})?;\n"
+                emitted_disjoint_pairs.insert(disjoint_pair_key(left_name, right_name));
+                out.push_str(&generate_disjoint_validation_line(
+                    left_name,
+                    right_name,
+                    operation_args,
                 ));
             }
         }
     }
+    for contract in disjoint_contracts(&kernel.contracts) {
+        if emitted_disjoint_pairs.insert(disjoint_pair_key(&contract.left, &contract.right)) {
+            out.push_str(&generate_disjoint_validation_line(
+                &contract.left,
+                &contract.right,
+                operation_args,
+            ));
+        }
+    }
     out
+}
+
+fn generate_disjoint_validation_line(
+    left_name: &str,
+    right_name: &str,
+    operation_args: bool,
+) -> String {
+    let left_arg = if operation_args {
+        format!("{left_name}.as_ref()")
+    } else {
+        left_name.to_string()
+    };
+    let right_arg = if operation_args {
+        format!("{right_name}.as_ref()")
+    } else {
+        right_name.to_string()
+    };
+    format!(
+        "        rocm_oxide::validate_device_buffers_disjoint(\"{left_name}\", {left_arg}, \"{right_name}\", {right_arg})?;\n"
+    )
 }
 
 impl ArgKind {
@@ -4771,18 +5390,19 @@ where
 mod tests {
     use super::{
         ArgKind, CodeObjectMetadata, DeviceGlobalKind, KernelArgObjectMetadata,
-        KernelObjectMetadata,
-        annotate_dynamic_shared_mem_from_ir, compiler_step, discover_device_crate_bundle,
-        discover_device_globals_in_source, discover_device_structs_in_source,
-        discover_kernels_in_source, generate_device_global_binding, generate_device_struct_binding,
-        generate_kernel_binding, generate_kernel_resource_binding, parse_inline_path_dependency,
-        parse_kernel_resource_rows, parse_package_name, transform_ir,
-        validate_code_object_metadata, verify_lds_ir, verify_lds_isa, verify_scoped_atomic_ir,
-        verify_scoped_atomic_isa,
+        KernelObjectMetadata, annotate_dynamic_shared_mem_from_ir, compiler_step,
+        discover_device_crate_bundle, discover_device_globals_in_source,
+        discover_device_structs_in_source, discover_kernels_in_source,
+        generate_device_global_binding, generate_device_struct_binding, generate_kernel_binding,
+        generate_kernel_resource_binding, parse_inline_path_dependency, parse_kernel_resource_rows,
+        parse_package_name, transform_ir, validate_code_object_metadata, verify_lds_ir,
+        verify_lds_isa, verify_scoped_atomic_ir, verify_scoped_atomic_isa, write_bindings,
+        write_release_manifest,
     };
     use std::collections::{BTreeMap, BTreeSet};
     use std::fs;
     use std::path::{Path, PathBuf};
+    use std::process::Command;
     use std::time::{SystemTime, UNIX_EPOCH};
 
     fn kernel_map(source: &str) -> BTreeMap<String, super::KernelDecl> {
@@ -4791,6 +5411,29 @@ mod tests {
             .into_iter()
             .map(|kernel| (kernel.name.clone(), kernel))
             .collect()
+    }
+
+    fn test_span(signature: &str) -> super::SourceSpan {
+        super::SourceSpan {
+            path: PathBuf::from("<test>"),
+            line: 1,
+            signature: signature.to_string(),
+        }
+    }
+
+    fn abi_arg(
+        _name: &str,
+        offset: u32,
+        size: u32,
+        value_kind: &str,
+        address_space: Option<&str>,
+    ) -> KernelArgObjectMetadata {
+        KernelArgObjectMetadata {
+            address_space: address_space.map(ToOwned::to_owned),
+            offset: Some(offset),
+            size: Some(size),
+            value_kind: Some(value_kind.to_string()),
+        }
     }
 
     #[test]
@@ -4875,11 +5518,54 @@ pub unsafe extern "C" fn helper() {}
         assert!(!super::env_flag_enabled(None));
         assert!(!super::env_flag_enabled(Some(std::ffi::OsStr::new(""))));
         assert!(!super::env_flag_enabled(Some(std::ffi::OsStr::new("0"))));
-        assert!(!super::env_flag_enabled(Some(std::ffi::OsStr::new("false"))));
+        assert!(!super::env_flag_enabled(Some(std::ffi::OsStr::new(
+            "false"
+        ))));
         assert!(!super::env_flag_enabled(Some(std::ffi::OsStr::new("OFF"))));
         assert!(super::env_flag_enabled(Some(std::ffi::OsStr::new("1"))));
         assert!(super::env_flag_enabled(Some(std::ffi::OsStr::new("true"))));
         assert!(super::env_flag_enabled(Some(std::ffi::OsStr::new("debug"))));
+    }
+
+    #[test]
+    fn nested_device_builds_strip_clippy_driver_environment() {
+        let mut command = Command::new("cargo");
+        for key in [
+            "CARGO_ENCODED_RUSTFLAGS",
+            "CLIPPY_ARGS",
+            "CLIPPY_CONF_DIR",
+            "CARGO_CLIPPY",
+            "RUSTC",
+            "RUSTC_WORKSPACE_WRAPPER",
+            "RUSTC_WRAPPER",
+            "RUSTDOC",
+        ] {
+            command.env(key, "inherited");
+        }
+
+        super::sanitize_rust_env(&mut command);
+        let envs = command
+            .get_envs()
+            .map(|(key, value)| {
+                (
+                    key.to_string_lossy().into_owned(),
+                    value.map(|value| value.to_string_lossy().into_owned()),
+                )
+            })
+            .collect::<BTreeMap<_, _>>();
+
+        for key in [
+            "CARGO_ENCODED_RUSTFLAGS",
+            "CLIPPY_ARGS",
+            "CLIPPY_CONF_DIR",
+            "CARGO_CLIPPY",
+            "RUSTC",
+            "RUSTC_WORKSPACE_WRAPPER",
+            "RUSTC_WRAPPER",
+            "RUSTDOC",
+        ] {
+            assert_eq!(envs.get(key), Some(&None), "{key} should be removed");
+        }
     }
 
     #[test]
@@ -4945,6 +5631,154 @@ pub unsafe extern "C" fn helper() {}
     }
 
     #[test]
+    fn preserves_unnamed_user_kernargs_from_code_object_metadata() {
+        let input = r#"
+amdhsa.kernels:
+  - .args:
+      - .name:           width
+        .offset:         0
+        .size:           4
+        .value_kind:     by_value
+      - .offset:         4
+        .size:           4
+        .value_kind:     by_value
+      - .offset:         8
+        .size:           4
+        .value_kind:     hidden_block_count_x
+    .kernarg_segment_size: 128
+    .name:           nameless_arg_kernel
+"#;
+        let metadata =
+            super::parse_code_object_metadata(input).expect("metadata should parse");
+        let kernel = metadata
+            .kernels
+            .get("nameless_arg_kernel")
+            .expect("kernel should parse");
+        assert!(kernel.args.contains_key("width"));
+        assert!(kernel.args.contains_key("@offset_4"));
+        assert!(
+            !kernel.args.contains_key("@offset_8"),
+            "hidden nameless args should not become user ABI rows"
+        );
+    }
+
+    #[test]
+    fn computes_artifact_size_and_sha256() {
+        let suffix = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("system clock should be after Unix epoch")
+            .as_nanos();
+        let path = std::env::temp_dir().join(format!(
+            "rocm-oxide-artifact-hash-{suffix}-{}",
+            std::process::id()
+        ));
+        fs::write(&path, b"abc").expect("temp artifact should be writable");
+
+        let (size, sha256) =
+            super::artifact_size_and_sha256(&path).expect("hashing should succeed");
+        let _ = fs::remove_file(&path);
+
+        assert_eq!(size, 3);
+        assert_eq!(
+            sha256,
+            "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad"
+        );
+    }
+
+    #[test]
+    fn writes_release_manifest_with_tool_versions_and_artifact_hashes() {
+        let suffix = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("system clock should be after Unix epoch")
+            .as_nanos();
+        let dir = std::env::temp_dir().join(format!(
+            "rocm-oxide-release-manifest-{suffix}-{}",
+            std::process::id()
+        ));
+        fs::create_dir_all(&dir).expect("temp manifest dir should be writable");
+        let hsaco = dir.join("device.hsaco");
+        let metadata = dir.join("device.metadata.json");
+        let bindings = dir.join("device.bindings.rs");
+        let llvm_ir = dir.join("device.kernel.ll");
+        let object = dir.join("device.o");
+        let manifest = dir.join("device.manifest.json");
+        fs::write(&hsaco, b"hsaco").expect("hsaco should be writable");
+        fs::write(&metadata, b"{\"target\":\"amdgcn-amd-amdhsa\"}\n")
+            .expect("metadata should be writable");
+        fs::write(&bindings, b"bindings").expect("bindings should be writable");
+        fs::write(&llvm_ir, b"llvm ir").expect("llvm ir should be writable");
+        fs::write(&object, b"object").expect("object should be writable");
+
+        let tools = super::ToolPaths {
+            llc: super::ToolPath {
+                path: PathBuf::from("rustc"),
+                source: "test".to_string(),
+            },
+            clang: super::ToolPath {
+                path: PathBuf::from("rustc"),
+                source: "test".to_string(),
+            },
+            llvm_readelf: super::ToolPath {
+                path: PathBuf::from("rustc"),
+                source: "test".to_string(),
+            },
+            llvm_objdump: super::ToolPath {
+                path: PathBuf::from("rustc"),
+                source: "test".to_string(),
+            },
+        };
+        let link_inputs = [super::LinkInput {
+            package_name: "device-spike".to_string(),
+            llvm_ir: llvm_ir.clone(),
+            object: object.clone(),
+            kernels: vec!["vector_add".to_string()],
+        }];
+        let mut code_object_metadata = CodeObjectMetadata::default();
+        code_object_metadata.kernels.insert(
+            "vector_add".to_string(),
+            KernelObjectMetadata {
+                kernarg_segment_size: Some(296),
+                kernarg_segment_align: Some(8),
+                max_flat_workgroup_size: Some(1024),
+                group_segment_fixed_size: Some(0),
+                private_segment_fixed_size: Some(0),
+                sgpr_count: Some(11),
+                vgpr_count: Some(4),
+                sgpr_spill_count: Some(0),
+                vgpr_spill_count: Some(0),
+                wavefront_size: Some(32),
+                uses_dynamic_shared_mem: false,
+                uses_dynamic_stack: Some(false),
+                args: BTreeMap::new(),
+            },
+        );
+
+        write_release_manifest(
+            &manifest,
+            "gfx1100",
+            &hsaco,
+            &metadata,
+            &bindings,
+            &link_inputs,
+            &tools,
+            &code_object_metadata,
+        )
+        .expect("manifest should write");
+        let text = fs::read_to_string(&manifest).expect("manifest should be readable");
+        let _ = fs::remove_dir_all(&dir);
+
+        assert!(text.contains("\"format\": \"rocm-oxide-release-manifest-v1\""));
+        assert!(text.contains("\"target\": \"amdgcn-amd-amdhsa\""));
+        assert!(text.contains("\"arch\": \"gfx1100\""));
+        assert!(text.contains("\"tools\""));
+        assert!(text.contains("\"artifacts\""));
+        assert!(text.contains("\"sha256\""));
+        assert!(text.contains("\"package\": \"device-spike\""));
+        assert!(text.contains("\"name\": \"vector_add\""));
+        assert!(text.contains("\"vgpr_count\": 4"));
+    }
+
+    #[test]
     fn validates_linked_code_object_metadata_for_all_kernels() {
         let mut metadata = CodeObjectMetadata::default();
         metadata
@@ -4963,6 +5797,176 @@ pub unsafe extern "C" fn helper() {}
             .insert("missing".to_string(), KernelObjectMetadata::default());
         validate_code_object_metadata(&metadata, &expected)
             .expect("complete linked metadata should pass");
+    }
+
+    #[test]
+    fn validates_kernel_abi_against_code_object_offsets_and_sizes() {
+        let mut kernels = BTreeMap::new();
+        kernels.insert(
+            "mixed".to_string(),
+            super::KernelDecl {
+                name: "mixed".to_string(),
+                args: vec![
+                    super::KernelArg {
+                        name: "out".to_string(),
+                        ty: "gpu::DeviceSliceMut<u32>".to_string(),
+                        kind: ArgKind::MutSlice("u32".to_string()),
+                    },
+                    super::KernelArg {
+                        name: "params".to_string(),
+                        ty: "Params".to_string(),
+                        kind: ArgKind::Scalar,
+                    },
+                    super::KernelArg {
+                        name: "n".to_string(),
+                        ty: "usize".to_string(),
+                        kind: ArgKind::Scalar,
+                    },
+                    super::KernelArg {
+                        name: "flag".to_string(),
+                        ty: "bool".to_string(),
+                        kind: ArgKind::Scalar,
+                    },
+                ],
+                contracts: Vec::new(),
+                span: test_span("pub unsafe extern \"C\" fn mixed(...)"),
+            },
+        );
+        let mut device_structs = BTreeMap::new();
+        device_structs.insert(
+            "Params".to_string(),
+            super::DeviceStruct {
+                name: "Params".to_string(),
+                repr: super::DeviceStructRepr::Rust,
+                fields: vec![
+                    super::DeviceStructField {
+                        name: "ptr".to_string(),
+                        ty: "*const u32".to_string(),
+                    },
+                    super::DeviceStructField {
+                        name: "scale".to_string(),
+                        ty: "u32".to_string(),
+                    },
+                ],
+                layout: super::DeviceStructLayout {
+                    size: 16,
+                    align: 8,
+                    fields: vec![
+                        super::DeviceStructLayoutField {
+                            name: "ptr".to_string(),
+                            ty: "*const u32".to_string(),
+                            offset: 0,
+                            size: 8,
+                        },
+                        super::DeviceStructLayoutField {
+                            name: "scale".to_string(),
+                            ty: "u32".to_string(),
+                            offset: 8,
+                            size: 4,
+                        },
+                    ],
+                    padding: vec![super::DeviceStructPadding {
+                        offset: 12,
+                        size: 4,
+                    }],
+                },
+                layout_source: super::DeviceStructLayoutSource::Rustc,
+                span: test_span("struct Params"),
+            },
+        );
+        let mut metadata = CodeObjectMetadata::default();
+        let mut kernel_metadata = KernelObjectMetadata {
+            kernarg_segment_size: Some(312),
+            kernarg_segment_align: Some(8),
+            ..KernelObjectMetadata::default()
+        };
+        kernel_metadata.args.insert(
+            "out.0".to_string(),
+            abi_arg("out.0", 0, 8, "global_buffer", Some("global")),
+        );
+        kernel_metadata.args.insert(
+            "out.1".to_string(),
+            abi_arg("out.1", 8, 8, "by_value", None),
+        );
+        kernel_metadata.args.insert(
+            "params.0".to_string(),
+            abi_arg("params.0", 16, 8, "global_buffer", Some("global")),
+        );
+        kernel_metadata.args.insert(
+            "params.1".to_string(),
+            abi_arg("params.1", 24, 4, "by_value", None),
+        );
+        kernel_metadata
+            .args
+            .insert("n".to_string(), abi_arg("n", 32, 8, "by_value", None));
+        kernel_metadata
+            .args
+            .insert("flag".to_string(), abi_arg("flag", 40, 1, "by_value", None));
+        metadata
+            .kernels
+            .insert("mixed".to_string(), kernel_metadata);
+
+        super::validate_kernel_abi_metadata(&kernels, &device_structs, &metadata)
+            .expect("matching kernel ABI metadata should validate");
+    }
+
+    #[test]
+    fn accepts_unnamed_user_kernarg_when_abi_facts_match() {
+        let kernels = kernel_map(
+            r#"
+#[kernel]
+pub unsafe extern "C" fn spectral(width: u32, work_iterations: u32) {}
+"#,
+        );
+        let mut metadata = CodeObjectMetadata::default();
+        let mut kernel_metadata = KernelObjectMetadata {
+            kernarg_segment_size: Some(128),
+            kernarg_segment_align: Some(8),
+            ..KernelObjectMetadata::default()
+        };
+        kernel_metadata.args.insert(
+            "width".to_string(),
+            abi_arg("width", 0, 4, "by_value", None),
+        );
+        kernel_metadata.args.insert(
+            "@offset_4".to_string(),
+            abi_arg("@offset_4", 4, 4, "by_value", None),
+        );
+        metadata.kernels.insert("spectral".to_string(), kernel_metadata);
+
+        super::validate_kernel_abi_metadata(&kernels, &BTreeMap::new(), &metadata)
+            .expect("matching unnamed ABI row should validate");
+    }
+
+    #[test]
+    fn rejects_kernel_abi_size_drift_before_generating_bindings() {
+        let kernels = kernel_map(
+            r#"
+#[kernel]
+pub unsafe extern "C" fn scalar(out: *mut u32, n: usize) {}
+"#,
+        );
+        let mut metadata = CodeObjectMetadata::default();
+        let mut kernel_metadata = KernelObjectMetadata {
+            kernarg_segment_size: Some(288),
+            kernarg_segment_align: Some(8),
+            ..KernelObjectMetadata::default()
+        };
+        kernel_metadata.args.insert(
+            "out".to_string(),
+            abi_arg("out", 0, 8, "global_buffer", Some("global")),
+        );
+        kernel_metadata
+            .args
+            .insert("n".to_string(), abi_arg("n", 8, 4, "by_value", None));
+        metadata
+            .kernels
+            .insert("scalar".to_string(), kernel_metadata);
+
+        let err = super::validate_kernel_abi_metadata(&kernels, &BTreeMap::new(), &metadata)
+            .expect_err("wrong scalar ABI size should fail");
+        assert!(err.contains("ABI argument `n` size"));
+        assert!(err.contains("expected 8"));
     }
 
     #[test]
@@ -5091,9 +6095,7 @@ pub unsafe extern "C" fn vector_add(
         assert!(binding.contains("pub unsafe fn vector_add_graph_node"));
         assert!(binding.contains("graph: &rocm_oxide::hip::Graph"));
         assert!(binding.contains("dependencies: &[rocm_oxide::hip::GraphNode]"));
-        assert!(binding.contains(
-            "add_graph_node_raw(graph, dependencies, config, &mut __params)"
-        ));
+        assert!(binding.contains("add_graph_node_raw(graph, dependencies, config, &mut __params)"));
         assert!(binding.contains("out: std::sync::Arc<rocm_oxide::DeviceBuffer<f32>>"));
         assert!(binding.contains("a: std::sync::Arc<rocm_oxide::DeviceBuffer<f32>>"));
         assert!(binding.contains("Output = rocm_oxide::KernelLaunchCompletion"));
@@ -5102,6 +6104,51 @@ pub unsafe extern "C" fn vector_add(
         assert!(binding.contains("__completion.keep_alive(kernel);"));
         assert!(binding.contains("__completion.keep_alive(out);"));
         assert!(binding.contains("__completion.keep_alive(a);"));
+    }
+
+    #[test]
+    fn generated_loader_validates_embedded_metadata_before_loading_module() {
+        let kernels = kernel_map(
+            r#"
+#[kernel]
+pub unsafe extern "C" fn vector_add(out: *mut f32, input: *const f32, n: usize) {}
+"#,
+        );
+        let mut code_object_metadata = CodeObjectMetadata::default();
+        code_object_metadata
+            .kernels
+            .insert("vector_add".to_string(), KernelObjectMetadata::default());
+        let suffix = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("system clock should be after Unix epoch")
+            .as_nanos();
+        let path = std::env::temp_dir().join(format!(
+            "rocm-oxide-generated-bindings-{suffix}-{}.rs",
+            std::process::id()
+        ));
+
+        write_bindings(
+            &path,
+            Path::new("rocm_oxide_device_spike.hsaco"),
+            &kernels,
+            &BTreeMap::new(),
+            &BTreeMap::new(),
+            &code_object_metadata,
+        )
+        .expect("bindings should be written");
+        let binding = fs::read_to_string(&path).expect("generated bindings should be readable");
+        let _ = fs::remove_file(&path);
+        assert_eq!(
+            binding
+                .matches(
+                    "device.validate_generated_artifacts(DEVICE_METADATA_JSON, DEVICE_KERNEL_RESOURCES)?;"
+                )
+                .count(),
+            2,
+            "both load paths should validate metadata/resource consistency"
+        );
+        assert!(binding.contains("device.load_code_object_file(hsaco)?"));
+        assert!(binding.contains("device.load_code_object(DEVICE_HSACO_BYTES)?"));
     }
 
     #[test]
@@ -5309,6 +6356,33 @@ pub unsafe extern "C" fn temporal(
     }
 
     #[test]
+    fn parses_disjoint_contracts_into_generated_validation() {
+        let kernels = discover_kernels_in_source(
+            r#"
+// rocm-oxide: disjoint(left,right)
+#[kernel]
+pub unsafe extern "C" fn compare_inputs(
+    left: *const u32,
+    right: *const u32,
+    n: usize,
+) {}
+"#,
+        )
+        .expect("source should parse");
+
+        let binding = generate_kernel_binding(&kernels[0], &BTreeMap::new(), None)
+            .expect("binding should generate");
+        assert!(binding.contains("validate_buffer_len(\"left\", left.len(), n)?"));
+        assert!(binding.contains("validate_buffer_len(\"right\", right.len(), n)?"));
+        assert!(
+            binding.contains("validate_device_buffers_disjoint(\"left\", left, \"right\", right)?")
+        );
+        assert!(binding.contains(
+            "validate_device_buffers_disjoint(\"left\", left.as_ref(), \"right\", right.as_ref())?"
+        ));
+    }
+
+    #[test]
     fn rejects_contracts_that_reference_non_scalar_args() {
         let err = discover_kernels_in_source(
             r#"
@@ -5320,6 +6394,71 @@ pub unsafe extern "C" fn bad(out: *mut f32, input: *const f32) {}
         .expect_err("contract should fail");
 
         assert!(err.contains("references non-scalar"));
+    }
+
+    #[test]
+    fn rejects_disjoint_contracts_that_reference_non_buffer_args() {
+        let err = discover_kernels_in_source(
+            r#"
+// rocm-oxide: disjoint(out,n)
+#[kernel]
+pub unsafe extern "C" fn bad(out: *mut f32, n: usize) {}
+"#,
+        )
+        .expect_err("contract should fail");
+
+        assert!(err.contains("disjoint contract"));
+        assert!(err.contains("does not match a buffer argument"));
+    }
+
+    #[test]
+    fn rejects_duplicate_disjoint_contract_pairs() {
+        let err = discover_kernels_in_source(
+            r#"
+// rocm-oxide: disjoint(out,input)
+// rocm-oxide: disjoint(input,out)
+#[kernel]
+pub unsafe extern "C" fn bad(out: *mut f32, input: *const f32) {}
+"#,
+        )
+        .expect_err("contract should fail");
+
+        assert!(err.contains("duplicate disjoint contract"));
+    }
+
+    #[test]
+    fn writes_disjoint_contracts_to_metadata_json() {
+        let kernels = kernel_map(
+            r#"
+// rocm-oxide: len(out)=n
+// rocm-oxide: disjoint(out,input)
+#[kernel]
+pub unsafe extern "C" fn copy_checked(out: *mut u32, input: *const u32, n: usize) {}
+"#,
+        );
+        let path = std::env::temp_dir().join(format!(
+            "rocm-oxide-contract-metadata-{}.json",
+            std::process::id()
+        ));
+        super::write_metadata(
+            &path,
+            "gfx1201",
+            Path::new("device.hsaco"),
+            &[],
+            &kernels,
+            &BTreeMap::new(),
+            &BTreeMap::new(),
+            &CodeObjectMetadata::default(),
+        )
+        .expect("metadata should write");
+        let metadata = fs::read_to_string(&path).expect("metadata should be readable");
+        let _ = fs::remove_file(&path);
+
+        assert!(metadata.contains("\"kind\": \"len\""));
+        assert!(metadata.contains("\"buffer\": \"out\""));
+        assert!(metadata.contains("\"required_len\": \"n\""));
+        assert!(metadata.contains("\"kind\": \"disjoint\""));
+        assert!(metadata.contains("\"buffers\": [\"out\", \"input\"]"));
     }
 
     #[test]
@@ -5386,9 +6525,7 @@ pub unsafe extern "C" fn stack_then_global(out: *mut u32, value: u32) {}
         assert!(output.contains("%slot = alloca i32, align 4"));
         assert!(output.contains("store i32 %value, ptr %slot, align 4"));
         assert!(output.contains("%local = load i32, ptr %slot, align 4"));
-        assert!(
-            output.contains("%dst = getelementptr inbounds i32, ptr addrspace(1) %out, i64 1")
-        );
+        assert!(output.contains("%dst = getelementptr inbounds i32, ptr addrspace(1) %out, i64 1"));
         assert!(output.contains("store i32 %local, ptr addrspace(1) %dst"));
         assert!(!output.contains("ptr addrspace(1) %slot"));
     }
@@ -5836,12 +6973,8 @@ pub struct RustLayoutParams {
         assert!(binding.contains("pub struct RustLayoutParams"));
         assert!(binding.contains("std::mem::size_of::<RustLayoutParams>() == 8"));
         assert!(binding.contains("std::mem::align_of::<RustLayoutParams>() == 4"));
-        assert!(binding.contains(
-            "std::mem::offset_of!(RustLayoutParams, base) == 0"
-        ));
-        assert!(binding.contains(
-            "std::mem::offset_of!(RustLayoutParams, stride) == 4"
-        ));
+        assert!(binding.contains("std::mem::offset_of!(RustLayoutParams, base) == 0"));
+        assert!(binding.contains("std::mem::offset_of!(RustLayoutParams, stride) == 4"));
     }
 
     #[test]
@@ -5862,12 +6995,8 @@ pub struct HostReferenceClosure {
         assert!(binding.contains("pub bias: *const u32"));
         assert!(binding.contains("std::mem::size_of::<HostReferenceClosure>() == 16"));
         assert!(binding.contains("std::mem::align_of::<HostReferenceClosure>() == 8"));
-        assert!(binding.contains(
-            "std::mem::offset_of!(HostReferenceClosure, bias) == 0"
-        ));
-        assert!(binding.contains(
-            "std::mem::offset_of!(HostReferenceClosure, scale) == 8"
-        ));
+        assert!(binding.contains("std::mem::offset_of!(HostReferenceClosure, bias) == 0"));
+        assert!(binding.contains("std::mem::offset_of!(HostReferenceClosure, scale) == 8"));
         assert!(!binding.contains("unsafe impl Send for HostReferenceClosure"));
         assert!(!binding.contains("unsafe impl Sync for HostReferenceClosure"));
     }

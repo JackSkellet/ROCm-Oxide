@@ -65,6 +65,9 @@ Release reviewers should inspect these artifacts from every GPU run:
   deviations, and skipped-test reasons;
 - `performance_probe.json`: kernel timings, occupancy summaries, resource
   pressure, and limiter flags;
+- `release_manifest.json`: hashes and paths for the validation profile,
+  performance probe, compiler manifest, compiler artifacts, kernel resource
+  rows, and visual artifacts from the run;
 - `spectral_lattice*.png`: headless visual smoke artifacts for presentation and
   render-path regressions.
 

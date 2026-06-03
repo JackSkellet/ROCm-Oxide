@@ -631,6 +631,8 @@ rocm-oxide = {{ path = "{runtime_path}" }}
         ),
     )
     .map_err(|err| format!("failed to write Cargo.toml: {err}"))?;
+    fs::write(path.join("build.rs"), consumer_build_script(&runtime_path))
+        .map_err(|err| format!("failed to write build.rs: {err}"))?;
     fs::write(
         path.join("device-spike/Cargo.toml"),
         format!(
@@ -675,8 +677,32 @@ pub unsafe extern "C" fn fill_indices(out: gpu::DeviceSliceMut<u32>, n: usize) {
     .map_err(|err| format!("failed to write device-spike/src/lib.rs: {err}"))?;
     fs::write(
         path.join("src/main.rs"),
-        r#"fn main() {
-    println!("ROCm-Oxide project scaffold created. Point this dependency at a packaged rocm-oxide runtime before publishing.");
+        r#"use rocm_oxide::{Device, DeviceBuffer, LaunchConfig};
+
+mod generated {
+    include!(env!("ROCM_OXIDE_DEVICE_BINDINGS"));
+}
+
+fn main() -> Result<(), Box<dyn std::error::Error>> {
+    let device = Device::first()?;
+    let kernels = generated::DeviceKernels::load_embedded(&device)?;
+
+    let n = 256usize;
+    let out = DeviceBuffer::<u32>::new(n)?;
+    unsafe {
+        kernels.fill_indices(LaunchConfig::for_num_elems(n), &out, n)?;
+    }
+    rocm_oxide::hip::synchronize()?;
+
+    let values = out.copy_to_vec()?;
+    for (index, value) in values.iter().copied().enumerate() {
+        if value != index as u32 {
+            return Err(format!("mismatch at {index}: got {value}").into());
+        }
+    }
+
+    println!("Rust-authored AMDGPU kernel passed on {}", device.arch());
+    Ok(())
 }
 "#,
     )
@@ -684,6 +710,98 @@ pub unsafe extern "C" fn fill_indices(out: gpu::DeviceSliceMut<u32>, n: usize) {
 
     println!("created {}", path.display());
     Ok(())
+}
+
+fn consumer_build_script(runtime_path: &str) -> String {
+    let runtime_path = format!("{runtime_path:?}");
+    r#"use std::env;
+use std::fs;
+use std::path::{Path, PathBuf};
+use std::process::Command;
+
+const DEVICE_CRATE: &str = "device-spike";
+const OUTPUT_STEM: &str = "rocm_oxide_device_spike";
+const RUNTIME_PATH: &str = __ROCM_OXIDE_RUNTIME_PATH__;
+
+fn main() {
+    println!("cargo:rerun-if-changed=device-spike/Cargo.toml");
+    println!("cargo:rerun-if-changed=device-spike/src");
+    println!("cargo:rerun-if-env-changed=ROCM_OXIDE_ARCH");
+    println!("cargo:rerun-if-env-changed=ROCM_OXIDE_BUILD");
+    println!("cargo:rerun-if-env-changed=ROCM_PATH");
+
+    let mut command = build_tool_command();
+    command.args(["--crate", DEVICE_CRATE, "--output-stem", OUTPUT_STEM]);
+    let output = command.output().expect("failed to run rocm-oxide-build");
+    if !output.status.success() {
+        panic!(
+            "rocm-oxide-build failed\nstatus: {}\nstdout:\n{}\nstderr:\n{}",
+            output.status,
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        );
+    }
+
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let hsaco = stdout
+        .lines()
+        .last()
+        .expect("rocm-oxide-build did not print a hsaco path");
+    let stem = hsaco
+        .strip_suffix(".hsaco")
+        .expect("rocm-oxide-build output should end in .hsaco");
+    let hsaco = Path::new(hsaco);
+    let bindings = PathBuf::from(format!("{stem}.bindings.rs"));
+    let metadata = PathBuf::from(format!("{stem}.metadata.json"));
+    let manifest = PathBuf::from(format!("{stem}.manifest.json"));
+
+    let out_dir = PathBuf::from(env::var_os("OUT_DIR").expect("OUT_DIR is not set"));
+    let hsaco_out = out_dir.join(format!("{OUTPUT_STEM}.hsaco"));
+    let bindings_out = out_dir.join(format!("{OUTPUT_STEM}.bindings.rs"));
+    let metadata_out = out_dir.join(format!("{OUTPUT_STEM}.metadata.json"));
+    let manifest_out = out_dir.join(format!("{OUTPUT_STEM}.manifest.json"));
+
+    copy_artifact(hsaco, &hsaco_out, "hsaco");
+    copy_artifact(&bindings, &bindings_out, "bindings");
+    copy_artifact(&metadata, &metadata_out, "metadata");
+    copy_artifact(&manifest, &manifest_out, "manifest");
+
+    println!("cargo:rustc-env=ROCM_OXIDE_DEVICE_HSACO={}", hsaco_out.display());
+    println!("cargo:rustc-env=ROCM_OXIDE_DEVICE_BINDINGS={}", bindings_out.display());
+    println!("cargo:rustc-env=ROCM_OXIDE_DEVICE_METADATA={}", metadata_out.display());
+    println!("cargo:rustc-env=ROCM_OXIDE_DEVICE_MANIFEST={}", manifest_out.display());
+}
+
+fn build_tool_command() -> Command {
+    if let Some(path) = env::var_os("ROCM_OXIDE_BUILD").filter(|value| !value.is_empty()) {
+        return Command::new(path);
+    }
+
+    let source_manifest = Path::new(RUNTIME_PATH).join("tools/rocm-oxide-build/Cargo.toml");
+    if source_manifest.is_file() {
+        let cargo = env::var_os("CARGO").unwrap_or_else(|| "cargo".into());
+        let mut command = Command::new(cargo);
+        command
+            .arg("run")
+            .arg("--quiet")
+            .arg("--manifest-path")
+            .arg(source_manifest)
+            .arg("--");
+        return command;
+    }
+
+    Command::new("rocm-oxide-build")
+}
+
+fn copy_artifact(from: &Path, to: &Path, label: &str) {
+    if !from.is_file() {
+        panic!("missing generated {label}: {}", from.display());
+    }
+    fs::copy(from, to)
+        .unwrap_or_else(|err| panic!("failed to copy generated {label} {} to {}: {err}", from.display(), to.display()));
+}
+"#
+    .replace("__ROCM_OXIDE_RUNTIME_PATH__", &runtime_path)
 }
 
 fn run_status(mut command: Command, label: &str) -> Result<(), String> {

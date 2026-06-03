@@ -61,14 +61,46 @@ The quick profile covers:
   device capabilities, optional-library availability, known-profile deviations,
   and skipped-test reasons;
 - `performance_probe` JSON output;
-- one headless `spectral_lattice` visual artifact.
+- one headless `spectral_lattice` visual artifact;
+- artifact audit coverage that checks the generated validation profile,
+  performance probe, embedded compiler metadata, linked object provenance,
+  resource rows, compiler release manifest, and headless PNG output agree with
+  each other;
+- `release_manifest.json`, a production-readiness manifest that hashes the
+  validation profile, performance probe, compiler manifest, and visual
+  artifacts for the run.
 
 The full profile adds the heavier examples and all headless `spectral_lattice`
-mode artifacts, including the 4K path.
+mode artifacts, including the 4K path. The artifact audit also checks those full
+profile PNGs are present and non-empty.
 
 GPU profiles run Rust tests with one test thread. HIP, COMGR, graph, VMM, and
 optional-library tests can share process-wide runtime state, and production
 verification should avoid relying on default test parallelism.
+
+The artifact audit is intentionally stricter than a smoke test:
+
+- `validation_profile.json`, `performance_probe.json`, and generated compiler
+  metadata must report the same `gfx...` architecture;
+- the selected architecture must match a checked release baseline and have no
+  known-profile deviations;
+- the performance-probe metadata path, metadata HSACO path, linked LLVM IR path,
+  and linked object path must exist and be non-empty;
+- the generated compiler release manifest next to the metadata must record tool
+  paths and versions, artifact paths, sizes, hashes, linked object provenance,
+  and per-kernel resource rows that match the generated metadata;
+- `link.objects[*].kernels` must match the generated metadata `kernels[*].name`
+  set, so link-graph drift cannot silently pass;
+- every sampled performance kernel must have resource and occupancy facts, those
+  resource facts must match the generated metadata row for the same kernel, and
+  SGPR/VGPR spills or dynamic stack use fail the gate;
+- headless visual artifacts must be valid PNG files.
+
+The audit does not yet prove bit-for-bit reproducibility across repeated builds
+or compare timing numbers against a checked historical baseline. Those still
+need checked package inputs, multi-architecture release bundles, and
+per-architecture performance thresholds before they can be enforced without
+blocking legitimate ROCm/compiler variance.
 
 ## Performance And Demo Safety
 

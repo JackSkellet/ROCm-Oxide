@@ -12,6 +12,7 @@ pub enum Error {
     InvalidLaunch(String),
     Async(String),
     Library(String),
+    Artifact(String),
     NoDevice,
     MissingArchitecture,
 }
@@ -43,6 +44,9 @@ impl fmt::Display for Error {
             Self::InvalidLaunch(message) => write!(f, "invalid kernel launch: {message}"),
             Self::Async(message) => write!(f, "async device operation failed: {message}"),
             Self::Library(message) => write!(f, "ROCm library interop failed: {message}"),
+            Self::Artifact(message) => {
+                write!(f, "generated device artifact failed validation: {message}")
+            }
             Self::NoDevice => write!(f, "no HIP devices are visible"),
             Self::MissingArchitecture => write!(
                 f,
@@ -108,6 +112,14 @@ impl Device {
 
     pub fn arch(&self) -> &str {
         &self.arch
+    }
+
+    pub fn validate_generated_artifacts(
+        &self,
+        metadata_json: &str,
+        resources: &[KernelResource],
+    ) -> Result<()> {
+        validate_generated_artifact_metadata(&self.arch, metadata_json, resources)
     }
 
     pub fn limits(&self) -> DeviceLimits {
@@ -510,6 +522,137 @@ impl KernelResource {
             wavefront_size: self.wavefront_size,
         }
     }
+
+    pub const fn has_complete_code_object_metadata(self) -> bool {
+        self.kernarg_segment_size.is_some()
+            && self.kernarg_segment_align.is_some()
+            && self.max_flat_workgroup_size.is_some()
+            && self.group_segment_fixed_size.is_some()
+            && self.private_segment_fixed_size.is_some()
+            && self.sgpr_count.is_some()
+            && self.vgpr_count.is_some()
+            && self.sgpr_spill_count.is_some()
+            && self.vgpr_spill_count.is_some()
+            && self.wavefront_size.is_some()
+            && self.uses_dynamic_stack.is_some()
+    }
+}
+
+pub fn validate_generated_artifact_metadata(
+    expected_arch: &str,
+    metadata_json: &str,
+    resources: &[KernelResource],
+) -> Result<()> {
+    if resources.is_empty() {
+        return Err(Error::Artifact(
+            "generated kernel resource table is empty".to_string(),
+        ));
+    }
+
+    let target = json_string_field(metadata_json, "target")
+        .ok_or_else(|| Error::Artifact("metadata JSON is missing `target`".to_string()))?;
+    if target != "amdgcn-amd-amdhsa" {
+        return Err(Error::Artifact(format!(
+            "metadata target `{target}` does not match amdgcn-amd-amdhsa"
+        )));
+    }
+
+    let arch = json_string_field(metadata_json, "arch")
+        .ok_or_else(|| Error::Artifact("metadata JSON is missing `arch`".to_string()))?;
+    if arch != expected_arch {
+        return Err(Error::Artifact(format!(
+            "metadata arch `{arch}` does not match current device arch `{expected_arch}`"
+        )));
+    }
+
+    if !metadata_json.contains("\"kernels\"") {
+        return Err(Error::Artifact(
+            "metadata JSON is missing the generated kernel list".to_string(),
+        ));
+    }
+    if !metadata_json.contains("\"link\"") || !metadata_json.contains("\"objects\"") {
+        return Err(Error::Artifact(
+            "metadata JSON is missing linked-object provenance".to_string(),
+        ));
+    }
+
+    let mut names = std::collections::BTreeSet::new();
+    for resource in resources {
+        if resource.name.is_empty() {
+            return Err(Error::Artifact(
+                "generated kernel resource has an empty name".to_string(),
+            ));
+        }
+        if !names.insert(resource.name) {
+            return Err(Error::Artifact(format!(
+                "duplicate generated kernel resource `{}`",
+                resource.name
+            )));
+        }
+        if !resource.has_complete_code_object_metadata() {
+            return Err(Error::Artifact(format!(
+                "generated kernel resource `{}` is missing linked code-object metadata",
+                resource.name
+            )));
+        }
+        if !metadata_has_named_kernel(metadata_json, resource.name) {
+            return Err(Error::Artifact(format!(
+                "metadata JSON does not contain generated kernel `{}`",
+                resource.name
+            )));
+        }
+    }
+
+    Ok(())
+}
+
+fn metadata_has_named_kernel(metadata_json: &str, name: &str) -> bool {
+    let quoted = format!("\"name\": \"{}\"", json_escape_string(name));
+    metadata_json.contains(&quoted)
+}
+
+fn json_string_field(text: &str, key: &str) -> Option<String> {
+    let needle = format!("\"{key}\":");
+    let index = text.find(&needle)?;
+    let rest = text[index + needle.len()..].trim_start();
+    let rest = rest.strip_prefix('"')?;
+    let mut value = String::new();
+    let mut escaped = false;
+    for ch in rest.chars() {
+        if escaped {
+            value.push(match ch {
+                '"' => '"',
+                '\\' => '\\',
+                'n' => '\n',
+                'r' => '\r',
+                't' => '\t',
+                other => other,
+            });
+            escaped = false;
+        } else if ch == '\\' {
+            escaped = true;
+        } else if ch == '"' {
+            return Some(value);
+        } else {
+            value.push(ch);
+        }
+    }
+    None
+}
+
+fn json_escape_string(value: &str) -> String {
+    let mut out = String::new();
+    for ch in value.chars() {
+        match ch {
+            '"' => out.push_str("\\\""),
+            '\\' => out.push_str("\\\\"),
+            '\n' => out.push_str("\\n"),
+            '\r' => out.push_str("\\r"),
+            '\t' => out.push_str("\\t"),
+            other => out.push(other),
+        }
+    }
+    out
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -1506,7 +1649,8 @@ fn rocminfo_path() -> PathBuf {
 mod tests {
     use super::{
         AtomicMemoryKind, Device, DeviceLimits, DeviceProperties, Dim3,
-        HostReferenceCaptureVisibility, KernelMetadata, LaunchConfig, SystemScopeAtomicVisibility,
+        HostReferenceCaptureVisibility, KernelMetadata, KernelResource, LaunchConfig,
+        SystemScopeAtomicVisibility, validate_generated_artifact_metadata,
     };
     use crate::hip::{DeviceBuffer, ManagedMemoryKind, Stream};
 
@@ -1532,6 +1676,86 @@ mod tests {
             clock_instruction_rate_khz: 100_000,
             wall_clock_rate_khz: 100_000,
         }
+    }
+
+    fn complete_resource(name: &'static str) -> KernelResource {
+        KernelResource {
+            name,
+            kernarg_segment_size: Some(64),
+            kernarg_segment_align: Some(8),
+            max_flat_workgroup_size: Some(1024),
+            group_segment_fixed_size: Some(0),
+            private_segment_fixed_size: Some(0),
+            sgpr_count: Some(16),
+            vgpr_count: Some(8),
+            sgpr_spill_count: Some(0),
+            vgpr_spill_count: Some(0),
+            wavefront_size: Some(32),
+            uses_dynamic_shared_mem: false,
+            uses_dynamic_stack: Some(false),
+        }
+    }
+
+    fn generated_metadata_json(arch: &str) -> String {
+        format!(
+            r#"{{
+  "target": "amdgcn-amd-amdhsa",
+  "arch": "{arch}",
+  "link": {{ "objects": [{{ "kernels": ["vector_add"] }}] }},
+  "kernels": [{{ "name": "vector_add" }}]
+}}"#
+        )
+    }
+
+    #[test]
+    fn generated_artifact_metadata_accepts_matching_resources() {
+        let metadata = generated_metadata_json("gfx1100");
+        validate_generated_artifact_metadata(
+            "gfx1100",
+            &metadata,
+            &[complete_resource("vector_add")],
+        )
+        .expect("matching generated artifacts should validate");
+    }
+
+    #[test]
+    fn generated_artifact_metadata_rejects_wrong_arch() {
+        let metadata = generated_metadata_json("gfx1201");
+        let err = validate_generated_artifact_metadata(
+            "gfx1100",
+            &metadata,
+            &[complete_resource("vector_add")],
+        )
+        .expect_err("arch mismatch should fail");
+        assert!(
+            err.to_string()
+                .contains("does not match current device arch")
+        );
+    }
+
+    #[test]
+    fn generated_artifact_metadata_rejects_missing_kernel_resource_row() {
+        let metadata = generated_metadata_json("gfx1100");
+        let err = validate_generated_artifact_metadata(
+            "gfx1100",
+            &metadata,
+            &[complete_resource("missing_kernel")],
+        )
+        .expect_err("metadata should name every generated resource");
+        assert!(err.to_string().contains("missing_kernel"));
+    }
+
+    #[test]
+    fn generated_artifact_metadata_rejects_incomplete_code_object_resource() {
+        let metadata = generated_metadata_json("gfx1100");
+        let mut resource = complete_resource("vector_add");
+        resource.vgpr_count = None;
+        let err = validate_generated_artifact_metadata("gfx1100", &metadata, &[resource])
+            .expect_err("incomplete code-object metadata should fail");
+        assert!(
+            err.to_string()
+                .contains("missing linked code-object metadata")
+        );
     }
 
     #[test]

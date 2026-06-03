@@ -288,6 +288,15 @@ fn new_project_scaffold_allows_default_pipeline() {
     );
     assert!(app.join("device-spike/Cargo.toml").is_file());
     assert!(app.join("device-spike/src/lib.rs").is_file());
+    assert!(app.join("build.rs").is_file());
+    let build_rs = fs::read_to_string(app.join("build.rs")).expect("build script should be readable");
+    assert!(build_rs.contains("rocm-oxide-build"));
+    assert!(build_rs.contains("ROCM_OXIDE_DEVICE_MANIFEST"));
+    assert!(build_rs.contains("--output-stem"));
+    let host_main =
+        fs::read_to_string(app.join("src/main.rs")).expect("host main should be readable");
+    assert!(host_main.contains("include!(env!(\"ROCM_OXIDE_DEVICE_BINDINGS\"))"));
+    assert!(host_main.contains("DeviceKernels::load_embedded"));
     fs::create_dir_all(app.join("src/nested")).expect("failed to create nested app directory");
 
     let fake_build = app.join("fake-rocm-oxide-build");

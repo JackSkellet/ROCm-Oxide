@@ -58,23 +58,23 @@ fn main() {
         .expect("rocm-oxide-build output should end in .hsaco");
     let bindings = format!("{stem}.bindings.rs");
     let metadata = format!("{stem}.metadata.json");
-    assert!(
-        Path::new(&bindings).is_file(),
-        "missing generated bindings: {bindings}"
-    );
-    assert!(
-        Path::new(&metadata).is_file(),
-        "missing generated metadata: {metadata}"
-    );
+    let manifest = format!("{stem}.manifest.json");
+    let hsaco = Path::new(hsaco);
+    let bindings = Path::new(&bindings);
+    let metadata = Path::new(&metadata);
+    let manifest = Path::new(&manifest);
+    validate_generated_artifacts(hsaco, bindings, metadata, manifest);
 
     let out_dir = PathBuf::from(env::var_os("OUT_DIR").expect("OUT_DIR is not set"));
     let hsaco_out = out_dir.join("rocm_oxide_device_spike.hsaco");
     let bindings_out = out_dir.join("rocm_oxide_device_spike.bindings.rs");
     let metadata_out = out_dir.join("rocm_oxide_device_spike.metadata.json");
+    let manifest_out = out_dir.join("rocm_oxide_device_spike.manifest.json");
 
     fs::copy(hsaco, &hsaco_out).expect("failed to copy hsaco into OUT_DIR");
-    fs::copy(&bindings, &bindings_out).expect("failed to copy bindings into OUT_DIR");
-    fs::copy(&metadata, &metadata_out).expect("failed to copy metadata into OUT_DIR");
+    fs::copy(bindings, &bindings_out).expect("failed to copy bindings into OUT_DIR");
+    fs::copy(metadata, &metadata_out).expect("failed to copy metadata into OUT_DIR");
+    fs::copy(manifest, &manifest_out).expect("failed to copy release manifest into OUT_DIR");
 
     println!(
         "cargo:rustc-env=ROCM_OXIDE_DEVICE_HSACO={}",
@@ -88,6 +88,215 @@ fn main() {
         "cargo:rustc-env=ROCM_OXIDE_DEVICE_METADATA={}",
         metadata_out.display()
     );
+    println!(
+        "cargo:rustc-env=ROCM_OXIDE_DEVICE_MANIFEST={}",
+        manifest_out.display()
+    );
+}
+
+fn validate_generated_artifacts(hsaco: &Path, bindings: &Path, metadata: &Path, manifest: &Path) {
+    assert!(
+        hsaco.is_file(),
+        "missing generated hsaco: {}",
+        hsaco.display()
+    );
+    assert!(
+        bindings.is_file(),
+        "missing generated bindings: {}",
+        bindings.display()
+    );
+    assert!(
+        metadata.is_file(),
+        "missing generated metadata: {}",
+        metadata.display()
+    );
+    assert!(
+        manifest.is_file(),
+        "missing generated release manifest: {}",
+        manifest.display()
+    );
+
+    let metadata_text = fs::read_to_string(metadata).unwrap_or_else(|err| {
+        panic!(
+            "failed to read generated metadata {}: {err}",
+            metadata.display()
+        )
+    });
+    let target = find_json_string(&metadata_text, "target").unwrap_or_else(|| {
+        panic!(
+            "generated metadata {} is missing `target`",
+            metadata.display()
+        )
+    });
+    assert_eq!(
+        target,
+        "amdgcn-amd-amdhsa",
+        "generated metadata {} targets `{target}`, expected amdgcn-amd-amdhsa",
+        metadata.display()
+    );
+
+    let arch = find_json_string(&metadata_text, "arch").unwrap_or_else(|| {
+        panic!(
+            "generated metadata {} is missing `arch`",
+            metadata.display()
+        )
+    });
+    assert!(
+        arch.starts_with("gfx"),
+        "generated metadata {} has invalid ROCm arch `{arch}`",
+        metadata.display()
+    );
+    if let Some(expected_arch) = env::var("ROCM_OXIDE_ARCH")
+        .ok()
+        .filter(|value| !value.is_empty())
+    {
+        assert_eq!(
+            arch,
+            expected_arch,
+            "generated metadata {} arch `{arch}` does not match ROCM_OXIDE_ARCH `{expected_arch}`",
+            metadata.display()
+        );
+    }
+
+    let metadata_hsaco = find_json_string(&metadata_text, "hsaco").unwrap_or_else(|| {
+        panic!(
+            "generated metadata {} is missing `hsaco`",
+            metadata.display()
+        )
+    });
+    let metadata_hsaco = PathBuf::from(metadata_hsaco);
+    let expected_hsaco = fs::canonicalize(hsaco).unwrap_or_else(|err| {
+        panic!(
+            "failed to canonicalize generated hsaco {}: {err}",
+            hsaco.display()
+        )
+    });
+    let metadata_hsaco = fs::canonicalize(&metadata_hsaco).unwrap_or_else(|err| {
+        panic!(
+            "generated metadata {} points at missing hsaco {}: {err}",
+            metadata.display(),
+            metadata_hsaco.display()
+        )
+    });
+    assert_eq!(
+        metadata_hsaco,
+        expected_hsaco,
+        "generated metadata {} points at {}, but rocm-oxide-build returned {}",
+        metadata.display(),
+        metadata_hsaco.display(),
+        expected_hsaco.display()
+    );
+
+    assert!(
+        metadata_text.contains("\"link\"") && metadata_text.contains("\"objects\""),
+        "generated metadata {} is missing link-object provenance",
+        metadata.display()
+    );
+    assert!(
+        metadata_text.contains("\"kernels\"") && metadata_text.contains("\"name\""),
+        "generated metadata {} does not list generated kernels",
+        metadata.display()
+    );
+
+    let manifest_text = fs::read_to_string(manifest).unwrap_or_else(|err| {
+        panic!(
+            "failed to read generated release manifest {}: {err}",
+            manifest.display()
+        )
+    });
+    let manifest_format = find_json_string(&manifest_text, "format").unwrap_or_else(|| {
+        panic!(
+            "generated release manifest {} is missing `format`",
+            manifest.display()
+        )
+    });
+    assert_eq!(
+        manifest_format,
+        "rocm-oxide-release-manifest-v1",
+        "generated release manifest {} has unexpected format `{manifest_format}`",
+        manifest.display()
+    );
+    let manifest_target = find_json_string(&manifest_text, "target").unwrap_or_else(|| {
+        panic!(
+            "generated release manifest {} is missing `target`",
+            manifest.display()
+        )
+    });
+    assert_eq!(
+        manifest_target,
+        target,
+        "generated release manifest {} target `{manifest_target}` does not match metadata target `{target}`",
+        manifest.display()
+    );
+    let manifest_arch = find_json_string(&manifest_text, "arch").unwrap_or_else(|| {
+        panic!(
+            "generated release manifest {} is missing `arch`",
+            manifest.display()
+        )
+    });
+    assert_eq!(
+        manifest_arch,
+        arch,
+        "generated release manifest {} arch `{manifest_arch}` does not match metadata arch `{arch}`",
+        manifest.display()
+    );
+    for artifact in [hsaco, bindings, metadata] {
+        let artifact_path = artifact.display().to_string();
+        assert!(
+            manifest_text.contains(&artifact_path),
+            "generated release manifest {} does not include artifact {}",
+            manifest.display(),
+            artifact.display()
+        );
+    }
+    assert_same_stem(hsaco, bindings, "bindings");
+    assert_same_stem(hsaco, metadata, "metadata");
+    assert_same_stem(hsaco, manifest, "release manifest");
+}
+
+fn assert_same_stem(hsaco: &Path, artifact: &Path, label: &str) {
+    let hsaco_stem = hsaco
+        .file_stem()
+        .and_then(|stem| stem.to_str())
+        .expect("generated hsaco filename must be valid UTF-8");
+    let artifact_name = artifact
+        .file_name()
+        .and_then(|name| name.to_str())
+        .unwrap_or_else(|| panic!("generated {label} filename must be valid UTF-8"));
+    assert!(
+        artifact_name.starts_with(hsaco_stem),
+        "generated {label} {} does not match hsaco stem `{hsaco_stem}`",
+        artifact.display()
+    );
+}
+
+fn find_json_string(text: &str, key: &str) -> Option<String> {
+    let needle = format!("\"{key}\":");
+    let index = text.find(&needle)?;
+    let rest = text[index + needle.len()..].trim_start();
+    let rest = rest.strip_prefix('"')?;
+    let mut value = String::new();
+    let mut escaped = false;
+    for ch in rest.chars() {
+        if escaped {
+            value.push(match ch {
+                '"' => '"',
+                '\\' => '\\',
+                'n' => '\n',
+                'r' => '\r',
+                't' => '\t',
+                other => other,
+            });
+            escaped = false;
+        } else if ch == '\\' {
+            escaped = true;
+        } else if ch == '"' {
+            return Some(value);
+        } else {
+            value.push(ch);
+        }
+    }
+    None
 }
 
 fn rocm_path() -> PathBuf {
