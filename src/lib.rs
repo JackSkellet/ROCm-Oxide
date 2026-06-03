@@ -90,10 +90,17 @@ pub use runtime::{
 ///
 /// # Safety
 ///
-/// The macro is safe to call but launches GPU code that is inherently `unsafe`:
-/// kernel arguments are passed as raw pointers through the HIP runtime. You are
-/// responsible for ensuring that:
-/// - The argument types match the kernel signature.
+/// `launch!` expands to a call to [`Kernel::launch_raw`], which is `unsafe`.
+/// The macro invocation must be wrapped in an `unsafe` block:
+///
+/// ```rust,ignore
+/// unsafe {
+///     rocm_oxide::launch!(kernel, config, arg0, arg1, n as u64)?;
+/// }
+/// ```
+///
+/// You are responsible for ensuring that:
+/// - The argument types match the kernel signature exactly.
 /// - Pointer arguments point to valid, live device allocations.
 /// - Output buffers are not aliased unless the kernel explicitly handles that.
 #[macro_export]

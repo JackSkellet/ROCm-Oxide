@@ -1816,25 +1816,26 @@ impl Drop for Event {
 /// # Allocation
 ///
 /// ```rust,ignore
-/// // Zeroed device buffer of 1024 f32 values
-/// let buf = DeviceBuffer::<f32>::new_zeroed(1024)?;
+/// // Uninitialized device buffer of 1024 f32 values (contents undefined until kernel writes)
+/// let buf = DeviceBuffer::<f32>::new(1024)?;
 ///
-/// // Copy from a host slice
+/// // Allocate and copy from a host slice in one step
 /// let buf = DeviceBuffer::from_slice(&[1.0f32, 2.0, 3.0])?;
 /// ```
+///
+/// `DeviceBuffer` does not zero-initialize its allocation. Use `from_slice` to
+/// start from a known host value, or write to the buffer via a kernel before
+/// reading it back.
 ///
 /// # Copying data
 ///
 /// ```rust,ignore
 /// // Device → host
 /// let host_vec: Vec<f32> = buf.copy_to_vec()?;
-///
-/// // Host → device (overwrites existing buffer)
-/// buf.copy_from_slice(&host_data)?;
 /// ```
 ///
-/// Requires `T: DevicePod` for host-accessible copies. Zero-copy kernel
-/// access only requires `T: Sized`.
+/// Requires `T: Copy + Default` for `copy_to_vec` and `T: Copy` for `from_slice`.
+/// Zero-copy kernel access only requires `T: Sized`.
 pub struct DeviceBuffer<T> {
     ptr: *mut T,
     len: usize,

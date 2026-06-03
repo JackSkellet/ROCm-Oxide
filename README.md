@@ -12,7 +12,80 @@ ROCm-Oxide is an active project that combines:
 
 ## Start here
 
-If you are new to the project, follow these steps:
+Two paths. Pick one.
+
+### Path 1 — Quick smoke test (HIPRTC runtime compilation)
+
+Compiles an inline HIP C++ kernel at runtime. No build pipeline, no nightly
+`rust-src`, no extra tools — just a ROCm GPU and the Rust toolchain:
+
+```sh
+cargo run --example hello_gpu
+```
+
+Expected output:
+
+```
+hello_gpu: device 0 (gfx1100)
+hello_gpu: 1048576 elements verified — vector add passed
+```
+
+**Annotated walkthrough →** [docs/hello_gpu.md](docs/hello_gpu.md)
+
+---
+
+### Path 2 — Main SDK path (Rust-authored GPU kernel)
+
+Writes the kernel in Rust, compiles it to a `.hsaco` code object at build time,
+and launches it with automatically generated typed host bindings.
+
+This is the production vision: GPU code reviewed by `cargo`, typed, testable,
+no HIP C++ required.
+
+```sh
+cargo run --example hello_gpu_rust
+```
+
+The first build takes 20–60 s while the device crate compiles. Subsequent builds
+are incremental and fast.
+
+Expected output:
+
+```
+hello_gpu_rust: device 0 (gfx1100)
+hello_gpu_rust: 1048576 elements verified — Rust-authored kernel passed on gfx1100
+```
+
+**Annotated walkthrough →** [docs/hello_gpu_rust.md](docs/hello_gpu_rust.md)
+
+---
+
+### Troubleshooting
+
+| Symptom | Fix |
+|---------|-----|
+| `can't find crate for 'core'` | `rustup component add rust-src --toolchain nightly` |
+| `llc: command not found` | Add `/opt/rocm/bin` to `PATH` (or set `ROCM_PATH`) |
+| No GPU detected | `sudo usermod -aG render,video $USER`, then log out and back in |
+| Wrong GPU architecture | `ROCM_OXIDE_ARCH=gfx1100 cargo run --example hello_gpu_rust` |
+| Stale HSACO after GPU change | `cargo clean ; cargo run --example hello_gpu_rust` |
+| Slow first build (expected) | The device crate compiles with `-Z build-std=core`; caching kicks in on rebuild |
+
+For a full prerequisites checklist, first-project scaffold, and common error
+messages, see [docs/getting-started.md](docs/getting-started.md).
+
+---
+
+### Full new-project workflow
+
+The `cargo rocm-oxide` subcommand automates project scaffolding, health checks,
+and build verification. Install it once from within this workspace:
+
+```sh
+cargo install --path tools/cargo-rocm-oxide
+```
+
+Then:
 
 **1. Check prerequisites**
 
@@ -99,7 +172,34 @@ ROCM_OXIDE_ARCH=gfx1201 cargo run
 
 If unset, ROCm-Oxide tries to detect the first `gfx*` target via `/opt/rocm/bin/rocminfo`.
 
-### Run a simple example
+### Run the "Hello GPU" example
+
+```bash
+cargo run --example hello_gpu
+```
+
+This is the recommended first example. It compiles an inline HIP C++ kernel at
+runtime, runs a vector add on the GPU, and verifies the result. No separate
+build step needed beyond ROCm and nightly Rust.
+
+See [docs/hello_gpu.md](docs/hello_gpu.md) for a full walkthrough.
+
+### Run the default demo
+
+```bash
+cargo run
+```
+
+### Force a target GPU architecture
+
+```bash
+ROCM_OXIDE_ARCH=gfx1100 cargo run
+ROCM_OXIDE_ARCH=gfx1201 cargo run
+```
+
+If unset, ROCm-Oxide tries to detect the first `gfx*` target via `/opt/rocm/bin/rocminfo`.
+
+### Run a simple HIP C++ example
 
 ```bash
 cargo run --example vector_add

@@ -47,6 +47,15 @@ project, so `cargo` picks it up automatically inside the workspace.
 
 ---
 
+## Install the `cargo rocm-oxide` tool
+
+The `cargo rocm-oxide` subcommand lives in this workspace. Build and install it
+before using any `cargo rocm-oxide` commands:
+
+```sh
+cargo install --path tools/cargo-rocm-oxide
+```
+
 ## Quick health check
 
 Run the built-in doctor command to verify your environment before writing any code:

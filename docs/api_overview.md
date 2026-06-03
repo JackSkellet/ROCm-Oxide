@@ -276,9 +276,10 @@ Grid/block/shared-memory specification. Use the convenience constructors:
 
 ### `DeviceBuffer<T>`
 
-GPU-side allocation. Allocate with `DeviceBuffer::new_zeroed(n)` or
-`DeviceBuffer::from_slice(&[...])`. Copy to/from host with `copy_to_vec()` /
-`copy_from_slice()`. Requires `T: DevicePod` for host-accessible copies.
+GPU-side allocation. Allocate with `DeviceBuffer::new(n)` (uninitialized) or
+`DeviceBuffer::from_slice(&[...])` (copies from host). Copy results back to the
+host with `copy_to_vec()`. Requires `T: Copy` for `from_slice` and
+`T: Copy + Default` for `copy_to_vec`.
 
 ### `ManagedBuffer<T>`
 
@@ -311,7 +312,8 @@ The `examples/` directory contains end-to-end programs:
 
 | Example | Demonstrates |
 |---------|-------------|
-| `vector_add.rs` | Simplest 1-D HIP kernel (C++ via HIPRTC) |
+| `hello_gpu.rs` | **Start here**: minimal HIPRTC vector add, end-to-end lifecycle |
+| `vector_add.rs` | Simple 1-D HIP kernel (C++ via HIPRTC) |
 | `rust_device_vector_add.rs` | Same kernel written in Rust |
 | `rust_device_add_one.rs` | Minimal Rust kernel, no slice types |
 | `module_global.rs` | `#[device_global]` and `Module::global` |
