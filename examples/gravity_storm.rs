@@ -948,7 +948,7 @@ impl GravityStorm {
             &mut p_maxsp as *mut _ as *mut c_void,
         ];
 
-        let grid_x = (self.n_particles as u32 + BLOCK_SIZE - 1) / BLOCK_SIZE;
+        let grid_x = (self.n_particles as u32).div_ceil(BLOCK_SIZE);
         unsafe {
             self.hip_kernel.launch_on_stream(
                 (grid_x, 1, 1),
