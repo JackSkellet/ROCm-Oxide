@@ -301,3 +301,34 @@ Local probes:
   - [x] avoid full-frame VRAM-to-host readback every frame for GL-backed 1440p and 4K interactive runs
   - [x] keep the existing CPU readback path for headless PNG export and simple compatibility smoke tests
   - [x] fold the CPU-drawn overlay controls into the GL path or replace them with GPU/textured controls
+
+## Vulkan 1.4 API Coverage (Planned)
+
+The GPU (AMD RX 7900 XT, RADV NAVI31 Mesa 26.1.1) reports **Vulkan 1.4.348**.
+The current dependency `ash = "0.38"` covers Vulkan **1.3.281** only.
+
+Features promoted to Vulkan 1.4 core that are inaccessible with the current
+`ash` version:
+
+| Feature / Extension              | Notes                                                    |
+|----------------------------------|----------------------------------------------------------|
+| `VK_KHR_dynamic_rendering_local_read` | local-read attachments within a single render pass |
+| `VK_KHR_maintenance7`            | misc. alignment and portability improvements             |
+| `VK_KHR_push_descriptor`         | push descriptor sets without pool allocation             |
+| `VK_KHR_vertex_attribute_divisor`| per-instance attribute stepping rate                     |
+| `VK_EXT_host_image_copy`         | zero-copy CPU→GPU image uploads                          |
+| `VK_KHR_index_type_uint8`        | 8-bit index buffers                                      |
+| `VK_KHR_map_memory2`             | extended `vkMapMemory` with placement/flags              |
+| `VK_KHR_shader_subgroup_rotate`  | `subgroupRotate` SPIR-V capability                       |
+| `VK_KHR_shader_expect_assume`    | `OpExpectKHR` / `OpAssumeKHR` optimization hints         |
+| `VK_KHR_shader_float_controls2`  | fine-grained IEEE-754 float control per-instruction      |
+
+**Action items:**
+- [ ] Upgrade `ash` to a release that covers Vulkan 1.4+ (check crates.io
+      for `ash >= 0.39` or equivalent).
+- [ ] Re-expose the now-promoted features as Vulkan 1.4 core rather than
+      extension-loaded functions in `examples/gravity_storm.rs` and any future
+      Vulkan-backed visual demos.
+- [ ] Note: `VK_KHR_dynamic_rendering` (1.3 core) and
+      `VK_KHR_synchronization2` (1.3 core) are already used correctly in
+      `gravity_storm.rs`; only the 1.4-promoted set is blocked.
