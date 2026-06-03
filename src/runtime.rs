@@ -60,6 +60,45 @@ impl std::error::Error for Error {}
 
 pub type Result<T> = std::result::Result<T, Error>;
 
+/// A handle to an AMD GPU device.
+///
+/// `Device` is the entry point for all device interaction. It identifies a
+/// physical GPU by its HIP ordinal, detects the ISA architecture, and queries
+/// runtime limits. From a `Device` you load or compile GPU modules, allocate
+/// buffers, and create streams.
+///
+/// # Selecting a device
+///
+/// ```rust,ignore
+/// // Single-GPU: grab the first (and often only) device
+/// let device = Device::first()?;
+///
+/// // Multi-GPU: enumerate or pick by index
+/// let devices = Device::all()?;
+/// let device  = Device::at(1)?;
+/// ```
+///
+/// # Loading a Rust device kernel
+///
+/// The standard SDK path embeds the `.hsaco` file in the host binary via
+/// `build.rs`. Load it with the env-var path set by `rocm-oxide-build`:
+///
+/// ```rust,ignore
+/// let module = device.load_code_object_file(env!("ROCM_OXIDE_DEVICE_HSACO"))?;
+/// ```
+///
+/// Or use the generated `DeviceKernels::load_embedded` helper if you are using
+/// the `cargo rocm-oxide new` project template.
+///
+/// # Compiling HIP C++ at runtime (HIPRTC / COMGR)
+///
+/// ```rust,ignore
+/// let module = device.compile_hip_source(r#"
+///     extern "C" __global__ void noop() {}
+/// "#)?;
+/// ```
+///
+/// Results are cached by source + arch hash to avoid recompilation.
 #[derive(Debug, Clone)]
 pub struct Device {
     ordinal: i32,
@@ -68,14 +107,23 @@ pub struct Device {
 }
 
 impl Device {
+    /// Returns the number of visible HIP devices.
     pub fn count() -> Result<i32> {
         Ok(hip::device_count()?)
     }
 
+    /// Opens the first GPU (ordinal 0).
+    ///
+    /// Equivalent to `Device::at(0)`. Fails with [`Error::NoDevice`] if no
+    /// HIP-capable GPU is visible.
     pub fn first() -> Result<Self> {
         Self::at(0)
     }
 
+    /// Opens the GPU at the given HIP device ordinal.
+    ///
+    /// Ordinals start at 0. Use [`Device::count`] to discover how many devices
+    /// are available. Fails if `ordinal` is out of range.
     pub fn at(ordinal: i32) -> Result<Self> {
         let count = hip::device_count()?;
         if count == 0 {
@@ -97,6 +145,10 @@ impl Device {
         })
     }
 
+    /// Opens all visible GPU devices.
+    ///
+    /// Returns a `Vec<Device>` with one entry per HIP ordinal. Use for
+    /// multi-GPU workloads or to discover installed devices.
     pub fn all() -> Result<Vec<Self>> {
         let count = Self::count()?;
         let mut devices = Vec::with_capacity(count as usize);
@@ -130,6 +182,12 @@ impl Device {
         DeviceProperties::query(self.ordinal)
     }
 
+    /// Compile HIP C++ source to a loaded [`Module`] (HIPRTC backend).
+    ///
+    /// Results are cached by (arch, source hash) — repeated calls with the
+    /// same source are cheap. For the Rust kernel path prefer
+    /// [`load_code_object_file`](Device::load_code_object_file) with the
+    /// pre-built HSACO.
     pub fn compile_hip_source(&self, source: &str) -> Result<Module> {
         let code_object = hiprtc::compile_code_object_cached(source, &self.arch)?;
         self.load_code_object(code_object.as_ref())
@@ -179,6 +237,15 @@ impl Device {
         })
     }
 
+    /// Load a pre-built `.hsaco` code object from a file path.
+    ///
+    /// This is the standard loading method for Rust device kernels compiled
+    /// by `rocm-oxide-build`. `build.rs` emits the `ROCM_OXIDE_DEVICE_HSACO`
+    /// env var pointing to the compiled `.hsaco`:
+    ///
+    /// ```rust,ignore
+    /// let module = device.load_code_object_file(env!("ROCM_OXIDE_DEVICE_HSACO"))?;
+    /// ```
     pub fn load_code_object_file(&self, path: impl AsRef<Path>) -> Result<Module> {
         let code_object = std::fs::read(path)?;
         self.load_code_object(&code_object)
@@ -744,6 +811,31 @@ pub struct LaunchRecommendation {
     pub waves_per_multiprocessor: Option<u32>,
 }
 
+/// Kernel launch configuration: grid, block, and optional dynamic shared memory.
+///
+/// Most kernels use one of the convenience constructors rather than setting
+/// `grid` and `block` manually:
+///
+/// ```rust,ignore
+/// // 1-D launch with 256 threads per block (the default)
+/// let config = LaunchConfig::for_num_elems(n);
+///
+/// // 1-D launch with a custom block size
+/// let config = LaunchConfig::for_num_elems_with_block_size(n, 128);
+///
+/// // 2-D launch (e.g., image kernels)
+/// let config = LaunchConfig::for_2d(width, height, 16, 16);
+///
+/// // Manual control
+/// let config = LaunchConfig::new(Dim3::x(num_blocks), Dim3::x(256));
+/// ```
+///
+/// Set `shared_mem_bytes` for kernels that request dynamic LDS:
+///
+/// ```rust,ignore
+/// let mut config = LaunchConfig::for_num_elems(n);
+/// config.shared_mem_bytes = 4096;
+/// ```
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct LaunchConfig {
     pub grid: Dim3,
@@ -1159,6 +1251,29 @@ fn device_buffer_byte_range<T>(
     Ok(Some((start, end)))
 }
 
+/// A loaded GPU module (`.hsaco` code object).
+///
+/// Modules are produced by [`Device::compile_hip_source`],
+/// [`Device::compile_hip_source_comgr`], or
+/// [`Device::load_code_object_file`].
+///
+/// From a `Module` you obtain [`Kernel`] handles for individual functions and
+/// [`hip::Global`] handles for mutable device-global variables.
+///
+/// ```rust,ignore
+/// let device = Device::first()?;
+///
+/// // Load from a pre-built .hsaco file (Rust device kernel path)
+/// let module = device.load_code_object_file(env!("ROCM_OXIDE_DEVICE_HSACO"))?;
+/// let kernel = module.kernel(c"vector_add")?;
+///
+/// // Or compile HIP C++ source at runtime (HIPRTC path)
+/// let module = device.compile_hip_source(HIP_SOURCE)?;
+/// let kernel = module.kernel(c"vector_add")?;
+/// ```
+///
+/// `Module` owns the loaded code object; dropping it unloads the module. All
+/// `Kernel` and `Global` handles derived from this module must not outlive it.
 pub struct Module {
     module: hip::Module,
     limits: DeviceLimits,
@@ -1185,6 +1300,15 @@ impl Module {
         self.device_ordinal
     }
 
+    /// Look up a kernel function by name.
+    ///
+    /// The name must match the mangled (or `extern "C"`) symbol in the loaded
+    /// code object. Rust kernels compiled through `rocm-oxide-build` are always
+    /// `extern "C"` and use the function name exactly as written.
+    ///
+    /// ```rust,ignore
+    /// let kernel = module.kernel(c"vector_add")?;
+    /// ```
     pub fn kernel(&self, name: &CStr) -> Result<Kernel> {
         self.kernel_with_metadata(name, KernelMetadata::default())
     }
@@ -1203,6 +1327,28 @@ impl Module {
     }
 }
 
+    pub fn global<T>(&self, name: &CStr) -> Result<hip::Global<T>> {
+        Ok(self.module.global(name)?)
+    }
+}
+
+/// A handle to a single GPU kernel function, ready to be launched.
+///
+/// Obtain a `Kernel` from [`Module::kernel`]. The handle is `Send + Sync` and
+/// may be shared across threads; launching is always done through an exclusive
+/// [`Stream`].
+///
+/// Typically you do not call launch methods directly on `Kernel` — use the
+/// [`launch!`] macro which builds the argument list and calls
+/// [`Kernel::launch`] for you:
+///
+/// ```rust,ignore
+/// launch!(kernel, config, stream, &input_buf, &mut output_buf, n)?;
+/// ```
+///
+/// `Kernel` is inexpensive to clone or copy via [`Module::kernel`] again. It
+/// does **not** own any GPU memory; it is a function pointer from the loaded
+/// [`Module`].
 pub struct Kernel {
     function: hip::Function,
     limits: DeviceLimits,

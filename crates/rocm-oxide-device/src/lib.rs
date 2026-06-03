@@ -7,6 +7,50 @@
 
 //! GPU-side support APIs for ROCm-Oxide generated kernels.
 //!
+//! This crate is compiled for the `amdgcn-amd-amdhsa` target using nightly
+//! Rust with `-Z build-std=core`. It must be `#![no_std]`; heap allocation and
+//! standard-library types are not available in device code.
+//!
+//! # Quick start
+//!
+//! Add this crate as a dependency of your device crate together with
+//! `rocm-oxide-kernel`:
+//!
+//! ```toml
+//! # device-spike/Cargo.toml
+//! [dependencies]
+//! rocm-oxide-device = { path = "../crates/rocm-oxide-device" }
+//! rocm-oxide-kernel = { path = "../crates/rocm-oxide-kernel" }
+//! ```
+//!
+//! Then write kernels in `#![no_std]` Rust:
+//!
+//! ```rust,ignore
+//! #![no_std]
+//! use rocm_oxide_device as gpu;
+//! use rocm_oxide_kernel::kernel;
+//!
+//! // rocm-oxide: len(out)=n
+//! #[kernel]
+//! pub unsafe extern "C" fn fill_indices(out: gpu::DeviceSliceMut<u32>, n: usize) {
+//!     let i = gpu::global_id_x();
+//!     if i < n {
+//!         unsafe { out.write_unchecked(i, i as u32) };
+//!     }
+//! }
+//! ```
+//!
+//! # Module overview
+//!
+//! | Module | Contents |
+//! |--------|----------|
+//! | (root) | Thread/block/grid ID helpers, barriers, wavefront ops |
+//! | [`math`] | `no_std` scalar math: `sqrt`, `sin`, `cos`, `atan`, `min`, `max` |
+//! | [`vector`] | `Vec2f`, `Vec3f`, `F16x2` — `repr(C)` GPU vector types |
+//! | [`atomic`] | Scoped atomics: workgroup, device, and system scope |
+//! | [`cooperative`] | `ThreadBlock`, `Wavefront`, `StaticTile` — group operations |
+//! | [`debug`] | Trap, sleep, dispatch-id, program-counter helpers |
+//!
 //! # Safety
 //!
 //! Public `unsafe` functions in this crate are device-only escape hatches over
@@ -24,6 +68,24 @@ use core::intrinsics::gpu::{amdgpu_dispatch_ptr, gpu_launch_sized_workgroup_mem}
 use core::sync::atomic::Ordering;
 use core::{marker::PhantomData, ptr};
 
+/// Scalar math functions for `no_std` device code.
+///
+/// All functions are `#[inline(always)]` and compile down to single AMDGPU
+/// hardware instructions or short sequences where available. There is no
+/// dynamic dispatch, no allocation, and no `libm` dependency.
+///
+/// The `_f32` / `_f64` suffix always matches the argument and return type —
+/// there are no implicit widening conversions.
+///
+/// # Examples
+///
+/// ```rust,ignore
+/// use rocm_oxide_device::math;
+///
+/// let r = math::sqrt_f32(4.0);  // 2.0
+/// let s = math::sin_f32(0.0);   // 0.0
+/// let d = math::dot_f32([1.0, 0.0], [0.0, 1.0]); // use Vec2f::dot instead
+/// ```
 pub mod math {
     const PI_F32: f32 = core::f32::consts::PI;
     const FRAC_PI_2_F32: f32 = core::f32::consts::FRAC_PI_2;
@@ -267,6 +329,33 @@ pub mod math {
     }
 }
 
+/// `repr(C)` GPU vector types safe to pass through kernel ABI boundaries.
+///
+/// `Vec2f` and `Vec3f` are plain `f32` struct types with a stable C layout.
+/// They can be used as kernel arguments directly, embedded in `repr(C)` structs
+/// passed to kernels, and stored in device buffers.
+///
+/// `F16x2` packs two `f16` values into a single `u32` register for use with
+/// hardware 16-bit arithmetic instructions.
+///
+/// # Example
+///
+/// ```rust,ignore
+/// use rocm_oxide_device::{Vec3f, global_id_x};
+///
+/// #[kernel]
+/// pub unsafe extern "C" fn normalize_colors(
+///     out: gpu::DeviceSliceMut<Vec3f>,
+///     input: gpu::DeviceSlice<Vec3f>,
+///     n: usize,
+/// ) {
+///     let i = global_id_x();
+///     if i < n {
+///         let color = unsafe { input.read_unchecked(i) };
+///         unsafe { out.write_unchecked(i, color.normalize_or_zero()) };
+///     }
+/// }
+/// ```
 pub mod vector {
     use super::math;
     use core::ops::{Add, Div, Mul, Neg, Sub};
@@ -607,6 +696,18 @@ pub mod vector {
 
 pub use vector::{F16x2, Vec2f, Vec3f};
 
+/// Debug helpers for GPU code.
+///
+/// These are escape hatches for diagnosing kernel behavior. Most should not
+/// appear in production kernels; they exist to aid development and are no-ops
+/// or halt the wavefront in ways the runtime does not normally handle.
+///
+/// - [`debug::dispatch_id`] — monotonically increasing dispatch counter.
+/// - [`debug::program_counter`] — current instruction pointer (useful in crash logs).
+/// - [`debug::sleep`] — stall the wavefront for `COUNT` cycles.
+/// - [`debug::trap`] — halt the wavefront with a trap code; use for assertion failures.
+/// - [`debug::breakpoint`] — trap with code 2, recognized by ROCgdb.
+/// - [`debug::assert_or_trap`] — conditional trap, used by the [`gpu_assert!`] macro.
 pub mod debug {
     use super::amdgpu;
 
@@ -650,6 +751,48 @@ macro_rules! gpu_assert {
     };
 }
 
+/// Scoped atomics for GPU device code.
+///
+/// AMDGPU atomics carry a memory scope annotation that controls which
+/// processors observe the atomic operation. Three scopes are supported:
+///
+/// | Scope | Visibility |
+/// |-------|-----------|
+/// | `Workgroup` | Only threads in the same workgroup (block) |
+/// | `Device` | All workgroups on the same GPU |
+/// | `System` | GPU and CPU (requires hardware native-atomic support) |
+///
+/// Use the narrowest scope that is correct for your algorithm. Workgroup-scoped
+/// atomics are significantly faster than device-scoped atomics on RDNA/CDNA
+/// hardware.
+///
+/// # Using the scoped atomic wrappers
+///
+/// The typed wrappers (`WorkgroupAtomicU32`, `DeviceAtomicF32`, etc.) take a
+/// raw device pointer and emit the correct LLVM address-space fence metadata:
+///
+/// ```rust,ignore
+/// use rocm_oxide_device::atomic::{DeviceAtomicU32, AtomicOrdering};
+///
+/// // Inside a kernel, `counter` is a raw pointer to GPU-allocated memory
+/// unsafe {
+///     DeviceAtomicU32::from_ptr(counter).fetch_add(1, AtomicOrdering::Relaxed);
+/// }
+/// ```
+///
+/// # Scope-dispatched helpers
+///
+/// For cases where the scope is decided at runtime, use the `_scoped` free
+/// functions (`atomic_add_u32_scoped`, `atomic_store_f32_scoped`, etc.).
+///
+/// # System-scope atomics and host memory
+///
+/// System-scope atomics are only meaningful when the target memory is mapped
+/// coherent host memory or fine-grained managed memory **and** the device
+/// reports `host_native_atomic_supported`. Check
+/// `DeviceProperties::host_native_atomic_supported` on the host before relying
+/// on system-scope visibility. See `docs/host-memory-coherence.md` and
+/// `docs/atomic-scopes.md` for the full coherence rules.
 pub mod atomic {
     use core::marker::PhantomData;
     use core::sync::atomic::{AtomicI32, AtomicI64, AtomicU32, AtomicU64, Ordering};
@@ -1374,6 +1517,49 @@ pub use atomic::{
     WorkgroupAtomicU64,
 };
 
+/// Group-cooperative primitives: barriers, reductions, scans, and shuffles.
+///
+/// This module provides typed group handles that make wavefront- and
+/// workgroup-level operations explicit in kernel code.
+///
+/// # Group types
+///
+/// | Type | What it represents |
+/// |------|--------------------|
+/// | [`ThreadBlock`] | The full workgroup (all threads in the dispatch block) |
+/// | [`Wavefront`]   | The 64-lane wavefront the current thread belongs to |
+/// | [`StaticTile<N>`] | A sub-group of `N` consecutive threads within a wavefront |
+///
+/// Obtain handles with [`this_thread_block()`], [`this_wavefront()`], and
+/// [`tiled_partition::<N>()`].
+///
+/// # Example — workgroup reduction
+///
+/// ```rust,ignore
+/// use rocm_oxide_device::{cooperative::this_thread_block, global_id_x};
+///
+/// #[shared]
+/// pub static mut SCRATCH: [u32; 256] = [0; 256];
+///
+/// #[kernel]
+/// pub unsafe extern "C" fn sum_block(out: *mut u64, input: gpu::DeviceSlice<u32>, n: usize) {
+///     let group = this_thread_block();
+///     let i = global_id_x();
+///     let val = if i < n { unsafe { input.read_unchecked(i) } } else { 0 };
+///     let total = unsafe { group.reduce_add_u32(SCRATCH.as_mut_ptr(), val) };
+///     if group.thread_rank() == 0 {
+///         unsafe { out.write(total as u64) };
+///     }
+/// }
+/// ```
+///
+/// # Safety
+///
+/// All `reduce_*` and `scan_*` methods take a raw `*mut T` scratch pointer
+/// that must point to at least `block_dim_x() * block_dim_y() * block_dim_z()`
+/// elements of on-chip LDS. Declare a `#[shared]` static of the required size
+/// and pass its pointer. Every thread in the group must call the collective in
+/// the same control-flow order with no divergence.
 pub mod cooperative {
     use super::{
         ballot, block_dim_x, block_dim_y, block_dim_z, block_idx_x, block_idx_y, block_idx_z,
@@ -1840,96 +2026,143 @@ pub use cooperative::{
     StaticTile, ThreadBlock, Wavefront, this_thread_block, this_wavefront, tiled_partition,
 };
 
+/// X component of the thread index within the current workgroup (block).
+///
+/// Equivalent to `threadIdx.x` in CUDA / HIP C++. Range: `0 ..block_dim_x()`.
 #[inline(always)]
 pub fn thread_idx_x() -> u32 {
     amdgpu::workitem_id_x()
 }
 
+/// Y component of the thread index within the current workgroup.
+///
+/// Range: `0 ..block_dim_y()`.
 #[inline(always)]
 pub fn thread_idx_y() -> u32 {
     amdgpu::workitem_id_y()
 }
 
+/// Z component of the thread index within the current workgroup.
+///
+/// Range: `0 ..block_dim_z()`.
 #[inline(always)]
 pub fn thread_idx_z() -> u32 {
     amdgpu::workitem_id_z()
 }
 
+/// X component of the workgroup (block) index in the dispatch grid.
+///
+/// Equivalent to `blockIdx.x` in CUDA / HIP C++.
 #[inline(always)]
 pub fn block_idx_x() -> u32 {
     amdgpu::workgroup_id_x()
 }
 
+/// Y component of the workgroup index in the dispatch grid.
 #[inline(always)]
 pub fn block_idx_y() -> u32 {
     amdgpu::workgroup_id_y()
 }
 
+/// Z component of the workgroup index in the dispatch grid.
 #[inline(always)]
 pub fn block_idx_z() -> u32 {
     amdgpu::workgroup_id_z()
 }
 
+/// Number of threads per workgroup in the X dimension (from the dispatch packet).
 #[inline(always)]
 pub fn block_dim_x() -> u32 {
     dispatch_packet().workgroup_size_x as u32
 }
 
+/// Number of threads per workgroup in the Y dimension.
 #[inline(always)]
 pub fn block_dim_y() -> u32 {
     dispatch_packet().workgroup_size_y as u32
 }
 
+/// Number of threads per workgroup in the Z dimension.
 #[inline(always)]
 pub fn block_dim_z() -> u32 {
     dispatch_packet().workgroup_size_z as u32
 }
 
+/// Total number of workgroups in the X dimension of the dispatch grid.
 #[inline(always)]
 pub fn grid_dim_x() -> u32 {
     dispatch_packet().grid_size_x.div_ceil(block_dim_x())
 }
 
+/// Total number of workgroups in the Y dimension.
 #[inline(always)]
 pub fn grid_dim_y() -> u32 {
     dispatch_packet().grid_size_y.div_ceil(block_dim_y())
 }
 
+/// Total number of workgroups in the Z dimension.
 #[inline(always)]
 pub fn grid_dim_z() -> u32 {
     dispatch_packet().grid_size_z.div_ceil(block_dim_z())
 }
 
+/// Flattened global thread index along the X axis.
+///
+/// This is the standard 1-D kernel index pattern:
+///
+/// ```rust,ignore
+/// let i = gpu::global_id_x();
+/// if i < n {
+///     // process element i
+/// }
+/// ```
+///
+/// Equivalent to `blockIdx.x * blockDim.x + threadIdx.x` in CUDA/HIP C++.
 #[inline(always)]
 pub fn global_id_x() -> usize {
     (block_idx_x() as usize * block_dim_x() as usize) + thread_idx_x() as usize
 }
 
+/// Flattened global thread index along the Y axis.
 #[inline(always)]
 pub fn global_id_y() -> usize {
     (block_idx_y() as usize * block_dim_y() as usize) + thread_idx_y() as usize
 }
 
+/// Flattened global thread index along the Z axis.
 #[inline(always)]
 pub fn global_id_z() -> usize {
     (block_idx_z() as usize * block_dim_z() as usize) + thread_idx_z() as usize
 }
 
+/// Monotonically increasing dispatch counter for the current queue.
+///
+/// Useful for differentiating sequential kernel invocations in logs or debug output.
 #[inline(always)]
 pub fn dispatch_id() -> u64 {
     amdgpu::dispatch_id()
 }
 
+/// Wavefront width for the current GPU (64 on CDNA/GFX9, 32 on RDNA < gfx12).
+///
+/// Use this instead of hard-coding 64 to stay portable across AMD GPU families.
 #[inline(always)]
 pub fn wavefront_size() -> u32 {
     amdgpu::wavefrontsize()
 }
 
+/// Lane index within the current wavefront. Range: `0 ..wavefront_size()`.
+///
+/// This is the equivalent of `lane_id()` / `laneId()` in shader languages.
 #[inline(always)]
 pub fn lane_id() -> u32 {
     amdgpu::mbcnt_hi(u32::MAX, amdgpu::mbcnt_lo(u32::MAX, 0))
 }
 
+/// Index of the current wavefront within its parent workgroup.
+///
+/// Useful for identifying which wavefront owns a given LDS region when
+/// implementing intra-block collective operations manually.
 #[inline(always)]
 pub fn wave_id_in_workgroup() -> u32 {
     let xy_thread = thread_idx_x() + thread_idx_y() * block_dim_x();
@@ -1938,21 +2171,53 @@ pub fn wave_id_in_workgroup() -> u32 {
     linear_thread / wavefront_size()
 }
 
+/// Returns `true` only for the first active lane in the current wavefront.
+///
+/// Useful for electing a single lane to perform a write or reduce result
+/// without issuing a full ballot:
+///
+/// ```rust,ignore
+/// if gpu::is_first_lane() {
+///     // only one thread per wavefront reaches here
+/// }
+/// ```
 #[inline(always)]
 pub fn is_first_lane() -> bool {
     lane_id() == 0
 }
 
+/// Synchronize all threads in the current workgroup (block barrier).
+///
+/// No thread in the workgroup may advance past this point until every thread in
+/// the workgroup has reached it. This is the primary synchronization primitive
+/// for LDS communication between threads in the same block.
+///
+/// ```rust,ignore
+/// // Phase 1: each thread loads its element into LDS
+/// unsafe { TILE[gpu::thread_idx_x() as usize] = input_val };
+/// gpu::workgroup_barrier();
+/// // Phase 2: all threads read from TILE knowing Phase 1 is complete
+/// let neighbor = unsafe { TILE[(gpu::thread_idx_x() as usize + 1) % TILE_SIZE] };
+/// ```
 #[inline(always)]
 pub fn workgroup_barrier() {
     amdgpu::s_barrier()
 }
 
+/// Synchronize all lanes within the current wavefront (wave barrier).
+///
+/// Lighter than [`workgroup_barrier`]; only the 64 (or 32 on RDNA3+) lanes of
+/// the current wavefront are synchronized. Use for intra-wave shuffle sequences
+/// that need ordering but not a full block barrier.
 #[inline(always)]
 pub fn wave_barrier() {
     amdgpu::wave_barrier()
 }
 
+/// Return a bitmask where bit `i` is set if lane `i`'s `predicate` is `true`.
+///
+/// The mask is 64 bits wide; on wavefront-32 hardware the upper 32 bits are
+/// always zero.
 #[inline(always)]
 pub fn ballot(predicate: bool) -> u64 {
     amdgpu::ballot(predicate)
@@ -2747,6 +3012,29 @@ pub fn thread_index_x_witness() -> ThreadIndex {
     ThreadIndex::global_x()
 }
 
+/// A read-only view of a device buffer passed into a kernel.
+///
+/// `DeviceSlice<T>` is `#[repr(C)]` and carries a fat-pointer (address +
+/// length). The build tool generates host-side glue that converts a
+/// `&DeviceBuffer<T>` argument into the correct `(ptr, len)` pair before
+/// launch.
+///
+/// Prefer `DeviceSlice` over raw `*const T` in kernel signatures when possible;
+/// it makes the length contract explicit in both the kernel and the generated
+/// host bindings.
+///
+/// ```rust,ignore
+/// use rocm_oxide_device::{DeviceSlice, global_id_x};
+///
+/// #[kernel]
+/// pub unsafe extern "C" fn read_kernel(input: DeviceSlice<f32>, n: usize) {
+///     let i = global_id_x();
+///     if i < n {
+///         let val = unsafe { input.read_unchecked(i) };
+///         // use val ...
+///     }
+/// }
+/// ```
 #[repr(C)]
 #[derive(Clone, Copy)]
 pub struct DeviceSlice<T> {
@@ -2798,6 +3086,25 @@ impl<T> DeviceSlice<T> {
     }
 }
 
+/// A mutable view of a device buffer passed into a kernel.
+///
+/// `DeviceSliceMut<T>` is `#[repr(C)]` and carries a fat-pointer (address +
+/// length). The build tool generates host-side glue that converts a
+/// `&DeviceBuffer<T>` output argument into the correct `(ptr, len)` pair.
+///
+/// Use `write_unchecked` after a bounds check, or `write_for_thread` with a
+/// [`ThreadIndex`] witness to get bounds-checked writes without a separate `if`:
+///
+/// ```rust,ignore
+/// use rocm_oxide_device::{DeviceSliceMut, thread_index_x_witness};
+///
+/// #[kernel]
+/// pub unsafe extern "C" fn write_kernel(out: DeviceSliceMut<f32>) {
+///     // Bounds-safe: write_for_thread only writes when the index is in range
+///     let i = thread_index_x_witness();
+///     out.write_for_thread(i, 42.0);
+/// }
+/// ```
 #[repr(C)]
 #[derive(Clone, Copy)]
 pub struct DeviceSliceMut<T> {

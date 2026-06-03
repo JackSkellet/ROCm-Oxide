@@ -1802,6 +1802,39 @@ impl Drop for Event {
     }
 }
 
+/// A GPU-side allocation of `len` elements of type `T`.
+///
+/// `DeviceBuffer<T>` is the primary host-facing container for GPU memory in
+/// the ROCm Oxide SDK. It:
+///
+/// - Owns an `hipMalloc` allocation (or stream-ordered allocation on a memory
+///   pool) and frees it on drop.
+/// - Is `Send + Sync` when `T: Send + Sync`.
+/// - Can be passed to kernels via the generated typed bindings as a
+///   `DeviceSlice<T>` (read-only) or `DeviceSliceMut<T>` (read-write) argument.
+///
+/// # Allocation
+///
+/// ```rust,ignore
+/// // Zeroed device buffer of 1024 f32 values
+/// let buf = DeviceBuffer::<f32>::new_zeroed(1024)?;
+///
+/// // Copy from a host slice
+/// let buf = DeviceBuffer::from_slice(&[1.0f32, 2.0, 3.0])?;
+/// ```
+///
+/// # Copying data
+///
+/// ```rust,ignore
+/// // Device → host
+/// let host_vec: Vec<f32> = buf.copy_to_vec()?;
+///
+/// // Host → device (overwrites existing buffer)
+/// buf.copy_from_slice(&host_data)?;
+/// ```
+///
+/// Requires `T: DevicePod` for host-accessible copies. Zero-copy kernel
+/// access only requires `T: Sized`.
 pub struct DeviceBuffer<T> {
     ptr: *mut T,
     len: usize,

@@ -56,6 +56,46 @@ pub use runtime::{
     validate_launch_config_for_limits,
 };
 
+/// Launch a GPU kernel with a typed argument list.
+///
+/// # Syntax
+///
+/// ```text
+/// launch!(kernel, config, arg0, arg1, ..., argN)?
+/// ```
+///
+/// - `kernel` — a [`Kernel`] handle returned by [`Module::kernel`] or the
+///   generated `DeviceKernels` accessor.
+/// - `config` — a [`LaunchConfig`] that sets grid/block dimensions and optional
+///   dynamic shared memory.
+/// - `arg0 .. argN` — kernel arguments **by value**. Types must match the
+///   kernel's signature exactly. The macro takes the address of each local copy
+///   and builds the `HIP_LAUNCH_PARAM` pointer array for `hipLaunchKernel`.
+///
+/// Returns `Result<()>`. Append `?` to propagate errors.
+///
+/// # Example
+///
+/// ```rust,ignore
+/// let device = Device::first()?;
+/// let module = device.load_code_object_file(env!("ROCM_OXIDE_DEVICE_HSACO"))?;
+/// let kernel = module.kernel(c"vector_add")?;
+///
+/// let stream = hip::Stream::new()?;
+/// let config = LaunchConfig::for_num_elems(n);
+///
+/// launch!(kernel, config, a_buf.as_device_slice(), b_buf.as_device_slice(), out.as_device_slice_mut(), n)?;
+/// stream.synchronize()?;
+/// ```
+///
+/// # Safety
+///
+/// The macro is safe to call but launches GPU code that is inherently `unsafe`:
+/// kernel arguments are passed as raw pointers through the HIP runtime. You are
+/// responsible for ensuring that:
+/// - The argument types match the kernel signature.
+/// - Pointer arguments point to valid, live device allocations.
+/// - Output buffers are not aliased unless the kernel explicitly handles that.
 #[macro_export]
 macro_rules! launch {
     ($kernel:expr, $config:expr $(,)?) => {{

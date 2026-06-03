@@ -1,3 +1,51 @@
+//! Procedural macros for marking Rust functions and statics as GPU kernel entry
+//! points and device-side storage.
+//!
+//! This crate is a build-time dependency of every device crate in a
+//! ROCm-Oxide project. It is compiled for the host and produces token streams
+//! that the Rust-to-HSACO pipeline in `rocm-oxide-build` understands.
+//!
+//! # Usage overview
+//!
+//! ```rust,ignore
+//! #![no_std]
+//! use rocm_oxide_device as gpu;
+//! use rocm_oxide_kernel::{kernel, device_global, shared};
+//!
+//! // A simple non-generic kernel
+//! // rocm-oxide: len(out)=n
+//! #[kernel]
+//! pub unsafe extern "C" fn fill_indices(out: gpu::DeviceSliceMut<u32>, n: usize) {
+//!     let i = gpu::global_id_x();
+//!     if i < n {
+//!         unsafe { out.write_unchecked(i, i as u32) };
+//!     }
+//! }
+//!
+//! // A generic kernel monomorphized at build time
+//! #[kernel(monomorphize(f32), monomorphize(u32))]
+//! pub unsafe extern "C" fn typed_fill<T: Copy>(out: *mut T, n: usize, value: T) {
+//!     let i = gpu::global_id_x();
+//!     if i < n {
+//!         unsafe { out.add(i).write(value) };
+//!     }
+//! }
+//!
+//! // A mutable device-global variable readable and writable from host
+//! #[device_global]
+//! pub static mut SCALE: f32 = 1.0;
+//!
+//! // Per-block (LDS) scratch memory
+//! #[shared]
+//! pub static mut SCRATCH: [f32; 256] = [0.0; 256];
+//! ```
+//!
+//! After annotating your device crate, run `cargo rocm-oxide build` (or let
+//! `build.rs` invoke the build tool automatically). The build tool discovers
+//! all `#[kernel]` functions, rewrites the emitted LLVM IR into launchable
+//! AMDGPU kernel entry points, and emits a typed `DeviceKernels` host struct
+//! alongside metadata JSON.
+
 use proc_macro::TokenStream;
 use proc_macro2::{Ident, Span, TokenStream as TokenStream2};
 use quote::{ToTokens, quote};
@@ -8,6 +56,74 @@ use syn::{
     parenthesized,
 };
 
+/// Marks a Rust function as a GPU kernel entry point.
+///
+/// The `#[kernel]` attribute has two forms:
+///
+/// ## Non-generic kernel
+///
+/// ```rust,ignore
+/// #[kernel]
+/// pub unsafe extern "C" fn vector_add(
+///     out: gpu::DeviceSliceMut<f32>,
+///     a: gpu::DeviceSlice<f32>,
+///     b: gpu::DeviceSlice<f32>,
+///     n: usize,
+/// ) {
+///     let i = gpu::global_id_x();
+///     if i < n {
+///         let sum = unsafe { *a.get_unchecked(i) + *b.get_unchecked(i) };
+///         unsafe { out.write_unchecked(i, sum) };
+///     }
+/// }
+/// ```
+///
+/// The build tool exports this function under its Rust identifier (`vector_add`)
+/// as the AMDGPU kernel symbol.
+///
+/// ## Generic kernel with `monomorphize`
+///
+/// ```rust,ignore
+/// #[kernel(monomorphize(f32), monomorphize(u32))]
+/// pub unsafe extern "C" fn typed_scale<T: Copy>(out: *mut T, n: usize, value: T) {
+///     let i = gpu::global_id_x();
+///     if i < n {
+///         unsafe { out.add(i).write(value) };
+///     }
+/// }
+/// ```
+///
+/// Each `monomorphize(Type)` instantiation produces a separate exported kernel
+/// symbol named `typed_scale_f32` and `typed_scale_u32`. The generated host
+/// bindings expose both as distinct typed methods on `DeviceKernels`.
+///
+/// ## Kernel contracts
+///
+/// Line comments immediately above `#[kernel]` can declare buffer-length and
+/// disjointness contracts that the build tool checks and embeds in the generated
+/// host bindings:
+///
+/// ```rust,ignore
+/// // rocm-oxide: len(out)=n
+/// // rocm-oxide: len(a)=n
+/// // rocm-oxide: disjoint(out, a)
+/// #[kernel]
+/// pub unsafe extern "C" fn my_kernel(out: gpu::DeviceSliceMut<f32>, a: gpu::DeviceSlice<f32>, n: usize) {
+///     // ...
+/// }
+/// ```
+///
+/// See `docs/kernel-contracts.md` for the full contract syntax.
+///
+/// ## Safety
+///
+/// Kernel functions must be `unsafe`. Device code runs without Rust's safety
+/// guarantees for pointer aliasing, bounds checking, or initialization. All raw
+/// pointer arguments must point to valid GPU memory for the lifetime of the
+/// kernel dispatch.
+///
+/// Kernel functions must **not** call host-side Rust functions or use heap
+/// allocation. The device crate must be `#![no_std]`.
 #[proc_macro_attribute]
 pub fn kernel(attr: TokenStream, item: TokenStream) -> TokenStream {
     let function = match syn::parse::<ItemFn>(item) {
@@ -25,16 +141,94 @@ pub fn kernel(attr: TokenStream, item: TokenStream) -> TokenStream {
         .into()
 }
 
+/// Marks a `static mut` as a mutable device-global variable.
+///
+/// A device-global lives in GPU global memory and is initialised to its declared
+/// value when the kernel module loads. The build tool emits a `global_<name>`
+/// accessor on the generated `DeviceKernels` host struct so the host can read
+/// or overwrite the variable between kernel dispatches.
+///
+/// ```rust,ignore
+/// #[device_global]
+/// pub static mut SCALE: f32 = 1.0;
+/// ```
+///
+/// From the host, given a `kernels: DeviceKernels` value:
+///
+/// ```rust,ignore
+/// // Read current value
+/// let scale = kernels.global_scale()?.copy_to_vec()?;
+/// // Write a new value
+/// kernels.global_scale()?.set(2.0)?;
+/// ```
+///
+/// ## Restrictions
+///
+/// - Only primitive `Copy` types are supported as the static type.
+/// - The variable must be declared `pub` for the build tool to locate it.
+/// - Device-global writes from the host race with concurrent kernel dispatches
+///   that read the same variable; synchronize streams before writing.
 #[proc_macro_attribute]
 pub fn device_global(_attr: TokenStream, item: TokenStream) -> TokenStream {
     export_static("device_global", item)
 }
 
+/// Marks a `static` as a device-side constant.
+///
+/// Constants live in GPU constant memory (read-only from device code). The
+/// build tool emits metadata recording the symbol so generated bindings can
+/// verify it is present in the loaded HSACO.
+///
+/// ```rust,ignore
+/// #[constant]
+/// pub static WARP_SIZE: u32 = 64;
+/// ```
+///
+/// Constants are read-only from device code and cannot be modified by the host
+/// at runtime. For mutable device-side state, use [`device_global`] instead.
 #[proc_macro_attribute]
 pub fn constant(_attr: TokenStream, item: TokenStream) -> TokenStream {
     export_static("constant", item)
 }
 
+/// Marks a `static mut` array as LDS (Local Data Share) / shared memory.
+///
+/// LDS statics are allocated in the fast on-chip shared memory pool that all
+/// threads in a workgroup can access. They are zeroed at the start of each
+/// workgroup dispatch. All threads in the block see the same backing storage.
+///
+/// ```rust,ignore
+/// #[shared]
+/// pub static mut TILE: [f32; 256] = [0.0; 256];
+/// ```
+///
+/// Use `gpu::workgroup_barrier()` to synchronize reads and writes across
+/// threads in the same workgroup before relying on values written by other
+/// threads:
+///
+/// ```rust,ignore
+/// #[shared]
+/// pub static mut SCRATCH: [u32; 256] = [0; 256];
+///
+/// #[kernel]
+/// pub unsafe extern "C" fn prefix_sum(out: gpu::DeviceSliceMut<u32>, n: usize) {
+///     let i = gpu::thread_idx_x() as usize;
+///     unsafe { SCRATCH[i] = if i < n { unsafe { out.read_unchecked(i) } } else { 0 } };
+///     gpu::workgroup_barrier();
+///     // cooperative scan ...
+/// }
+/// ```
+///
+/// ## Restrictions
+///
+/// - The declared type must be an array (`[T; N]`). Dynamic LDS sizing requires
+///   the nightly `gpu_launch_sized_workgroup_mem` feature; see the dispatch-ptr
+///   helpers in `rocm-oxide-device`.
+/// - Access across workgroups is not possible; each workgroup gets its own
+///   private copy of the LDS allocation.
+/// - The size of all `#[shared]` statics in a kernel is fixed at compile time
+///   and must not exceed the hardware LDS limit (~64 KiB per workgroup on
+///   common RDNA/CDNA devices).
 #[proc_macro_attribute]
 pub fn shared(_attr: TokenStream, item: TokenStream) -> TokenStream {
     export_static("shared", item)

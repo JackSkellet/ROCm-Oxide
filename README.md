@@ -2,11 +2,51 @@
 
 Rust-first GPU development on AMD/ROCm, with a practical path toward CUDA Oxide-style ergonomics.
 
-ROCm-Oxide is an active prototype that combines:
+ROCm-Oxide is an active project that combines:
 
 - a Rust host/runtime layer over HIP,
 - runtime HIP kernel compilation and launch,
 - and a Rust-authored device-kernel pipeline that produces launchable `.hsaco` artifacts.
+
+---
+
+## Start here
+
+If you are new to the project, follow these steps:
+
+**1. Check prerequisites**
+
+```sh
+cargo rocm-oxide doctor
+```
+
+This validates your ROCm installation, GPU visibility, and Rust nightly toolchain.
+
+**2. Create your first project**
+
+```sh
+cargo rocm-oxide new my-gpu-project
+cd my-gpu-project
+```
+
+**3. Build and run**
+
+```sh
+cargo run
+```
+
+This compiles your Rust kernel for `amdgcn-amd-amdhsa`, links a `.hsaco` code
+object, and launches it on your AMD GPU.
+
+**4. Validate**
+
+```sh
+cargo rocm-oxide verify --quick
+```
+
+**Full walkthrough →** [docs/getting-started.md](docs/getting-started.md)
+
+**API reference →** [docs/api_overview.md](docs/api_overview.md)
 
 ---
 
@@ -245,8 +285,9 @@ When installed as `cargo-rocm-oxide`, these become `cargo rocm-oxide ...`.
 - [Unsafe and FFI audit](docs/unsafe-audit.md)
 - [ROCm library interop](docs/rocm-library-interop.md)
 
-### Parity tracking and roadmap docs
+### SDK direction and roadmap
 
+- [SDK direction](docs/sdk_direction.md) — current state, product identity, architecture layers, what to build next, and phased roadmap
 - [CUDA-Oxide parity checklist](docs/cuda-oxide-parity-checklist.md)
 - [ROCm feature parity notes](docs/rocm-feature-parity.md)
 - [CUDA book adaptation notes](docs/cuda-oxide-book-rocm-adaptation.md)
