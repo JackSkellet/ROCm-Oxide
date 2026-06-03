@@ -62,17 +62,28 @@ hello_gpu_rust: 1048576 elements verified — Rust-authored kernel passed on gfx
 
 ### Troubleshooting
 
+Run the built-in doctor command first — it checks every prerequisite, prints
+PASS / WARN / FAIL per item, and gives a copy-pasteable block for bug reports:
+
+```sh
+cargo rocm-oxide doctor
+```
+
 | Symptom | Fix |
 |---------|-----|
 | `can't find crate for 'core'` | `rustup component add rust-src --toolchain nightly` |
-| `llc: command not found` | Add `/opt/rocm/bin` to `PATH` (or set `ROCM_PATH`) |
-| No GPU detected | `sudo usermod -aG render,video $USER`, then log out and back in |
+| `llc: command not found` | Add `/opt/rocm/lib/llvm/bin` to `PATH` (or set `ROCM_OXIDE_LLC`) |
+| `/dev/kfd` permission denied | `sudo usermod -aG render,video $USER` then log out |
+| No GPU detected | Check `/dev/kfd` exists; verify `amdgpu` module is loaded |
 | Wrong GPU architecture | `ROCM_OXIDE_ARCH=gfx1100 cargo run --example hello_gpu_rust` |
 | Stale HSACO after GPU change | `cargo clean ; cargo run --example hello_gpu_rust` |
 | Slow first build (expected) | The device crate compiles with `-Z build-std=core`; caching kicks in on rebuild |
 
-For a full prerequisites checklist, first-project scaffold, and common error
-messages, see [docs/getting-started.md](docs/getting-started.md).
+For full diagnosis instructions, error-by-error fixes, and scaffold issues,
+see [docs/troubleshooting.md](docs/troubleshooting.md).
+
+For a full prerequisites checklist and first-project scaffold, see
+[docs/getting-started.md](docs/getting-started.md).
 
 ---
 
@@ -423,6 +434,8 @@ When installed as `cargo-rocm-oxide`, these become `cargo rocm-oxide ...`.
 
 - [Changelog](CHANGELOG.md)
 - [Contributing](CONTRIBUTING.md)
+- [Stability policy](docs/stability-policy.md)
+- [Release checklist](docs/release_checklist.md)
 - [Security policy](SECURITY.md)
 - [MIT license](LICENSE-MIT)
 - [Apache-2.0 license](LICENSE-APACHE)

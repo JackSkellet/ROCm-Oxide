@@ -172,8 +172,10 @@ let out = d_out.copy_to_vec()?;
 | ROCm `clang` | Links objects to `.hsaco` |
 | ROCm `llvm-readelf` | Validates code object |
 
-All ROCm tools must be on `PATH` or at `/opt/rocm/bin`. The build tool searches
-common locations automatically. Run `cargo rocm-oxide doctor` to check.
+All ROCm tools are discovered automatically by the build tool. `clang` and
+`rocminfo` are at `/opt/rocm/bin/`; `llc`, `llvm-readelf`, and `llvm-objdump`
+are at `/opt/rocm/lib/llvm/bin/`. Run `cargo rocm-oxide doctor` to verify all
+locations.
 
 ---
 
@@ -196,19 +198,24 @@ toolchain file or set `RUSTUP_TOOLCHAIN=nightly` and re-install `rust-src`.
 
 ### `llc: command not found` / `clang: command not found`
 
-ROCm tools are not on `PATH`. Add them:
+ROCm tools are not on `PATH`. Note that `llc` lives under `lib/llvm/bin/`, not
+`bin/`:
 
 ```sh
 # Fish shell — permanent
 fish_add_path /opt/rocm/bin
+fish_add_path /opt/rocm/lib/llvm/bin
 
 # Bash — for the current session
-export PATH="/opt/rocm/bin:$PATH"
+export PATH="/opt/rocm/bin:/opt/rocm/lib/llvm/bin:$PATH"
 ```
 
-Then re-run. If ROCm is not at `/opt/rocm`, set `ROCM_PATH`:
+Alternatively, set explicit overrides or `ROCM_PATH` and let the build tool
+find them:
 
 ```sh
+export ROCM_PATH=/opt/rocm                              # preferred
+export ROCM_OXIDE_LLC=/opt/rocm/lib/llvm/bin/llc        # or override directly
 ROCM_PATH=/path/to/rocm cargo run --example hello_gpu_rust
 ```
 
@@ -292,7 +299,7 @@ cargo run --manifest-path tools/rocm-oxide-build/Cargo.toml -- \
 Disassemble the HSACO to verify it contains correct AMDGPU ISA:
 
 ```sh
-/opt/rocm/bin/llvm-objdump -d \
+/opt/rocm/lib/llvm/bin/llvm-objdump -d \
   device-spike/target/amdgcn-amd-amdhsa/release/rocm_oxide_device_spike.hsaco \
   | grep -A 20 "vector_add"
 ```

@@ -1,0 +1,99 @@
+name: GPU Compatibility Report
+description: Report results on a GPU architecture not yet in the validated matrix
+labels: ["gpu-compat"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thank you for testing on a new GPU. This report helps expand the validated matrix in `docs/supported-rocm-gpu-matrix.md`.
+        Please run `cargo rocm-oxide doctor` and paste its full output — it generates a copy-pasteable block automatically.
+
+  - type: input
+    id: gpu_model
+    attributes:
+      label: GPU model
+      description: Full GPU name (e.g. AMD Radeon RX 7800 XT)
+      placeholder: "AMD Radeon RX 7800 XT"
+    validations:
+      required: true
+
+  - type: input
+    id: gpu_arch
+    attributes:
+      label: GPU architecture
+      description: "`rocminfo | grep 'gfx'` or from doctor output"
+      placeholder: "gfx1101"
+    validations:
+      required: true
+
+  - type: input
+    id: rocm_version
+    attributes:
+      label: ROCm version
+      description: "`cat /opt/rocm/.info/version`"
+      placeholder: "7.2.53211-364a905"
+    validations:
+      required: true
+
+  - type: input
+    id: clang_version
+    attributes:
+      label: AMD clang version
+      description: "`/opt/rocm/bin/clang --version`"
+      placeholder: "22.0.0git"
+    validations:
+      required: true
+
+  - type: textarea
+    id: doctor_output
+    attributes:
+      label: Doctor output
+      description: Full output of `cargo rocm-oxide doctor` including the GitHub issue block at the end.
+      render: text
+    validations:
+      required: true
+
+  - type: dropdown
+    id: hello_gpu
+    attributes:
+      label: "`cargo run --example hello_gpu` result"
+      options:
+        - "Pass"
+        - "Fail"
+        - "Not tested"
+    validations:
+      required: true
+
+  - type: dropdown
+    id: hello_gpu_rust
+    attributes:
+      label: "`cargo run --example hello_gpu_rust` result"
+      options:
+        - "Pass"
+        - "Fail"
+        - "Not tested"
+    validations:
+      required: true
+
+  - type: dropdown
+    id: verify_quick
+    attributes:
+      label: "`scripts/verify.sh --quick` result"
+      options:
+        - "Pass"
+        - "Fail (with failures documented below)"
+        - "Not run"
+    validations:
+      required: true
+
+  - type: textarea
+    id: failures
+    attributes:
+      label: Failures or skipped tests
+      description: List any test failures, skips, or known-profile deviations. Include the `validation_profile.json` output if available.
+
+  - type: textarea
+    id: additional
+    attributes:
+      label: Additional context
+      description: Driver version, kernel version, any unusual configuration.

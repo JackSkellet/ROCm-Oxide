@@ -290,63 +290,581 @@ fn print_help() {
     );
 }
 
-fn doctor() -> Result<(), String> {
-    println!("ROCm-Oxide doctor");
-    report_tool("cargo", &["--version"])?;
-    report_tool("rustc", &["--version"])?;
-    report_amdgpu_target()?;
-    report_rust_src()?;
-    report_tool_search_order();
-    let tools = ToolPaths::discover()?;
-    report_rocm_tool("ROCm llc", &tools.llc)?;
-    report_llc_amdgcn(&tools.llc)?;
-    report_rocm_tool("ROCm clang", &tools.clang)?;
-    report_rocm_tool("ROCm llvm-readelf", &tools.llvm_readelf)?;
-    report_rocm_tool("ROCm llvm-objdump", &tools.llvm_objdump)?;
-    let rocminfo = find_rocm_tool("ROCMINFO", "rocminfo", ToolLayout::Bin, &[])?;
-    let rocm_agent_enumerator = find_rocm_tool(
-        "ROCM_AGENT_ENUMERATOR",
-        "rocm_agent_enumerator",
-        ToolLayout::Bin,
-        &[],
-    )?;
+// ---------------------------------------------------------------------------
+// Doctor diagnostic types and helpers
+// ---------------------------------------------------------------------------
 
-    let rocminfo_summary = report_rocminfo(&rocminfo)?;
-    let arch = match rocminfo_summary.arch {
-        Some(arch) => {
-            validate_gpu_arch(&arch)?;
-            println!("ok: selected AMD GPU architecture {arch}");
-            arch
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
+enum DiagLevel {
+    Pass,
+    Warn,
+    Fail,
+}
+
+impl DiagLevel {
+    fn tag(&self) -> &'static str {
+        match self {
+            DiagLevel::Pass => "PASS",
+            DiagLevel::Warn => "WARN",
+            DiagLevel::Fail => "FAIL",
         }
-        None => {
-            return Err(
-                "failed to detect AMD GPU architecture; set ROCM_OXIDE_ARCH=gfx...".to_string(),
+    }
+}
+
+struct Diag {
+    level: DiagLevel,
+    label: String,
+    detail: String,
+    fix: Option<String>,
+}
+
+impl Diag {
+    fn pass(label: impl Into<String>, detail: impl Into<String>) -> Self {
+        Self { level: DiagLevel::Pass, label: label.into(), detail: detail.into(), fix: None }
+    }
+    fn warn(label: impl Into<String>, detail: impl Into<String>, fix: impl Into<String>) -> Self {
+        Self {
+            level: DiagLevel::Warn,
+            label: label.into(),
+            detail: detail.into(),
+            fix: Some(fix.into()),
+        }
+    }
+    fn fail(label: impl Into<String>, detail: impl Into<String>, fix: impl Into<String>) -> Self {
+        Self {
+            level: DiagLevel::Fail,
+            label: label.into(),
+            detail: detail.into(),
+            fix: Some(fix.into()),
+        }
+    }
+}
+
+fn diag_from_result(
+    label: &str,
+    fix: &str,
+    result: Result<String, String>,
+) -> Diag {
+    match result {
+        Ok(detail) => Diag::pass(label, detail),
+        Err(detail) => Diag::fail(label, detail, fix),
+    }
+}
+
+fn doctor_context_lines() -> Vec<String> {
+    let mut lines = Vec::new();
+
+    if let Ok(output) = Command::new("uname").arg("-a").output() {
+        let s = String::from_utf8_lossy(&output.stdout).trim().to_string();
+        if !s.is_empty() {
+            lines.push(format!("system:  {s}"));
+        }
+    }
+    if let Ok(cwd) = env::current_dir() {
+        lines.push(format!("cwd:     {}", cwd.display()));
+    }
+    let workspace_context = if Path::new("tools/rocm-oxide-build/Cargo.toml").is_file() {
+        "source workspace"
+    } else if Path::new("build.rs").is_file() && Path::new("device-spike").is_dir() {
+        "local scaffold"
+    } else {
+        "unknown (neither source workspace nor scaffold detected)"
+    };
+    lines.push(format!("context: {workspace_context}"));
+
+    for var in &["ROCM_PATH", "HIP_PATH", "ROCM_OXIDE_ARCH", "ROCM_OXIDE_BUILD",
+                 "ROCM_OXIDE_LLC", "ROCM_OXIDE_CLANG"] {
+        if let Ok(val) = env::var(var) {
+            lines.push(format!("env:     {var}={val}"));
+        }
+    }
+    lines
+}
+
+fn check_kfd() -> Diag {
+    let path = Path::new("/dev/kfd");
+    if !path.exists() {
+        return Diag::fail(
+            "/dev/kfd",
+            "device node does not exist",
+            "the amdgpu driver is not loaded; try:\n  sudo modprobe amdgpu\nor check that your GPU is supported (see docs/supported-rocm-gpu-matrix.md)\nif using a VM: ensure GPU passthrough is enabled",
+        );
+    }
+    match std::fs::OpenOptions::new().read(true).open(path) {
+        Ok(_) => Diag::pass("/dev/kfd", "exists and readable"),
+        Err(err) if err.kind() == std::io::ErrorKind::PermissionDenied => Diag::fail(
+            "/dev/kfd",
+            format!("permission denied ({err})"),
+            "add your user to the render and video groups, then log out and back in:\n  sudo usermod -aG render,video $USER",
+        ),
+        Err(err) => Diag::fail(
+            "/dev/kfd",
+            format!("open error: {err}"),
+            "check AMD GPU driver installation and /dev/kfd permissions",
+        ),
+    }
+}
+
+fn check_rustc_channel() -> Diag {
+    let output = Command::new("rustc")
+        .args(["--version", "--verbose"])
+        .output();
+    let output = match output {
+        Ok(o) => o,
+        Err(err) => {
+            return Diag::fail(
+                "rustc channel",
+                format!("failed to run rustc: {err}"),
+                "install Rust via rustup: https://rustup.rs",
             );
         }
     };
-    report_rocm_agents(&rocm_agent_enumerator, &arch)?;
-
-    report_core_build_probe(&arch)?;
-    println!("ok: doctor report complete; build prerequisites are present");
-    Ok(())
+    let text = String::from_utf8_lossy(&output.stdout);
+    let first = text.lines().next().unwrap_or("").trim().to_string();
+    if text.contains("nightly") || text.contains("-dev") {
+        Diag::pass("rustc channel", format!("nightly ({first})"))
+    } else {
+        Diag::fail(
+            "rustc channel",
+            format!("stable or beta Rust detected: {first}"),
+            "ROCm-Oxide device compilation requires nightly Rust.\n\
+             Add a rust-toolchain.toml to your project:\n\
+             \n\
+             [toolchain]\n\
+             channel = \"nightly\"\n\
+             components = [\"rust-src\"]\n\
+             \n\
+             or run:\n\
+               rustup toolchain install nightly\n\
+               rustup override set nightly\n\
+               rustup component add rust-src",
+        )
+    }
 }
 
-fn report_tool(program: &str, args: &[&str]) -> Result<(), String> {
-    let output = Command::new(program)
-        .args(args)
-        .output()
-        .map_err(|err| format!("failed to run {program}: {err}"))?;
-    if !output.status.success() {
-        return Err(format!(
-            "{program} {:?} failed:\n{}",
-            args,
-            String::from_utf8_lossy(&output.stderr)
-        ));
+fn check_amdgpu_target_diag() -> Diag {
+    diag_from_result(
+        "amdgcn target",
+        &format!(
+            "this target requires nightly Rust with the amdgcn backend.\n\
+             Ensure you have nightly installed:\n\
+               rustup toolchain install nightly\n\
+               rustup component add rust-src"
+        ),
+        ensure_amdgpu_target().map(|()| format!("{TARGET} in rustc target list")),
+    )
+}
+
+fn check_rust_src_diag() -> Diag {
+    diag_from_result(
+        "rust-src component",
+        "install it with:\n  rustup component add rust-src\nIf using a rust-toolchain.toml, add rust-src to the components list.",
+        ensure_rust_src().map(|()| "rust-src installed".to_string()),
+    )
+}
+
+fn check_command_version_diag(program: &str, args: &[&str], fix: &str) -> Diag {
+    let result = Command::new(program).args(args).output();
+    match result {
+        Err(err) => Diag::fail(program, format!("failed to run: {err}"), fix),
+        Ok(output) if !output.status.success() => Diag::fail(
+            program,
+            format!(
+                "exit code {}: {}",
+                output.status,
+                String::from_utf8_lossy(&output.stderr).lines().next().unwrap_or("")
+            ),
+            fix,
+        ),
+        Ok(output) => {
+            let stdout = String::from_utf8_lossy(&output.stdout);
+            let first = stdout.lines().next().unwrap_or("<no output>").trim().to_string();
+            Diag::pass(program, first)
+        }
     }
-    let stdout = String::from_utf8_lossy(&output.stdout);
-    let first = stdout.lines().next().unwrap_or("<no version output>");
-    println!("ok: {program} {first}");
-    Ok(())
+}
+
+fn try_find_rocm_tool_opt(
+    env_var: &str,
+    name: &str,
+    layout: ToolLayout,
+) -> Option<ToolPath> {
+    find_rocm_tool(env_var, name, layout, &["--version"]).ok()
+}
+
+fn check_rocm_tool_version_diag(label: &str, tool: &ToolPath) -> Diag {
+    let result = Command::new(&tool.path).arg("--version").output();
+    match result {
+        Err(err) => Diag::fail(
+            label,
+            format!("found at {} but failed to run: {err}", tool.path.display()),
+            "check that the ROCm tools are executable and compatible",
+        ),
+        Ok(output) => {
+            let stdout = String::from_utf8_lossy(&output.stdout);
+            let first = stdout.lines().next().unwrap_or("").trim().to_string();
+            Diag::pass(
+                label,
+                format!("{} [{}] ({})", tool.path.display(), tool.source, first),
+            )
+        }
+    }
+}
+
+fn check_llc_amdgcn_diag(llc: &ToolPath) -> Diag {
+    let result = Command::new(&llc.path).arg("--version").output();
+    match result {
+        Err(err) => Diag::fail(
+            "llc amdgcn backend",
+            format!("could not run llc: {err}"),
+            "set ROCM_OXIDE_LLC to the ROCm llc binary",
+        ),
+        Ok(output) => {
+            let stdout = String::from_utf8_lossy(&output.stdout);
+            if stdout.contains("amdgcn") {
+                Diag::pass("llc amdgcn backend", "amdgcn backend present")
+            } else {
+                Diag::fail(
+                    "llc amdgcn backend",
+                    format!(
+                        "{} does not list amdgcn in --version output",
+                        llc.path.display()
+                    ),
+                    "this is a system llc without the amdgcn backend.\n\
+                     Set ROCM_OXIDE_LLC=/opt/rocm/lib/llvm/bin/llc\n\
+                     or add /opt/rocm/lib/llvm/bin to PATH",
+                )
+            }
+        }
+    }
+}
+
+fn check_rocm_agents_diag(tool: &ToolPath, arch: &str) -> Diag {
+    let result = Command::new(&tool.path).output();
+    match result {
+        Err(err) => Diag::fail(
+            "rocm_agent_enumerator",
+            format!("failed to run: {err}"),
+            "check ROCm installation; rocm_agent_enumerator should be in /opt/rocm/bin",
+        ),
+        Ok(output) => {
+            let stdout = String::from_utf8_lossy(&output.stdout);
+            let agents: Vec<_> = stdout
+                .lines()
+                .map(str::trim)
+                .filter(|l| l.starts_with("gfx") && !l.contains('-'))
+                .map(ToOwned::to_owned)
+                .collect();
+            if agents.is_empty() {
+                Diag::fail(
+                    "rocm_agent_enumerator",
+                    "reported no gfx agents",
+                    "check /dev/kfd permissions and GPU driver; see /dev/kfd check above",
+                )
+            } else if !agents.iter().any(|a| a == arch) {
+                Diag::warn(
+                    "rocm_agent_enumerator",
+                    format!(
+                        "agents reported [{}] do not include selected arch {arch}",
+                        agents.join(", ")
+                    ),
+                    format!("set ROCM_OXIDE_ARCH to one of: {}", agents.join(", ")),
+                )
+            } else {
+                Diag::pass(
+                    "rocm_agent_enumerator",
+                    format!(
+                        "{} [{}] agents=[{}]",
+                        tool.path.display(),
+                        tool.source,
+                        agents.join(", ")
+                    ),
+                )
+            }
+        }
+    }
+}
+
+fn probe_core_build_for_doctor(arch: &str) -> Result<String, String> {
+    report_core_build_probe(arch).map(|()| {
+        format!("`core` builds for {TARGET} with nightly build-std")
+    })
+}
+
+fn print_diag_table(diags: &[Diag]) {
+    println!();
+    for diag in diags {
+        println!("[{}] {}: {}", diag.level.tag(), diag.label, diag.detail);
+    }
+    println!();
+}
+
+fn print_fix_suggestions(diags: &[Diag]) {
+    let failures: Vec<_> = diags
+        .iter()
+        .filter(|d| d.level == DiagLevel::Fail)
+        .collect();
+    let warnings: Vec<_> = diags
+        .iter()
+        .filter(|d| d.level == DiagLevel::Warn)
+        .collect();
+    if failures.is_empty() && warnings.is_empty() {
+        return;
+    }
+    println!("--- suggested fixes ---");
+    for d in failures.iter().chain(warnings.iter()) {
+        if let Some(fix) = &d.fix {
+            println!();
+            println!("[{}] {}:", d.level.tag(), d.label);
+            for line in fix.lines() {
+                println!("    {line}");
+            }
+        }
+    }
+    println!();
+}
+
+fn print_github_issue_block(context_lines: &[String], diags: &[Diag]) {
+    println!("--- paste into GitHub issues ---");
+    for line in context_lines {
+        println!("{line}");
+    }
+    println!();
+    for diag in diags {
+        println!("[{}] {}: {}", diag.level.tag(), diag.label, diag.detail);
+    }
+    println!("--- end doctor report ---");
+}
+
+// ---------------------------------------------------------------------------
+// Doctor entry point
+// ---------------------------------------------------------------------------
+
+fn doctor() -> Result<(), String> {
+    let context_lines = doctor_context_lines();
+
+    println!("ROCm-Oxide doctor");
+    println!("=================");
+    for line in &context_lines {
+        println!("{line}");
+    }
+
+    let mut diags: Vec<Diag> = Vec::new();
+    let rocm_path_fix = "add /opt/rocm/bin to PATH, or set ROCM_PATH=/path/to/rocm";
+
+    // --- Rust toolchain ---
+    diags.push(check_command_version_diag(
+        "cargo",
+        &["--version"],
+        "install Rust via rustup: https://rustup.rs",
+    ));
+    diags.push(check_rustc_channel());
+    diags.push(check_amdgpu_target_diag());
+    diags.push(check_rust_src_diag());
+
+    // --- GPU device access ---
+    diags.push(check_kfd());
+
+    // --- ROCm tool discovery ---
+    let search_order = {
+        let roots = rocm_roots()
+            .into_iter()
+            .map(|(src, path)| format!("{src}={}", path.display()))
+            .collect::<Vec<_>>()
+            .join(", ");
+        format!("explicit env > {roots} > PATH")
+    };
+    diags.push(Diag::pass("tool search order", search_order));
+
+    let llc = try_find_rocm_tool_opt("ROCM_OXIDE_LLC", "llc", ToolLayout::Llvm);
+    let clang = try_find_rocm_tool_opt("ROCM_OXIDE_CLANG", "clang", ToolLayout::Llvm);
+    let readelf =
+        try_find_rocm_tool_opt("ROCM_OXIDE_LLVM_READELF", "llvm-readelf", ToolLayout::Llvm);
+    let objdump =
+        try_find_rocm_tool_opt("ROCM_OXIDE_LLVM_OBJDUMP", "llvm-objdump", ToolLayout::Llvm);
+    let rocminfo_tool = try_find_rocm_tool_opt("ROCMINFO", "rocminfo", ToolLayout::Bin);
+    let agents_tool = try_find_rocm_tool_opt(
+        "ROCM_AGENT_ENUMERATOR",
+        "rocm_agent_enumerator",
+        ToolLayout::Bin,
+    );
+
+    match &llc {
+        Some(t) => {
+            diags.push(check_rocm_tool_version_diag("ROCm llc", t));
+            diags.push(check_llc_amdgcn_diag(t));
+        }
+        None => {
+            diags.push(Diag::fail(
+                "ROCm llc",
+                "not found",
+                &format!(
+                    "{rocm_path_fix}\nor set ROCM_OXIDE_LLC=/opt/rocm/lib/llvm/bin/llc"
+                ),
+            ));
+            diags.push(Diag::warn(
+                "llc amdgcn backend",
+                "skipped (llc not found)",
+                "fix ROCm llc first",
+            ));
+        }
+    }
+
+    match &clang {
+        Some(t) => diags.push(check_rocm_tool_version_diag("ROCm clang", t)),
+        None => diags.push(Diag::fail(
+            "ROCm clang",
+            "not found",
+            &format!("{rocm_path_fix}\nor set ROCM_OXIDE_CLANG=/opt/rocm/bin/clang"),
+        )),
+    }
+
+    match &readelf {
+        Some(t) => diags.push(check_rocm_tool_version_diag("ROCm llvm-readelf", t)),
+        None => diags.push(Diag::fail(
+            "ROCm llvm-readelf",
+            "not found",
+            rocm_path_fix,
+        )),
+    }
+
+    match &objdump {
+        Some(t) => diags.push(check_rocm_tool_version_diag("ROCm llvm-objdump", t)),
+        None => diags.push(Diag::warn(
+            "ROCm llvm-objdump",
+            "not found (optional, needed for LDS/scoped-atomics verification only)",
+            rocm_path_fix,
+        )),
+    }
+
+    // --- GPU detection via rocminfo ---
+    let detected_arch: Option<String> = match &rocminfo_tool {
+        None => {
+            diags.push(Diag::fail(
+                "ROCm rocminfo",
+                "not found",
+                rocm_path_fix,
+            ));
+            None
+        }
+        Some(t) => match inspect_rocminfo(&t.path) {
+            Err(err) => {
+                diags.push(Diag::fail(
+                    "ROCm rocminfo",
+                    err,
+                    "check GPU driver and /dev/kfd permissions",
+                ));
+                None
+            }
+            Ok(summary) => {
+                diags.push(Diag::pass(
+                    "ROCm rocminfo",
+                    format!(
+                        "{} [{}] runtime={} arch={}",
+                        t.path.display(),
+                        t.source,
+                        summary.runtime_version.as_deref().unwrap_or("?"),
+                        summary.arch.as_deref().unwrap_or("none"),
+                    ),
+                ));
+                summary.arch
+            }
+        },
+    };
+
+    let arch_for_probe: Option<String> = match detected_arch {
+        None => {
+            diags.push(Diag::fail(
+                "GPU architecture",
+                "no AMD GPU detected",
+                "check /dev/kfd exists and is readable.\n\
+                 Set ROCM_OXIDE_ARCH=gfx<target> to force a specific architecture.",
+            ));
+            None
+        }
+        Some(ref arch) => match validate_gpu_arch(arch) {
+            Err(err) => {
+                diags.push(Diag::fail(
+                    "GPU architecture",
+                    err,
+                    "set ROCM_OXIDE_ARCH=gfx<target> with a valid ROCm target such as gfx1100",
+                ));
+                None
+            }
+            Ok(()) => {
+                diags.push(Diag::pass("GPU architecture", format!("detected {arch}")));
+                Some(arch.clone())
+            }
+        },
+    };
+
+    // --- GPU agent enumerator ---
+    match (&agents_tool, &arch_for_probe) {
+        (None, _) => diags.push(Diag::fail(
+            "rocm_agent_enumerator",
+            "not found",
+            rocm_path_fix,
+        )),
+        (Some(_t), None) => diags.push(Diag::warn(
+            "rocm_agent_enumerator",
+            "skipped (no GPU arch detected)",
+            "fix GPU architecture detection first",
+        )),
+        (Some(t), Some(arch)) => diags.push(check_rocm_agents_diag(t, arch)),
+    }
+
+    // --- Core build probe (only when Rust toolchain and arch are OK) ---
+    let rust_broken = diags.iter().any(|d| {
+        d.level == DiagLevel::Fail
+            && (d.label.contains("rustc") || d.label.contains("rust-src") || d.label.contains("amdgcn"))
+    });
+    match (&arch_for_probe, rust_broken) {
+        (_, true) => diags.push(Diag::warn(
+            "core build probe",
+            "skipped (Rust toolchain issues detected above)",
+            "fix Rust toolchain issues first, then re-run doctor",
+        )),
+        (None, _) => diags.push(Diag::warn(
+            "core build probe",
+            "skipped (no GPU arch detected)",
+            "fix GPU visibility issues first, then re-run doctor",
+        )),
+        (Some(arch), false) => {
+            diags.push(diag_from_result(
+                "core build probe",
+                "ensure rust-src is installed and nightly is active:\n  rustup component add rust-src",
+                probe_core_build_for_doctor(arch),
+            ));
+        }
+    }
+
+    // --- Output ---
+    print_diag_table(&diags);
+    print_fix_suggestions(&diags);
+    print_github_issue_block(&context_lines, &diags);
+
+    let pass_count = diags.iter().filter(|d| d.level == DiagLevel::Pass).count();
+    let warn_count = diags.iter().filter(|d| d.level == DiagLevel::Warn).count();
+    let fail_count = diags.iter().filter(|d| d.level == DiagLevel::Fail).count();
+
+    println!();
+    if fail_count > 0 {
+        println!(
+            "doctor: {pass_count} passed, {warn_count} warned, {fail_count} FAILED"
+        );
+        Err(format!(
+            "{fail_count} check(s) failed; see fix suggestions above\n\
+             Copy the output between the '--- paste into GitHub issues ---' markers when filing a bug report."
+        ))
+    } else if warn_count > 0 {
+        println!(
+            "doctor: {pass_count} passed, {warn_count} warned — prerequisites met with caveats"
+        );
+        Ok(())
+    } else {
+        println!("doctor: all {pass_count} checks passed");
+        Ok(())
+    }
 }
 
 fn inspect_metadata(path: &Path) -> Result<(), String> {
@@ -746,54 +1264,6 @@ fn tool_works(program: &Path, args: &[&str]) -> bool {
         .is_ok_and(|status| status.success())
 }
 
-fn report_tool_search_order() {
-    let roots = rocm_roots()
-        .into_iter()
-        .map(|(source, path)| format!("{source}={}", path.display()))
-        .collect::<Vec<_>>()
-        .join(", ");
-    println!("ok: ROCm tool search order: explicit tool env, {roots}, PATH");
-}
-
-fn report_rocm_tool(label: &str, tool: &ToolPath) -> Result<(), String> {
-    let output = Command::new(&tool.path)
-        .arg("--version")
-        .output()
-        .map_err(|err| format!("failed to run {}: {err}", tool.path.display()))?;
-    if !output.status.success() {
-        return Err(format!(
-            "{} --version failed:\n{}",
-            tool.path.display(),
-            String::from_utf8_lossy(&output.stderr)
-        ));
-    }
-    let stdout = String::from_utf8_lossy(&output.stdout);
-    let first = stdout.lines().next().unwrap_or("<no version output>");
-    println!(
-        "ok: {label} {} [{}] ({first})",
-        tool.path.display(),
-        tool.source
-    );
-    Ok(())
-}
-
-fn report_llc_amdgcn(llc: &ToolPath) -> Result<(), String> {
-    let output = Command::new(&llc.path)
-        .arg("--version")
-        .output()
-        .map_err(|err| format!("failed to run {} --version: {err}", llc.path.display()))?;
-    let stdout = String::from_utf8_lossy(&output.stdout);
-    if stdout.contains("amdgcn") {
-        println!("ok: llc supports the amdgcn backend");
-        Ok(())
-    } else {
-        Err(format!(
-            "{} does not report amdgcn backend support; set ROCM_OXIDE_LLC to ROCm's llc",
-            llc.path.display()
-        ))
-    }
-}
-
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct RocminfoSummary {
     runtime_version: Option<String>,
@@ -829,57 +1299,6 @@ fn inspect_rocminfo(path: &Path) -> Result<RocminfoSummary, String> {
     })
 }
 
-fn report_rocminfo(tool: &ToolPath) -> Result<RocminfoSummary, String> {
-    let summary = inspect_rocminfo(&tool.path)?;
-    println!(
-        "ok: ROCm rocminfo {} [{}] runtime={} detected_arch={}",
-        tool.path.display(),
-        tool.source,
-        summary.runtime_version.as_deref().unwrap_or("<unknown>"),
-        summary.arch.as_deref().unwrap_or("<none>")
-    );
-    Ok(summary)
-}
-
-fn report_rocm_agents(tool: &ToolPath, selected_arch: &str) -> Result<(), String> {
-    let output = Command::new(&tool.path)
-        .output()
-        .map_err(|err| format!("failed to run {}: {err}", tool.path.display()))?;
-    if !output.status.success() {
-        return Err(format!(
-            "{} failed:\n{}",
-            tool.path.display(),
-            String::from_utf8_lossy(&output.stderr)
-        ));
-    }
-    let agents = String::from_utf8_lossy(&output.stdout)
-        .lines()
-        .map(str::trim)
-        .filter(|line| line.starts_with("gfx") && !line.contains('-'))
-        .map(ToOwned::to_owned)
-        .collect::<Vec<_>>();
-    if agents.is_empty() {
-        return Err(format!(
-            "{} did not report any gfx agents",
-            tool.path.display()
-        ));
-    }
-    if !agents.iter().any(|agent| agent == selected_arch) {
-        return Err(format!(
-            "{} reported agents [{}], but selected arch is {selected_arch}",
-            tool.path.display(),
-            agents.join(", ")
-        ));
-    }
-    println!(
-        "ok: ROCm rocm_agent_enumerator {} [{}] agents={}",
-        tool.path.display(),
-        tool.source,
-        agents.join(", ")
-    );
-    Ok(())
-}
-
 fn ensure_amdgpu_target() -> Result<(), String> {
     rust_target_list().and_then(|targets| {
         if targets.lines().any(|line| line.trim() == TARGET) {
@@ -888,12 +1307,6 @@ fn ensure_amdgpu_target() -> Result<(), String> {
             Err(format!("rustc does not list required target `{TARGET}`"))
         }
     })
-}
-
-fn report_amdgpu_target() -> Result<(), String> {
-    ensure_amdgpu_target()?;
-    println!("ok: rustc target {TARGET}");
-    Ok(())
 }
 
 fn rust_target_list() -> Result<String, String> {
@@ -921,12 +1334,6 @@ fn ensure_rust_src() -> Result<(), String> {
             path.display()
         ))
     }
-}
-
-fn report_rust_src() -> Result<(), String> {
-    ensure_rust_src()?;
-    println!("ok: rust-src component is installed");
-    Ok(())
 }
 
 fn rust_src_core_path() -> Result<PathBuf, String> {

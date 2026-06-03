@@ -1,0 +1,51 @@
+name: Documentation Issue
+description: Inaccurate docs, broken example commands, misleading wording, or missing content
+labels: ["docs"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thanks for helping improve the docs. Please be as specific as possible about which file and section is wrong.
+
+  - type: input
+    id: doc_file
+    attributes:
+      label: File or section
+      description: Which file (and section heading) is incorrect?
+      placeholder: "docs/getting-started.md — §Build and run"
+    validations:
+      required: true
+
+  - type: textarea
+    id: current_text
+    attributes:
+      label: Current (incorrect) text
+      description: Paste the exact sentence or code block that is wrong.
+    validations:
+      required: true
+
+  - type: textarea
+    id: problem
+    attributes:
+      label: What is wrong
+      description: Explain the inaccuracy — wrong API name, wrong path, wrong command, outdated wording, etc.
+    validations:
+      required: true
+
+  - type: textarea
+    id: suggested_fix
+    attributes:
+      label: Suggested fix
+      description: Proposed corrected text or code, if you know it.
+
+  - type: input
+    id: rocm_version
+    attributes:
+      label: ROCm version (if relevant)
+      description: Only needed if the doc error relates to a specific ROCm/GPU version.
+      placeholder: "7.2.x"
+
+  - type: textarea
+    id: additional
+    attributes:
+      label: Additional context

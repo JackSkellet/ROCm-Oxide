@@ -1327,11 +1327,6 @@ impl Module {
     }
 }
 
-    pub fn global<T>(&self, name: &CStr) -> Result<hip::Global<T>> {
-        Ok(self.module.global(name)?)
-    }
-}
-
 /// A handle to a single GPU kernel function, ready to be launched.
 ///
 /// Obtain a `Kernel` from [`Module::kernel`]. The handle is `Send + Sync` and
