@@ -113,8 +113,8 @@ features on top of stronger contracts.
           AMD LLVM IR, code objects, HIP modules, and ROCm libraries
     - [x] extend rocPRIM/hipCUB wrappers to sort, select, transform, and more
           scalar types
-    - [x] promote hipBLASLt or Composable Kernel from availability probes to a
-          checked matmul descriptor and heuristic API
+    - [x] promote hipBLASLt from availability probes to checked matmul
+          descriptors, heuristic queries, and real FP32 SGEMM execution
     - [x] keep TMA, WGMMA, DSMEM clusters, and CUDA cluster launch as
           source-level rewrite targets, not ABI promises
 - [x] CUDA-like feature follow-up sequence from
@@ -279,10 +279,17 @@ Local probes:
   - [x] expose HIP cooperative module launches and cooperative-launch device properties
   - [x] add an AMD-specific feature-parity planner for cluster/TMA/WGMMA ports
   - [x] document the explicit replacement model instead of pretending CUDA-only concepts are ABI-compatible
+  - [x] validate cooperative-launch support and resident grid capacity before
+        `hipModuleLaunchCooperativeKernel`
+  - [x] expose async raw device-pointer ingress copies for stream-ordered
+        interop/VMM/graphics staging
+  - [x] apply TMA-style tile-transfer staged LDS sizing to checked
+        `LaunchConfig` shared-memory bytes
 - [x] rocBLAS/rocFFT/library interop layer after the code-object model is stable:
   - [x] dynamically load rocBLAS/rocFFT so missing optional libraries do not break the core runtime
   - [x] expose a checked rocBLAS SGEMM wrapper for `DeviceBuffer<f32>`
   - [x] expose first rocFFT setup/plan/execute wrappers for in-place complex `f32` buffers
+  - [x] expose checked hipBLASLt SGEMM execution over `DeviceBuffer<f32>`
 - [x] ROCm profiler integration for achieved occupancy and memory behavior:
   - [x] add `cargo rocm-oxide profile` to run the default performance probe under `rocprof-compute profile`
   - [x] fall back to local or system `rocprofv3 --pmc Wavefronts` when ROCm Compute Profiler is unavailable

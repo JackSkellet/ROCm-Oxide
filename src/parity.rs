@@ -1,4 +1,4 @@
-use crate::{DeviceProperties, Error, Result};
+use crate::{DeviceLimits, DeviceProperties, Error, LaunchConfig, Result};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum CudaPortingConcept {
@@ -242,6 +242,32 @@ impl RocmTileTransferPlan {
             host_mapped_staging: properties.can_map_host_memory,
         })
     }
+
+    pub fn apply_to_launch_config(
+        self,
+        limits: DeviceLimits,
+        config: LaunchConfig,
+    ) -> Result<LaunchConfig> {
+        let staged_lds_bytes = u32::try_from(self.staged_lds_bytes).map_err(|_| {
+            Error::InvalidLaunch(format!(
+                "staged tile LDS/shared-memory request is {} bytes, exceeding u32 launch limit",
+                self.staged_lds_bytes
+            ))
+        })?;
+        let total_shared_mem = config.shared_mem_bytes as u64 + staged_lds_bytes as u64;
+        if total_shared_mem > limits.max_shared_mem_per_block as u64 {
+            return Err(Error::InvalidLaunch(format!(
+                "tile transfer requires {total_shared_mem} bytes of LDS/shared memory ({} existing + {} staged), but device limit is {} bytes per block",
+                config.shared_mem_bytes, staged_lds_bytes, limits.max_shared_mem_per_block
+            )));
+        }
+        let total_shared_mem = u32::try_from(total_shared_mem).map_err(|_| {
+            Error::InvalidLaunch(format!(
+                "tile transfer LDS/shared-memory request is {total_shared_mem} bytes, exceeding u32 launch limit"
+            ))
+        })?;
+        Ok(config.with_shared_mem_bytes(total_shared_mem))
+    }
 }
 
 impl RocmMatrixMathPlan {
@@ -249,7 +275,7 @@ impl RocmMatrixMathPlan {
         Self {
             backend: MatrixMathBackend::RocBlasLibrary,
             wavefront_size: properties.warp_size,
-            uses_matrix_cores: true,
+            uses_matrix_cores: false,
             requires_external_library: true,
         }
     }
@@ -278,6 +304,7 @@ impl RocmAdvancedHardwareRewritePlan {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::Dim3;
 
     fn props() -> DeviceProperties {
         DeviceProperties {
@@ -335,6 +362,54 @@ mod tests {
         assert_eq!(plan.staged_lds_bytes, 4096);
         assert!(plan.stream_ordered_copy);
         assert!(plan.host_mapped_staging);
+
+        let config = LaunchConfig::new(Dim3::x(2), Dim3::x(128)).with_shared_mem_bytes(256);
+        let config = plan
+            .apply_to_launch_config(DeviceLimits::prototype(), config)
+            .expect("tile staging should fit prototype LDS budget");
+        assert_eq!(config.shared_mem_bytes, 4352);
+    }
+
+    #[test]
+    fn tile_plan_reports_missing_async_copy_engines() {
+        let mut properties = props();
+        properties.async_engine_count = 0;
+        properties.can_map_host_memory = false;
+        let plan = RocmTileTransferPlan::for_2d_tile(properties, 4, 16, 16, 1).unwrap();
+        assert!(!plan.stream_ordered_copy);
+        assert!(!plan.host_mapped_staging);
+    }
+
+    #[test]
+    fn tile_plan_rejects_zero_dimensions() {
+        let err = RocmTileTransferPlan::for_2d_tile(props(), 4, 0, 16, 1)
+            .expect_err("zero tile width should fail");
+        assert!(err.to_string().contains("must be nonzero"));
+    }
+
+    #[test]
+    fn tile_plan_rejects_excess_launch_lds() {
+        let plan = RocmTileTransferPlan::for_2d_tile(props(), 4, 256, 256, 1).unwrap();
+        let err = plan
+            .apply_to_launch_config(
+                DeviceLimits::prototype(),
+                LaunchConfig::new(Dim3::x(1), Dim3::x(256)),
+            )
+            .expect_err("tile staging beyond LDS limit should fail");
+        assert!(err.to_string().contains("LDS/shared memory"));
+    }
+
+    #[test]
+    fn tile_plan_rejects_lds_launch_limit_overflow() {
+        let plan =
+            RocmTileTransferPlan::for_2d_tile(props(), 1, u32::MAX as usize + 1, 1, 1).unwrap();
+        let err = plan
+            .apply_to_launch_config(
+                DeviceLimits::prototype(),
+                LaunchConfig::new(Dim3::x(1), Dim3::x(256)),
+            )
+            .expect_err("tile staging beyond u32 launch limit should fail");
+        assert!(err.to_string().contains("u32 launch limit"));
     }
 
     #[test]

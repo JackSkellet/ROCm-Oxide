@@ -739,6 +739,68 @@ pub fn validate_cooperative_launch_config(config: LaunchConfig) -> Result<()> {
     Ok(())
 }
 
+pub fn validate_cooperative_launch_for_device(
+    config: LaunchConfig,
+    properties: DeviceProperties,
+    occupancy: OccupancyActiveBlocks,
+) -> Result<()> {
+    validate_cooperative_launch_config(config)?;
+    if !properties.cooperative_launch {
+        return Err(Error::InvalidLaunch(format!(
+            "device {} does not support cooperative launch",
+            properties.ordinal
+        )));
+    }
+
+    let grid_blocks = cooperative_grid_blocks(config)?;
+    let resident_blocks = (properties.multiprocessor_count as u64)
+        .checked_mul(occupancy.blocks_per_multiprocessor as u64)
+        .ok_or_else(|| {
+            Error::InvalidLaunch(
+                "cooperative launch resident block capacity overflows u64".to_string(),
+            )
+        })?;
+    if resident_blocks == 0 {
+        return Err(Error::InvalidLaunch(format!(
+            "cooperative launch has no resident block capacity: multiprocessors={} blocks_per_multiprocessor={}",
+            properties.multiprocessor_count, occupancy.blocks_per_multiprocessor
+        )));
+    }
+    if grid_blocks > resident_blocks {
+        return Err(Error::InvalidLaunch(format!(
+            "cooperative launch requests {grid_blocks} blocks, but the device can keep at most {resident_blocks} resident blocks ({} multiprocessors * {} blocks per multiprocessor)",
+            properties.multiprocessor_count, occupancy.blocks_per_multiprocessor
+        )));
+    }
+    Ok(())
+}
+
+fn cooperative_grid_blocks(config: LaunchConfig) -> Result<u64> {
+    if config.grid.x == 0
+        || config.grid.y == 0
+        || config.grid.z == 0
+        || config.block.x == 0
+        || config.block.y == 0
+        || config.block.z == 0
+    {
+        return Err(Error::InvalidLaunch(format!(
+            "cooperative launch grid and block dimensions must be nonzero, got grid=({}, {}, {}) block=({}, {}, {})",
+            config.grid.x,
+            config.grid.y,
+            config.grid.z,
+            config.block.x,
+            config.block.y,
+            config.block.z
+        )));
+    }
+    (config.grid.x as u64)
+        .checked_mul(config.grid.y as u64)
+        .and_then(|value| value.checked_mul(config.grid.z as u64))
+        .ok_or_else(|| {
+            Error::InvalidLaunch("cooperative launch grid block count overflows u64".to_string())
+        })
+}
+
 pub fn validate_buffer_len(name: &str, actual: usize, required: usize) -> Result<()> {
     if actual < required {
         Err(Error::InvalidLaunch(format!(
@@ -967,6 +1029,17 @@ impl Kernel {
         )
     }
 
+    pub fn validate_cooperative_launch_config(
+        &self,
+        config: LaunchConfig,
+    ) -> Result<OccupancyActiveBlocks> {
+        validate_launch_config_for_limits(config, self.limits, self.metadata)?;
+        let occupancy = self.occupancy_for_config(config)?;
+        let properties = DeviceProperties::query(self.device_ordinal)?;
+        validate_cooperative_launch_for_device(config, properties, occupancy)?;
+        Ok(occupancy)
+    }
+
     pub fn recommend_1d_launch(
         &self,
         num_elems: usize,
@@ -1170,8 +1243,7 @@ impl Kernel {
         config: LaunchConfig,
         params: &mut [*mut c_void],
     ) -> Result<()> {
-        validate_launch_config_for_limits(config, self.limits, self.metadata)?;
-        validate_cooperative_launch_config(config)?;
+        self.validate_cooperative_launch_config(config)?;
         unsafe {
             self.function.launch_cooperative_on_stream(
                 config.grid.as_tuple(),
@@ -1226,7 +1298,31 @@ mod tests {
         AtomicMemoryKind, Device, DeviceLimits, DeviceProperties, Dim3,
         HostReferenceCaptureVisibility, KernelMetadata, LaunchConfig, SystemScopeAtomicVisibility,
     };
-    use crate::hip::{DeviceBuffer, ManagedMemoryKind};
+    use crate::hip::{DeviceBuffer, ManagedMemoryKind, Stream};
+
+    fn cooperative_props() -> DeviceProperties {
+        DeviceProperties {
+            ordinal: 0,
+            managed_memory: true,
+            concurrent_managed_access: true,
+            cooperative_launch: true,
+            cooperative_multi_device_launch: false,
+            direct_managed_mem_access_from_host: false,
+            can_map_host_memory: true,
+            can_use_host_pointer_for_registered_mem: false,
+            host_native_atomic_supported: true,
+            pageable_memory_access: false,
+            pageable_memory_access_uses_host_page_tables: false,
+            memory_pools_supported: true,
+            unified_addressing: true,
+            host_register_supported: true,
+            async_engine_count: 2,
+            multiprocessor_count: 4,
+            warp_size: 32,
+            clock_instruction_rate_khz: 100_000,
+            wall_clock_rate_khz: 100_000,
+        }
+    }
 
     #[test]
     fn one_dimensional_launch_config_rounds_up() {
@@ -1333,6 +1429,95 @@ void raw_handle_probe(unsigned int* out) {
             super::validate_launch_config_for_limits(config, DeviceLimits::prototype(), metadata)
                 .expect_err("dynamic LDS kernel should need dynamic bytes");
         assert!(err.to_string().contains("requested 0 dynamic bytes"));
+    }
+
+    #[test]
+    fn cooperative_launch_validation_requires_device_support() {
+        let config = LaunchConfig::new(Dim3::x(1), Dim3::x(64));
+        let mut properties = cooperative_props();
+        properties.cooperative_launch = false;
+        let occupancy = super::OccupancyActiveBlocks {
+            blocks_per_multiprocessor: 1,
+        };
+        let err = super::validate_cooperative_launch_for_device(config, properties, occupancy)
+            .expect_err("device without cooperative launch support should fail");
+        assert!(err.to_string().contains("does not support cooperative"));
+    }
+
+    #[test]
+    fn cooperative_launch_validation_rejects_nonresident_grid() {
+        let config = LaunchConfig::new(Dim3::x(5), Dim3::x(64));
+        let properties = cooperative_props();
+        let occupancy = super::OccupancyActiveBlocks {
+            blocks_per_multiprocessor: 1,
+        };
+        let err = super::validate_cooperative_launch_for_device(config, properties, occupancy)
+            .expect_err("grid larger than resident capacity should fail");
+        assert!(err.to_string().contains("resident blocks"));
+    }
+
+    #[test]
+    fn cooperative_launch_validation_accepts_resident_grid() {
+        let config = LaunchConfig::new(Dim3::x(4), Dim3::x(64));
+        let properties = cooperative_props();
+        let occupancy = super::OccupancyActiveBlocks {
+            blocks_per_multiprocessor: 1,
+        };
+        super::validate_cooperative_launch_for_device(config, properties, occupancy)
+            .expect("resident cooperative launch should validate");
+    }
+
+    #[test]
+    fn cooperative_launch_validation_rejects_zero_block_dimension() {
+        let config = LaunchConfig::new(Dim3::x(1), Dim3::new(0, 1, 1));
+        let properties = cooperative_props();
+        let occupancy = super::OccupancyActiveBlocks {
+            blocks_per_multiprocessor: 1,
+        };
+        let err = super::validate_cooperative_launch_for_device(config, properties, occupancy)
+            .expect_err("zero block dimension should fail");
+        assert!(err.to_string().contains("must be nonzero"));
+    }
+
+    #[test]
+    fn cooperative_raw_launch_round_trips_if_supported() {
+        let device = Device::first().expect("device should be visible");
+        if !device
+            .supports_cooperative_launch()
+            .expect("cooperative launch support should be queryable")
+        {
+            return;
+        }
+        let module = device
+            .compile_hip_source(
+                r#"
+extern "C" __global__
+void cooperative_probe(unsigned int* out) {
+    if (blockIdx.x == 0 && threadIdx.x == 0) {
+        out[0] = 19;
+    }
+}
+"#,
+            )
+            .expect("cooperative probe should compile");
+        let kernel = module
+            .kernel(c"cooperative_probe")
+            .expect("cooperative probe kernel should load");
+        let output = DeviceBuffer::<u32>::new(1).expect("output allocation should work");
+        let stream = Stream::new().expect("stream should be created");
+        let mut out_ptr = output.as_mut_ptr();
+        let mut params = [crate::__private::arg_ptr(&mut out_ptr)];
+        unsafe {
+            kernel
+                .launch_cooperative_raw_on_stream(
+                    &stream,
+                    LaunchConfig::new(Dim3::x(1), Dim3::x(64)),
+                    &mut params,
+                )
+                .expect("resident cooperative launch should execute");
+        }
+        stream.synchronize().expect("stream should finish");
+        assert_eq!(output.copy_to_vec().expect("download should work"), [19]);
     }
 
     #[test]

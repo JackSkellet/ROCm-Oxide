@@ -2217,6 +2217,40 @@ impl<T> DeviceBuffer<T> {
         }
     }
 
+    /// Enqueues a copy from another device-visible pointer into this buffer.
+    ///
+    /// # Safety
+    ///
+    /// `input` must point to at least `len` valid `T` elements in device
+    /// address space, must be readable until `stream` reaches this copy, and
+    /// must not alias this buffer.
+    pub unsafe fn copy_from_device_ptr_async(
+        &self,
+        stream: &Stream,
+        input: *const T,
+        len: usize,
+    ) -> Result<()> {
+        validate_slice_len("async device-to-device source", len, self.len)?;
+        let bytes = checked_allocation_bytes::<T>(len, "async device-to-device copy")?;
+        if bytes == 0 {
+            return Ok(());
+        }
+        if input.is_null() {
+            return Err(Error::invalid_value(
+                "async device-to-device source pointer is null",
+            ));
+        }
+        unsafe {
+            check(hipMemcpyAsync(
+                self.ptr.cast::<c_void>(),
+                input.cast::<c_void>(),
+                bytes,
+                HIP_MEMCPY_DEVICE_TO_DEVICE,
+                stream.as_raw(),
+            ))
+        }
+    }
+
     /// Enqueues a host-to-device copy from pinned host memory.
     ///
     /// # Safety
@@ -3239,6 +3273,32 @@ mod tests {
             output.copy_to_vec().expect("download should work"),
             [13, 14, 15, 16]
         );
+    }
+
+    #[test]
+    fn async_device_pointer_copy_round_trips() {
+        let input = DeviceBuffer::from_slice(&[21u32, 22, 23, 24]).expect("upload should work");
+        let output = DeviceBuffer::<u32>::new(4).expect("output allocation should work");
+        let stream = Stream::new().expect("stream should be created");
+        unsafe {
+            output
+                .copy_from_device_ptr_async(&stream, input.as_ptr(), input.len())
+                .expect("async raw device pointer copy should work");
+        }
+        stream.synchronize().expect("stream should finish");
+        assert_eq!(
+            output.copy_to_vec().expect("download should work"),
+            [21, 22, 23, 24]
+        );
+    }
+
+    #[test]
+    fn async_device_pointer_copy_rejects_null_source_before_ffi() {
+        let output = DeviceBuffer::<u32>::new(4).expect("output allocation should work");
+        let stream = Stream::new().expect("stream should be created");
+        let err = unsafe { output.copy_from_device_ptr_async(&stream, std::ptr::null(), 4) }
+            .expect_err("null source pointer should fail before FFI");
+        assert!(err.to_string().contains("source pointer is null"));
     }
 
     #[test]

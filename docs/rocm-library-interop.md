@@ -58,16 +58,22 @@ persistent code-object cache shape as the HIPRTC backend.
 
 `HipBlasLt::open()` loads `libhipblaslt.so` or `libhipblaslt.so.1`, resolves
 handle create/destroy, version lookup, matmul descriptor/layout/preference
-creation, and `hipblasLtMatmulAlgoGetHeuristic`.
+creation, `hipblasLtMatmulAlgoGetHeuristic`, and `hipblasLtMatmul`.
 `HipBlasLtMatmulProblem::sgemm_nn()` validates a checked FP32 column-major
 matmul shape before `HipBlasLtHandle::sgemm_nn_heuristics()` asks hipBLASLt for
 candidate algorithms and summarizes the best workspace/state/wave estimate.
+`HipBlasLtHandle::sgemm_nn()` chooses the best returned algorithm, allocates
+temporary workspace when required, executes a synchronous SGEMM over
+`DeviceBuffer<f32>` values, and validates the output buffer sizes before the
+library call. `HipBlasLtHandle::sgemm_nn_on_stream()` exposes the same checked
+launch on a caller-provided HIP stream when the caller owns the stream-ordered
+buffer and workspace lifetimes.
 
 `MatrixIntegrationReport::query()` reports three CUDA-like matrix replacement
 candidates independently:
 
 - hipBLASLt: dynamic library availability plus handle/version and SGEMM
-  descriptor/heuristic smoke coverage.
+  descriptor, heuristic, and execution smoke coverage.
 - Composable Kernel: installed headers, device GEMM archive, and CMake package.
 - rocWMMA: header availability. This local ROCm install does not include
   `rocwmma/rocwmma.hpp`, so ROCm-Oxide must not assume a rocWMMA path exists.

@@ -68,9 +68,10 @@ Primary reference set:
      Kernel where installed;
    - keep tiled Rust kernels as the portable fallback.
    - Current status: `MatrixIntegrationReport` identifies hipBLASLt,
-     Composable Kernel, and rocWMMA availability, and `HipBlasLt` has checked
-     FP32 SGEMM problem descriptors plus heuristic query support. Actual matmul
-     execution and CK/rocWMMA expansion remain future scope.
+     Composable Kernel, and rocWMMA availability. `HipBlasLt` has checked FP32
+     SGEMM problem descriptors, heuristic query support, and a real SGEMM
+     execution wrapper for `DeviceBuffer<f32>`. CK/rocWMMA expansion remains
+     future scope.
 6. Runtime specialization cache:
    - cache HIPRTC/COMGR outputs by architecture, source hash, feature flags,
      and launch metadata;

@@ -45,8 +45,13 @@ Primary upstream reference:
       and rocWMMA, plus hipBLASLt handle/version loading.
 - [x] Checked hipBLASLt FP32 column-major SGEMM descriptor and heuristic query
       wrapper.
+- [x] Checked hipBLASLt FP32 SGEMM execution wrapper over `DeviceBuffer<f32>`.
 - [x] Explicit rewrite-only boundary for CUDA thread-block clusters, DSMEM, TMA,
       and WGMMA with ROCm source-level targets and `abi_compatible=false`.
+- [x] Cooperative-launch support and occupancy-derived resident grid validation
+      before HIP cooperative module launches.
+- [x] TMA-style tile-transfer planner that applies staged LDS bytes to
+      `LaunchConfig::shared_mem_bytes`.
 - [x] HIPRTC specialization cache keyed by backend, architecture, source,
       options, and launch metadata.
 - [x] COMGR HIP source compile/link backend with a persistent code-object cache
@@ -161,6 +166,8 @@ Primary upstream reference:
   - [x] stream-ordered allocation/free where supported by HIP, including
         async-aware drop cleanup for `DeviceBuffer`
   - [x] GPU-side memset and device-to-device buffer copies
+  - [x] sync and async raw device-pointer copies for device-visible interop
+        destinations and sources
   - [x] negative launch tests for generated buffer/block contracts
   - [x] pinned-buffer synchronous copy helpers
 - [x] Generated launch hot paths:

@@ -260,14 +260,14 @@ fn main() -> Result<()> {
         matrix_libraries.rocwmma.available
     );
     match run_hipblaslt_smoke() {
-        Ok((version, heuristics)) => println!(
-            "ok: hipBLASLt descriptor/heuristic smoke completed: version={version} algos={}/{} best_workspace={:?} waves={:?}",
+        Ok((version, heuristics, sample)) => println!(
+            "ok: hipBLASLt SGEMM execution completed: version={version} algos={}/{} best_workspace={:?} waves={:?} sample={sample:.3}",
             heuristics.returned_algo_count,
             heuristics.requested_algo_count,
             heuristics.best_workspace_bytes,
             heuristics.best_waves_count
         ),
-        Err(err) => println!("skip: hipBLASLt descriptor/heuristic smoke: {err}"),
+        Err(err) => println!("skip: hipBLASLt SGEMM execution smoke: {err}"),
     }
     hiprtc::clear_specialization_cache();
     let _first_specialized = device.compile_hip_source_specialized(
@@ -673,11 +673,34 @@ fn run_rocprim_smoke() -> Result<()> {
     Ok(())
 }
 
-fn run_hipblaslt_smoke() -> Result<(i32, HipBlasLtHeuristicSummary)> {
+fn run_hipblaslt_smoke() -> Result<(i32, HipBlasLtHeuristicSummary, f32)> {
     let lt = HipBlasLt::open()?;
     let handle = lt.create_handle()?;
     let version = handle.version()?;
-    let problem = HipBlasLtMatmulProblem::sgemm_nn(64, 64, 64, 4 * 1024 * 1024)?;
-    let heuristics = handle.sgemm_nn_heuristics(problem, 8)?;
-    Ok((version, heuristics))
+    let m = 64usize;
+    let n = 64usize;
+    let k = 64usize;
+    let mut a = vec![0.0f32; m * k];
+    for i in 0..m {
+        a[i + i * m] = 1.0;
+    }
+    let b = (0..k * n)
+        .map(|index| (index as f32) * 0.125 + 0.5)
+        .collect::<Vec<_>>();
+    let c = vec![0.0f32; m * n];
+    let d_a = DeviceBuffer::from_slice(&a)?;
+    let d_b = DeviceBuffer::from_slice(&b)?;
+    let d_c = DeviceBuffer::from_slice(&c)?;
+    let d = DeviceBuffer::<f32>::new(m * n)?;
+    let problem = HipBlasLtMatmulProblem::sgemm_nn(m as u64, n as u64, k as u64, 4 * 1024 * 1024)?;
+    let heuristics = handle.sgemm_nn(problem, 1.0, &d_a, &d_b, 0.0, &d_c, &d, 8)?;
+    let out = d.copy_to_vec()?;
+    let sample_index = 17 + 9 * m;
+    if (out[sample_index] - b[sample_index]).abs() > 0.001 {
+        return Err(rocm_oxide::Error::Library(format!(
+            "hipBLASLt SGEMM sample mismatch: got {}, expected {}",
+            out[sample_index], b[sample_index]
+        )));
+    }
+    Ok((version, heuristics, out[sample_index]))
 }

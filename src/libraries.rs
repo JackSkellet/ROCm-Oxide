@@ -116,6 +116,24 @@ type HipBlasLtMatmulAlgoGetHeuristic = unsafe extern "C" fn(
     *mut HipBlasLtMatmulHeuristicResultRaw,
     *mut c_int,
 ) -> HipBlasLtStatus;
+type HipBlasLtMatmul = unsafe extern "C" fn(
+    HipBlasLtHandleRaw,
+    HipBlasLtMatmulDescRaw,
+    *const c_void,
+    *const c_void,
+    HipBlasLtMatrixLayoutRaw,
+    *const c_void,
+    HipBlasLtMatrixLayoutRaw,
+    *const c_void,
+    *const c_void,
+    HipBlasLtMatrixLayoutRaw,
+    *mut c_void,
+    HipBlasLtMatrixLayoutRaw,
+    *const HipBlasLtMatmulAlgoRaw,
+    *mut c_void,
+    usize,
+    *mut c_void,
+) -> HipBlasLtStatus;
 
 #[repr(C)]
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -492,6 +510,7 @@ struct HipBlasLtFunctions {
     matmul_preference_destroy: HipBlasLtMatmulPreferenceDestroy,
     matmul_preference_set_attribute: HipBlasLtMatmulPreferenceSetAttribute,
     matmul_algo_get_heuristic: HipBlasLtMatmulAlgoGetHeuristic,
+    matmul: HipBlasLtMatmul,
 }
 
 struct ComgrFunctions {
@@ -720,6 +739,36 @@ impl HipBlasLtMatmulProblem {
             max_workspace_bytes,
         })
     }
+
+    fn validate_buffers(
+        self,
+        a_len: usize,
+        b_len: usize,
+        c_len: usize,
+        d_len: usize,
+    ) -> Result<()> {
+        validate_buffer_len(
+            "hipBLASLt SGEMM A",
+            a_len,
+            hipblaslt_matrix_elements(self.a)?,
+        )?;
+        validate_buffer_len(
+            "hipBLASLt SGEMM B",
+            b_len,
+            hipblaslt_matrix_elements(self.b)?,
+        )?;
+        validate_buffer_len(
+            "hipBLASLt SGEMM C",
+            c_len,
+            hipblaslt_matrix_elements(self.c)?,
+        )?;
+        validate_buffer_len(
+            "hipBLASLt SGEMM D",
+            d_len,
+            hipblaslt_matrix_elements(self.d)?,
+        )?;
+        Ok(())
+    }
 }
 
 impl RocBlas {
@@ -881,6 +930,110 @@ impl HipBlasLtHandle {
         problem: HipBlasLtMatmulProblem,
         requested_algo_count: i32,
     ) -> Result<HipBlasLtHeuristicSummary> {
+        let (results, returned_algo_count) =
+            self.sgemm_nn_heuristic_results(problem, requested_algo_count)?;
+        Ok(summarize_hipblaslt_heuristics(
+            requested_algo_count,
+            returned_algo_count,
+            &results,
+            problem.max_workspace_bytes,
+        ))
+    }
+
+    pub fn sgemm_nn(
+        &self,
+        problem: HipBlasLtMatmulProblem,
+        alpha: f32,
+        a: &DeviceBuffer<f32>,
+        b: &DeviceBuffer<f32>,
+        beta: f32,
+        c: &DeviceBuffer<f32>,
+        d: &DeviceBuffer<f32>,
+        requested_algo_count: i32,
+    ) -> Result<HipBlasLtHeuristicSummary> {
+        let (results, returned_algo_count) =
+            self.sgemm_nn_heuristic_results(problem, requested_algo_count)?;
+        let best = best_hipblaslt_heuristic(&results, returned_algo_count)?;
+        let workspace = (best.workspace_size > 0)
+            .then(|| DeviceAlgorithmTemporaryStorage::new(best.workspace_size))
+            .transpose()?;
+        let stream = Stream::new()?;
+        unsafe {
+            self.launch_sgemm_nn_on_stream(
+                &stream,
+                problem,
+                alpha,
+                a,
+                b,
+                beta,
+                c,
+                d,
+                &best.algo,
+                best.workspace_size,
+                workspace.as_ref(),
+            )?;
+        }
+        stream.synchronize()?;
+        Ok(summarize_hipblaslt_heuristics(
+            requested_algo_count,
+            returned_algo_count,
+            &results,
+            problem.max_workspace_bytes,
+        ))
+    }
+
+    /// Enqueues FP32 column-major `D = alpha * A * B + beta * C` through hipBLASLt.
+    ///
+    /// # Safety
+    ///
+    /// The caller must keep `a`, `b`, `c`, `d`, `temporary_storage`, and `stream`
+    /// alive until the stream reaches the enqueued matmul. When a heuristic
+    /// requires workspace, `temporary_storage` must refer to device memory that
+    /// is not concurrently mutated by other work on the same interval.
+    pub unsafe fn sgemm_nn_on_stream(
+        &self,
+        stream: &Stream,
+        problem: HipBlasLtMatmulProblem,
+        alpha: f32,
+        a: &DeviceBuffer<f32>,
+        b: &DeviceBuffer<f32>,
+        beta: f32,
+        c: &DeviceBuffer<f32>,
+        d: &DeviceBuffer<f32>,
+        temporary_storage: Option<&DeviceAlgorithmTemporaryStorage>,
+        requested_algo_count: i32,
+    ) -> Result<HipBlasLtHeuristicSummary> {
+        let (results, returned_algo_count) =
+            self.sgemm_nn_heuristic_results(problem, requested_algo_count)?;
+        let best = best_hipblaslt_heuristic(&results, returned_algo_count)?;
+        unsafe {
+            self.launch_sgemm_nn_on_stream(
+                stream,
+                problem,
+                alpha,
+                a,
+                b,
+                beta,
+                c,
+                d,
+                &best.algo,
+                best.workspace_size,
+                temporary_storage,
+            )?;
+        }
+        Ok(summarize_hipblaslt_heuristics(
+            requested_algo_count,
+            returned_algo_count,
+            &results,
+            problem.max_workspace_bytes,
+        ))
+    }
+
+    fn sgemm_nn_heuristic_results(
+        &self,
+        problem: HipBlasLtMatmulProblem,
+        requested_algo_count: i32,
+    ) -> Result<(Vec<HipBlasLtMatmulHeuristicResultRaw>, i32)> {
         if requested_algo_count <= 0 {
             return Err(Error::Library(format!(
                 "hipBLASLt requested algorithm count must be positive, got {requested_algo_count}"
@@ -917,15 +1070,74 @@ impl HipBlasLtHandle {
             )?;
         }
 
-        let best = (returned_algo_count > 0).then_some(results[0]);
-        Ok(HipBlasLtHeuristicSummary {
-            requested_algo_count,
-            returned_algo_count,
-            best_workspace_bytes: best.map(|result| result.workspace_size),
-            best_state: best.map(|result| result.state),
-            best_waves_count: best.map(|result| result.waves_count),
-            workspace_limit_bytes: problem.max_workspace_bytes,
-        })
+        Ok((results, returned_algo_count))
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    unsafe fn launch_sgemm_nn_on_stream(
+        &self,
+        stream: &Stream,
+        problem: HipBlasLtMatmulProblem,
+        alpha: f32,
+        a: &DeviceBuffer<f32>,
+        b: &DeviceBuffer<f32>,
+        beta: f32,
+        c: &DeviceBuffer<f32>,
+        d: &DeviceBuffer<f32>,
+        algo: &HipBlasLtMatmulAlgoRaw,
+        workspace_bytes: usize,
+        temporary_storage: Option<&DeviceAlgorithmTemporaryStorage>,
+    ) -> Result<()> {
+        problem.validate_buffers(a.len(), b.len(), c.len(), d.len())?;
+        let workspace = if workspace_bytes == 0 {
+            ptr::null_mut()
+        } else {
+            let storage = temporary_storage.ok_or_else(|| {
+                Error::Library(format!(
+                    "hipBLASLt SGEMM requires {workspace_bytes} bytes of temporary storage"
+                ))
+            })?;
+            validate_buffer_len(
+                "hipBLASLt SGEMM workspace",
+                storage.bytes(),
+                workspace_bytes,
+            )?;
+            storage.as_mut_ptr()
+        };
+
+        let matmul_desc = HipBlasLtMatmulDesc::sgemm_nn(Arc::clone(&self.funcs))?;
+        let a_desc =
+            HipBlasLtMatrixLayoutDesc::fp32_column_major(Arc::clone(&self.funcs), problem.a)?;
+        let b_desc =
+            HipBlasLtMatrixLayoutDesc::fp32_column_major(Arc::clone(&self.funcs), problem.b)?;
+        let c_desc =
+            HipBlasLtMatrixLayoutDesc::fp32_column_major(Arc::clone(&self.funcs), problem.c)?;
+        let d_desc =
+            HipBlasLtMatrixLayoutDesc::fp32_column_major(Arc::clone(&self.funcs), problem.d)?;
+
+        unsafe {
+            check_hipblaslt(
+                (self.funcs.matmul)(
+                    self.raw,
+                    matmul_desc.raw,
+                    (&alpha as *const f32).cast::<c_void>(),
+                    a.as_ptr().cast::<c_void>(),
+                    a_desc.raw,
+                    b.as_ptr().cast::<c_void>(),
+                    b_desc.raw,
+                    (&beta as *const f32).cast::<c_void>(),
+                    c.as_ptr().cast::<c_void>(),
+                    c_desc.raw,
+                    d.as_mut_ptr().cast::<c_void>(),
+                    d_desc.raw,
+                    algo,
+                    workspace,
+                    workspace_bytes,
+                    stream.as_raw(),
+                ),
+                "hipblasLtMatmul",
+            )
+        }
     }
 }
 
@@ -2013,6 +2225,7 @@ impl HipBlasLtFunctions {
                 lib.symbol(c"hipblasLtMatmulPreferenceSetAttribute")?
             },
             matmul_algo_get_heuristic: unsafe { lib.symbol(c"hipblasLtMatmulAlgoGetHeuristic")? },
+            matmul: unsafe { lib.symbol(c"hipblasLtMatmul")? },
             _lib: lib,
         })
     }
@@ -2531,6 +2744,60 @@ fn matrix_elements(leading_dim: u32, columns: u32) -> Result<usize> {
         .ok_or_else(|| Error::Library("matrix element count overflows usize".to_string()))
 }
 
+fn hipblaslt_matrix_elements(layout: HipBlasLtMatrixLayout) -> Result<usize> {
+    let leading_dim = usize::try_from(layout.leading_dim).map_err(|_| {
+        Error::Library(format!(
+            "hipBLASLt leading dimension {} cannot be represented as usize",
+            layout.leading_dim
+        ))
+    })?;
+    let columns = usize::try_from(layout.cols).map_err(|_| {
+        Error::Library(format!(
+            "hipBLASLt column count {} cannot be represented as usize",
+            layout.cols
+        ))
+    })?;
+    leading_dim
+        .checked_mul(columns)
+        .ok_or_else(|| Error::Library("hipBLASLt matrix element count overflows usize".to_string()))
+}
+
+fn best_hipblaslt_heuristic(
+    results: &[HipBlasLtMatmulHeuristicResultRaw],
+    returned_algo_count: i32,
+) -> Result<HipBlasLtMatmulHeuristicResultRaw> {
+    if returned_algo_count <= 0 {
+        return Err(Error::Library(
+            "hipBLASLt returned no SGEMM algorithms for the requested problem".to_string(),
+        ));
+    }
+    let best = results[0];
+    if best.state != HIPBLAS_STATUS_SUCCESS {
+        return Err(Error::Library(format!(
+            "hipBLASLt best SGEMM algorithm returned state {}",
+            best.state
+        )));
+    }
+    Ok(best)
+}
+
+fn summarize_hipblaslt_heuristics(
+    requested_algo_count: i32,
+    returned_algo_count: i32,
+    results: &[HipBlasLtMatmulHeuristicResultRaw],
+    workspace_limit_bytes: u64,
+) -> HipBlasLtHeuristicSummary {
+    let best = (returned_algo_count > 0).then_some(results[0]);
+    HipBlasLtHeuristicSummary {
+        requested_algo_count,
+        returned_algo_count,
+        best_workspace_bytes: best.map(|result| result.workspace_size),
+        best_state: best.map(|result| result.state),
+        best_waves_count: best.map(|result| result.waves_count),
+        workspace_limit_bytes,
+    }
+}
+
 fn c_int_from_u32(label: &str, value: u32) -> Result<c_int> {
     c_int::try_from(value)
         .map_err(|_| Error::Library(format!("{label} value {value} exceeds rocBLAS int range")))
@@ -2689,6 +2956,45 @@ mod tests {
         assert!(summary.returned_algo_count >= 0);
         if let Some(workspace) = summary.best_workspace_bytes {
             assert!(workspace <= summary.workspace_limit_bytes as usize);
+        }
+    }
+
+    #[test]
+    fn hipblaslt_sgemm_executes_if_library_is_available() {
+        let Ok(lt) = HipBlasLt::open() else {
+            return;
+        };
+        let Ok(handle) = lt.create_handle() else {
+            return;
+        };
+
+        let m = 64usize;
+        let n = 64usize;
+        let k = 64usize;
+        let mut a = vec![0.0f32; m * k];
+        for i in 0..m {
+            a[i + i * m] = 1.0;
+        }
+        let b = (0..k * n)
+            .map(|index| (index as f32) * 0.25 + 1.0)
+            .collect::<Vec<_>>();
+        let c = vec![0.0f32; m * n];
+        let d = DeviceBuffer::<f32>::new(m * n).expect("output allocation should succeed");
+        let d_a = DeviceBuffer::from_slice(&a).expect("A allocation should succeed");
+        let d_b = DeviceBuffer::from_slice(&b).expect("B allocation should succeed");
+        let d_c = DeviceBuffer::from_slice(&c).expect("C allocation should succeed");
+        let problem =
+            HipBlasLtMatmulProblem::sgemm_nn(m as u64, n as u64, k as u64, 4 * 1024 * 1024)
+                .expect("valid SGEMM descriptor should be accepted");
+
+        let summary = handle
+            .sgemm_nn(problem, 1.0, &d_a, &d_b, 0.0, &d_c, &d, 8)
+            .expect("available hipBLASLt library should execute SGEMM");
+        assert!(summary.returned_algo_count > 0);
+
+        let out = d.copy_to_vec().expect("D copy should succeed");
+        for (actual, expected) in out.iter().zip(&b) {
+            assert!((actual - expected).abs() < 0.001);
         }
     }
 
