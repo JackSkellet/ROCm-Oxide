@@ -1,6 +1,9 @@
-use minifb::{Key, Scale, Window, WindowOptions};
 use rocm_oxide::{Device, DeviceBuffer, LaunchConfig};
 use std::time::Instant;
+
+#[path = "shared/visual_presenter.rs"]
+mod visual_presenter;
+use visual_presenter::{Key, Scale, Window, WindowOptions, requested_frames};
 
 mod generated {
     include!(env!("ROCM_OXIDE_DEVICE_BINDINGS"));
@@ -25,13 +28,14 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         WindowOptions {
             resize: true,
             scale: Scale::X1,
-            ..WindowOptions::default()
         },
     )?;
     window.set_target_fps(60);
 
     let start = Instant::now();
     let mut frame_index = 0u32;
+    let max_frames = requested_frames("ROCM_OXIDE_RAINBOW_MAX_FRAMES");
+    let mut rendered_frames = 0u32;
     while window.is_open() && !window.is_key_down(Key::Escape) {
         unsafe {
             kernels.rainbow_geometry(
@@ -47,6 +51,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         window.update_with_buffer(&host_frame, WIDTH, HEIGHT)?;
 
         frame_index = start.elapsed().as_millis() as u32 / 16;
+        rendered_frames += 1;
+        if max_frames.is_some_and(|limit| rendered_frames >= limit) {
+            break;
+        }
     }
 
     Ok(())

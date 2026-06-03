@@ -1,5 +1,4 @@
 use font8x8::{BASIC_FONTS, UnicodeFonts};
-use minifb::{Key, KeyRepeat, MouseButton, MouseMode, Scale, Window as MiniWindow, WindowOptions};
 use rocm_oxide::{Device, DeviceBuffer, LaunchConfig};
 use std::io::{self, Write};
 use std::sync::{
@@ -9,6 +8,13 @@ use std::sync::{
 use std::thread;
 use std::time::{Duration, Instant};
 use xcap::Window as CaptureWindow;
+
+#[path = "shared/visual_presenter.rs"]
+mod visual_presenter;
+use visual_presenter::{
+    Key, KeyRepeat, MouseButton, MouseMode, Scale, Window as MiniWindow, WindowOptions,
+    requested_frames,
+};
 
 mod generated {
     include!(env!("ROCM_OXIDE_DEVICE_BINDINGS"));
@@ -106,7 +112,6 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         WindowOptions {
             resize: true,
             scale: Scale::X1,
-            ..WindowOptions::default()
         },
     )?;
 
@@ -121,9 +126,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let mut previous_mouse = false;
     let mut last_title = Instant::now();
     let start = Instant::now();
-    let max_frames = std::env::var("ROCM_OXIDE_WINDOW_FX_MAX_FRAMES")
-        .ok()
-        .and_then(|value| value.parse::<u32>().ok());
+    let max_frames = requested_frames("ROCM_OXIDE_WINDOW_FX_MAX_FRAMES");
 
     while window.is_open() && !window.is_key_down(Key::Escape) {
         for key in window.get_keys_pressed(KeyRepeat::No) {
@@ -555,7 +558,7 @@ fn pick_window() -> Result<Option<PickedWindow>, Box<dyn std::error::Error>> {
         return Ok(None);
     }
 
-    let requested = std::env::args().nth(1);
+    let requested = requested_capture_window();
 
     println!("Choose a window to mirror/effect:");
     for (index, (_, app, title, width, height)) in candidates.iter().enumerate() {
@@ -596,6 +599,24 @@ fn pick_window() -> Result<Option<PickedWindow>, Box<dyn std::error::Error>> {
         window,
         label: format!("{app}: {title}"),
     }))
+}
+
+fn requested_capture_window() -> Option<String> {
+    let mut args = std::env::args().skip(1);
+    while let Some(arg) = args.next() {
+        if arg == "--present" || arg == "--frames" {
+            let _ = args.next();
+            continue;
+        }
+        if arg.starts_with("--present=") || arg.starts_with("--frames=") {
+            continue;
+        }
+        if arg.starts_with("--") {
+            continue;
+        }
+        return Some(arg);
+    }
+    std::env::var("ROCM_OXIDE_WINDOW_FX_TARGET").ok()
 }
 
 fn downsample_to_u32(image: &image::RgbaImage, output: &mut [u32], upscale_level: u32) {

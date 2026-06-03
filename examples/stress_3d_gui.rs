@@ -1,6 +1,9 @@
-use minifb::{Key, KeyRepeat, Scale, Window, WindowOptions};
 use rocm_oxide::{Device, DeviceBuffer, LaunchConfig};
 use std::time::{Duration, Instant};
+
+#[path = "shared/visual_presenter.rs"]
+mod visual_presenter;
+use visual_presenter::{Key, KeyRepeat, Scale, Window, WindowOptions, requested_frames};
 
 mod generated {
     include!(env!("ROCM_OXIDE_DEVICE_BINDINGS"));
@@ -36,7 +39,6 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         WindowOptions {
             resize: true,
             scale: Scale::X1,
-            ..WindowOptions::default()
         },
     )?;
 
@@ -45,8 +47,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let mut paused = false;
     let mut frame_index = 0u32;
     let mut frames = 0u32;
+    let mut rendered_frames = 0u32;
     let mut last_title = Instant::now();
     let start = Instant::now();
+    let max_frames = requested_frames("ROCM_OXIDE_STRESS_3D_MAX_FRAMES");
 
     while window.is_open() && !window.is_key_down(Key::Escape) {
         for key in window.get_keys_pressed(KeyRepeat::Yes) {
@@ -85,6 +89,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         window.update_with_buffer(&host_frame, WIDTH, HEIGHT)?;
 
         frames += 1;
+        rendered_frames += 1;
         let elapsed = last_title.elapsed();
         if elapsed >= Duration::from_millis(500) {
             let fps = frames as f64 / elapsed.as_secs_f64();
@@ -97,6 +102,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 work_iters,
                 device.arch(),
             ));
+        }
+        if max_frames.is_some_and(|limit| rendered_frames >= limit) {
+            break;
         }
     }
 

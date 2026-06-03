@@ -1026,6 +1026,9 @@ impl Module {
     /// Returns the underlying HIP module handle without transferring ownership.
     ///
     /// This is an interop escape hatch for ROCm APIs that need the raw module.
+    ///
+    /// # Safety
+    ///
     /// The handle remains valid only while this `Module` or kernels/globals
     /// derived from it keep the module alive. Callers must not unload it and
     /// must make `device_ordinal()` current before using it with foreign HIP
@@ -1099,6 +1102,9 @@ impl Kernel {
     /// Returns the underlying HIP function handle without transferring ownership.
     ///
     /// This is an interop escape hatch for ROCm APIs that need the raw function.
+    ///
+    /// # Safety
+    ///
     /// The handle remains valid only while this `Kernel` is alive. Callers must
     /// make `device_ordinal()` current before using it with foreign HIP APIs.
     pub unsafe fn as_raw_hip_function(&self) -> hip::HipFunction {

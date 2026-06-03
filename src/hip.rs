@@ -2615,6 +2615,8 @@ impl Module {
 
     /// Returns the owned HIP module handle without transferring ownership.
     ///
+    /// # Safety
+    ///
     /// The handle remains valid only while this `Module` or handles derived from
     /// it are alive. Callers must not unload or otherwise take ownership of the
     /// returned handle, and must make the owning HIP device/context current
@@ -2774,6 +2776,8 @@ pub unsafe fn launch_cooperative_multi_device(
 
 impl Function {
     /// Returns the HIP function handle without transferring ownership.
+    ///
+    /// # Safety
     ///
     /// The returned entry-point handle is kept valid by this `Function`, which
     /// retains the owning module. Callers must not use it after dropping this

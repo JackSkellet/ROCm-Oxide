@@ -1,5 +1,4 @@
 use font8x8::{BASIC_FONTS, UnicodeFonts};
-use minifb::{Key, KeyRepeat, MouseButton, MouseMode, Scale, Window, WindowOptions};
 use rocm_oxide::{
     Device, DeviceBuffer, DeviceOperation, Dim3, HostReferenceCaptureVisibility, LaunchConfig,
     ManagedBuffer, ManagedMemoryKind, MatrixIntegrationReport, PinnedHostBuffer, RocmLibraryReport,
@@ -7,6 +6,10 @@ use rocm_oxide::{
 };
 use std::sync::Arc;
 use std::time::{Duration, Instant};
+
+#[path = "shared/visual_presenter.rs"]
+mod visual_presenter;
+use visual_presenter::{Key, KeyRepeat, MouseButton, MouseMode, Scale, Window, WindowOptions};
 
 mod generated {
     include!(env!("ROCM_OXIDE_DEVICE_BINDINGS"));
@@ -110,7 +113,6 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         WindowOptions {
             resize: true,
             scale: Scale::X1,
-            ..WindowOptions::default()
         },
     )?;
     window.set_target_fps(60);

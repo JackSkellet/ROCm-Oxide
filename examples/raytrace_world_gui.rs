@@ -1,6 +1,9 @@
-use minifb::{Key, Scale, Window, WindowOptions};
 use rocm_oxide::{Device, DeviceBuffer, LaunchConfig};
 use std::time::{Duration, Instant};
+
+#[path = "shared/visual_presenter.rs"]
+mod visual_presenter;
+use visual_presenter::{Key, KeyRepeat, Scale, Window, WindowOptions};
 
 mod generated {
     include!(env!("ROCM_OXIDE_DEVICE_BINDINGS"));
@@ -66,7 +69,6 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         WindowOptions {
             resize: true,
             scale: Scale::X1,
-            ..WindowOptions::default()
         },
     )?;
 
@@ -106,16 +108,16 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         if window.is_key_down(Key::Down) {
             pitch = (pitch - 1.2 * dt).max(-0.55);
         }
-        if window.is_key_pressed(Key::Key1, minifb::KeyRepeat::No) {
+        if window.is_key_pressed(Key::Key1, KeyRepeat::No) {
             shadows = !shadows;
         }
-        if window.is_key_pressed(Key::Key2, minifb::KeyRepeat::No) {
+        if window.is_key_pressed(Key::Key2, KeyRepeat::No) {
             reflections = !reflections;
         }
-        if window.is_key_pressed(Key::Space, minifb::KeyRepeat::No) {
+        if window.is_key_pressed(Key::Space, KeyRepeat::No) {
             paused = !paused;
         }
-        if window.is_key_pressed(Key::R, minifb::KeyRepeat::No) {
+        if window.is_key_pressed(Key::R, KeyRepeat::No) {
             pos = Vec3::new(0.0, 0.28, -1.6);
             yaw = 0.0;
             pitch = 0.04;
