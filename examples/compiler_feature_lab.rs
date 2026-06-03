@@ -9,7 +9,9 @@ use std::time::{Duration, Instant};
 
 #[path = "shared/visual_presenter.rs"]
 mod visual_presenter;
-use visual_presenter::{Key, KeyRepeat, MouseButton, MouseMode, Scale, Window, WindowOptions};
+use visual_presenter::{
+    Key, KeyRepeat, MouseButton, MouseMode, Scale, Window, WindowOptions, requested_frames,
+};
 
 mod generated {
     include!(env!("ROCM_OXIDE_DEVICE_BINDINGS"));
@@ -117,7 +119,6 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     )?;
     window.set_target_fps(60);
 
-    let mut frame = vec![0u32; WIDTH * HEIGHT];
     let mut mouse_was_down = false;
     let mut rendered = 0u32;
     let start = Instant::now();
@@ -166,8 +167,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         } else {
             start.elapsed()
         };
-        draw(&mut frame, &state, mouse, elapsed);
-        window.update_with_buffer(&frame, WIDTH, HEIGHT)?;
+        window.update_with_frame(WIDTH, HEIGHT, |frame| {
+            draw(frame, &state, mouse, elapsed);
+        })?;
 
         rendered += 1;
         if max_frames.is_some_and(|limit| rendered >= limit) {
@@ -179,15 +181,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 }
 
 fn parse_max_frames() -> Option<u32> {
-    let mut args = std::env::args().skip(1);
-    while let Some(arg) = args.next() {
-        if arg == "--frames" {
-            return args.next().and_then(|value| value.parse::<u32>().ok());
-        }
-    }
-    std::env::var("ROCM_OXIDE_FEATURE_LAB_FRAMES")
-        .ok()
-        .and_then(|value| value.parse::<u32>().ok())
+    requested_frames("ROCM_OXIDE_FEATURE_LAB_FRAMES")
 }
 
 fn rerun_probes(state: &mut AppState) {

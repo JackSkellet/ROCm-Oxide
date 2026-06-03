@@ -19,7 +19,6 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let n = WIDTH * HEIGHT;
     let block_x = 256u32;
     let device_frame = DeviceBuffer::<u32>::new(n)?;
-    let mut host_frame = vec![0u32; n];
 
     let mut window = Window::new(
         "ROCm-Oxide Rainbow Geometry - Rust kernel on AMD GPU",
@@ -47,8 +46,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             )?;
         }
         rocm_oxide::hip::synchronize()?;
-        device_frame.copy_to_host(&mut host_frame)?;
-        window.update_with_buffer(&host_frame, WIDTH, HEIGHT)?;
+        window.update_with_device_buffer(&device_frame, WIDTH, HEIGHT)?;
 
         frame_index = start.elapsed().as_millis() as u32 / 16;
         rendered_frames += 1;

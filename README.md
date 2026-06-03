@@ -111,12 +111,19 @@ cargo run --example raytrace_world_gui -- --present vulkan
 cargo run --example performance_probe -- --json target/performance_probe.json
 ```
 
+See [docs/visual-demos.md](docs/visual-demos.md) for a table of every visual
+demo, its launch options, bounded-run environment variables, and presentation
+path.
+
 The smaller windowed visual demos (`rainbow_geometry_window`,
 `raytrace_world_gui`, `stress_test_gui`, `stress_3d_gui`,
 `possibilities_window`, `compiler_feature_lab`, and `window_effects_lab`) share
 an example-only presenter. They keep the default `minifb` path and accept
 `--present vulkan` or `ROCM_OXIDE_VISUAL_PRESENT=vulkan` for Vulkan swapchain
-presentation.
+presentation. In Vulkan mode, GPU-rendered frames are copied device-to-device
+into exportable Vulkan memory imported by HIP; demos with CPU UI overlays copy
+only the overlay rectangles after the GPU frame, rather than reading the full
+frame back to host.
 
 The interactive stress examples clamp work-iteration controls to bounded safe
 presets, currently no more than 4096 iterations per launch. Treat uncapped FPS or

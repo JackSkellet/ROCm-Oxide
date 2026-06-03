@@ -3,7 +3,7 @@ use std::time::{Duration, Instant};
 
 #[path = "shared/visual_presenter.rs"]
 mod visual_presenter;
-use visual_presenter::{Key, KeyRepeat, Scale, Window, WindowOptions};
+use visual_presenter::{Key, KeyRepeat, Scale, Window, WindowOptions, requested_frames};
 
 mod generated {
     include!(env!("ROCM_OXIDE_DEVICE_BINDINGS"));
@@ -59,7 +59,6 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let block_x = 256u32;
     let device_frame = DeviceBuffer::<u32>::new(pixel_count)?;
     let device_camera = DeviceBuffer::<f32>::new(CAMERA_PARAMS)?;
-    let mut host_frame = vec![0u32; pixel_count];
     let mut camera_params = vec![0.0f32; CAMERA_PARAMS];
 
     let mut window = Window::new(
@@ -84,9 +83,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let mut last_title = Instant::now();
     let mut last_frame = Instant::now();
     let start = Instant::now();
-    let max_frames = std::env::var("ROCM_OXIDE_RAYTRACE_MAX_FRAMES")
-        .ok()
-        .and_then(|value| value.parse::<u32>().ok());
+    let max_frames = requested_frames("ROCM_OXIDE_RAYTRACE_MAX_FRAMES");
     let toggle_reflections_at = std::env::var("ROCM_OXIDE_RAYTRACE_TOGGLE_REFLECTIONS_AT")
         .ok()
         .and_then(|value| value.parse::<u32>().ok());
@@ -184,7 +181,6 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 )?;
             }
             rocm_oxide::hip::synchronize()?;
-            device_frame.copy_to_host(&mut host_frame)?;
             Ok(())
         })();
 
@@ -197,7 +193,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             continue;
         }
 
-        window.update_with_buffer(&host_frame, WIDTH, HEIGHT)?;
+        window.update_with_device_buffer(&device_frame, WIDTH, HEIGHT)?;
         frames += 1;
         rendered_frames += 1;
         let elapsed = last_title.elapsed();

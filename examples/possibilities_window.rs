@@ -7,7 +7,10 @@ use std::time::{Duration, Instant};
 
 #[path = "shared/visual_presenter.rs"]
 mod visual_presenter;
-use visual_presenter::{Key, KeyRepeat, MouseButton, MouseMode, Scale, Window, WindowOptions};
+use visual_presenter::{
+    CopyRegion, Key, KeyRepeat, MouseButton, MouseMode, Scale, Window, WindowOptions,
+    requested_frames,
+};
 
 mod generated {
     include!(env!("ROCM_OXIDE_DEVICE_BINDINGS"));
@@ -102,7 +105,6 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let block_x = 256u32;
     let device_frame = DeviceBuffer::<u32>::new(pixel_count)?;
     let device_camera = DeviceBuffer::<f32>::new(CAMERA_PARAMS)?;
-    let mut host_frame = vec![0u32; pixel_count];
     let mut camera = vec![0.0f32; CAMERA_PARAMS];
 
     let d_affine_input = DeviceBuffer::from_slice(&[1.0f32, 2.0, 3.0, 4.0])?;
@@ -124,9 +126,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         },
     )?;
 
-    let max_frames = std::env::var("ROCM_OXIDE_WINDOW_MAX_FRAMES")
-        .ok()
-        .and_then(|value| value.parse::<u32>().ok());
+    let max_frames = requested_frames("ROCM_OXIDE_WINDOW_MAX_FRAMES");
     let mut rendered_frames = 0u32;
     let mut frames = 0u32;
     let mut mode = 0usize;
@@ -235,23 +235,29 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             )?;
         }
         rocm_oxide::hip::synchronize()?;
-        device_frame.copy_to_host(&mut host_frame)?;
         let affine = d_affine_output.copy_to_vec()?;
 
-        draw_overlay(
-            &mut host_frame,
-            &device,
-            mode,
-            work_iters,
-            fps,
-            party,
-            paused,
-            shadows,
-            reflections,
-            &safety_status,
-            affine[2],
-        );
-        window.update_with_buffer(&host_frame, WIDTH, HEIGHT)?;
+        window.update_with_device_buffer_and_regions(
+            &device_frame,
+            WIDTH,
+            HEIGHT,
+            &overlay_regions(),
+            |overlay| {
+                draw_overlay(
+                    overlay,
+                    &device,
+                    mode,
+                    work_iters,
+                    fps,
+                    party,
+                    paused,
+                    shadows,
+                    reflections,
+                    &safety_status,
+                    affine[2],
+                );
+            },
+        )?;
 
         frames += 1;
         rendered_frames += 1;
@@ -492,6 +498,17 @@ fn draw_overlay(
         );
         draw_text(frame, x + 14, y + 32, mode_caption(i), 0xb8d8f0);
     }
+}
+
+fn overlay_regions() -> [CopyRegion; 6] {
+    [
+        CopyRegion::new(18, 18, 500, 216),
+        CopyRegion::new(18, HEIGHT - 126, WIDTH - 36, 96),
+        CopyRegion::new(548, 32, 104, 60),
+        CopyRegion::new(666, 32, 104, 60),
+        CopyRegion::new(784, 32, 104, 60),
+        CopyRegion::new(902, 32, 104, 60),
+    ]
 }
 
 fn mode_button_rect(index: usize) -> (usize, usize, usize, usize) {

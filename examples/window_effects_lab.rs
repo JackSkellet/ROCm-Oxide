@@ -12,7 +12,7 @@ use xcap::Window as CaptureWindow;
 #[path = "shared/visual_presenter.rs"]
 mod visual_presenter;
 use visual_presenter::{
-    Key, KeyRepeat, MouseButton, MouseMode, Scale, Window as MiniWindow, WindowOptions,
+    CopyRegion, Key, KeyRepeat, MouseButton, MouseMode, Scale, Window as MiniWindow, WindowOptions,
     requested_frames,
 };
 
@@ -103,7 +103,6 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let device_input = DeviceBuffer::<u32>::new(IN_WIDTH * IN_HEIGHT)?;
     let device_frame = DeviceBuffer::<u32>::new(output_pixels)?;
     let mut host_input = vec![0u32; IN_WIDTH * IN_HEIGHT];
-    let mut host_frame = vec![0u32; output_pixels];
 
     let mut window = MiniWindow::new(
         "ROCm-Oxide Window Effects Lab",
@@ -182,7 +181,6 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             )?;
         }
         rocm_oxide::hip::synchronize()?;
-        device_frame.copy_to_host(&mut host_frame)?;
 
         frames += 1;
         rendered_frames += 1;
@@ -200,21 +198,28 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             ));
         }
 
-        render_panel(
-            &mut host_frame,
-            mode,
-            sharpness,
-            current_upscale,
-            capture_interval_ms.load(Ordering::Relaxed),
-            capture_frozen.load(Ordering::Relaxed),
-            render_fps,
-            capture_fps,
-            sequence,
-            errors,
-            &picked.label,
-            &buttons,
-        );
-        window.update_with_buffer(&host_frame, OUT_WIDTH, OUT_HEIGHT)?;
+        window.update_with_device_buffer_and_regions(
+            &device_frame,
+            OUT_WIDTH,
+            OUT_HEIGHT,
+            &[CopyRegion::new(0, 0, PANEL_W, OUT_HEIGHT)],
+            |overlay| {
+                render_panel(
+                    overlay,
+                    mode,
+                    sharpness,
+                    current_upscale,
+                    capture_interval_ms.load(Ordering::Relaxed),
+                    capture_frozen.load(Ordering::Relaxed),
+                    render_fps,
+                    capture_fps,
+                    sequence,
+                    errors,
+                    &picked.label,
+                    &buttons,
+                );
+            },
+        )?;
 
         if max_frames.is_some_and(|limit| rendered_frames >= limit) {
             break;

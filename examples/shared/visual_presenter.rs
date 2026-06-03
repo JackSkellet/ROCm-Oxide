@@ -2,11 +2,61 @@
 
 use ash::vk::Handle;
 use ash::{Entry, vk};
+use rocm_oxide::DeviceBuffer;
 use std::collections::HashSet;
-use std::ffi::{CStr, CString};
+use std::ffi::{CStr, CString, c_int, c_uint, c_void};
+use std::os::fd::{FromRawFd, OwnedFd};
+use std::ptr;
 
 const VULKAN_WAIT_TIMEOUT_NS: u64 = 2_000_000_000;
 const VULKAN_WAIT_TIMEOUT_MS: u64 = VULKAN_WAIT_TIMEOUT_NS / 1_000_000;
+const HIP_EXTERNAL_MEMORY_HANDLE_TYPE_OPAQUE_FD: c_int = 1;
+
+type HipExternalMemory = *mut c_void;
+
+#[repr(C)]
+#[derive(Clone, Copy)]
+struct HipExternalWin32Handle {
+    handle: *mut c_void,
+    name: *const c_void,
+}
+
+#[repr(C)]
+union HipExternalMemoryHandle {
+    fd: c_int,
+    win32: HipExternalWin32Handle,
+    nv_sci_buf_object: *const c_void,
+}
+
+#[repr(C)]
+struct HipExternalMemoryHandleDesc {
+    handle_type: c_int,
+    handle: HipExternalMemoryHandle,
+    size: u64,
+    flags: c_uint,
+    reserved: [c_uint; 16],
+}
+
+#[repr(C)]
+struct HipExternalMemoryBufferDesc {
+    offset: u64,
+    size: u64,
+    flags: c_uint,
+    reserved: [c_uint; 16],
+}
+
+unsafe extern "C" {
+    fn hipImportExternalMemory(
+        ext_mem_out: *mut HipExternalMemory,
+        mem_handle_desc: *const HipExternalMemoryHandleDesc,
+    ) -> rocm_oxide::hip::HipError;
+    fn hipExternalMemoryGetMappedBuffer(
+        dev_ptr: *mut *mut c_void,
+        ext_mem: HipExternalMemory,
+        buffer_desc: *const HipExternalMemoryBufferDesc,
+    ) -> rocm_oxide::hip::HipError;
+    fn hipDestroyExternalMemory(ext_mem: HipExternalMemory) -> rocm_oxide::hip::HipError;
+}
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum PresentBackend {
@@ -82,6 +132,8 @@ impl Default for WindowOptions {
 
 pub struct Window {
     inner: WindowInner,
+    host_frame: Vec<u32>,
+    readback_frame: Vec<u32>,
 }
 
 enum WindowInner {
@@ -111,10 +163,14 @@ impl Window {
                 window.set_title(&format!("{title} [minifb]"));
                 Ok(Self {
                     inner: WindowInner::Minifb(Box::new(window)),
+                    host_frame: Vec::new(),
+                    readback_frame: Vec::new(),
                 })
             }
             PresentBackend::Vulkan => Ok(Self {
                 inner: WindowInner::Vulkan(Box::new(VulkanWindow::new(title, width, height)?)),
+                host_frame: Vec::new(),
+                readback_frame: Vec::new(),
             }),
         }
     }
@@ -193,6 +249,78 @@ impl Window {
         }
     }
 
+    pub fn update_with_frame<F>(
+        &mut self,
+        width: usize,
+        height: usize,
+        draw: F,
+    ) -> Result<(), Box<dyn std::error::Error>>
+    where
+        F: FnOnce(&mut [u32]),
+    {
+        match &mut self.inner {
+            WindowInner::Minifb(window) => {
+                ensure_frame_len(&mut self.host_frame, width, height)?;
+                draw(&mut self.host_frame);
+                Ok(window.update_with_buffer(&self.host_frame, width, height)?)
+            }
+            WindowInner::Vulkan(window) => window.present_with_host_draw(width, height, draw),
+        }
+    }
+
+    pub fn update_with_device_buffer(
+        &mut self,
+        source: &DeviceBuffer<u32>,
+        width: usize,
+        height: usize,
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        match &mut self.inner {
+            WindowInner::Minifb(window) => {
+                ensure_frame_len(&mut self.host_frame, width, height)?;
+                source.copy_to_host(&mut self.host_frame)?;
+                Ok(window.update_with_buffer(&self.host_frame, width, height)?)
+            }
+            WindowInner::Vulkan(window) => window.present_device_frame(source, width, height),
+        }
+    }
+
+    pub fn update_with_device_buffer_and_regions<F>(
+        &mut self,
+        source: &DeviceBuffer<u32>,
+        width: usize,
+        height: usize,
+        regions: &[CopyRegion],
+        draw_overlay: F,
+    ) -> Result<(), Box<dyn std::error::Error>>
+    where
+        F: FnOnce(&mut [u32]),
+    {
+        match &mut self.inner {
+            WindowInner::Minifb(window) => {
+                ensure_frame_len(&mut self.host_frame, width, height)?;
+                self.host_frame.fill(0);
+                draw_overlay(&mut self.host_frame);
+                ensure_frame_len(&mut self.readback_frame, width, height)?;
+                source.copy_to_host(&mut self.readback_frame)?;
+                copy_regions(
+                    &mut self.readback_frame,
+                    &self.host_frame,
+                    width,
+                    height,
+                    regions,
+                )?;
+                Ok(window.update_with_buffer(&self.readback_frame, width, height)?)
+            }
+            WindowInner::Vulkan(window) => window.present_device_frame_with_host_regions(
+                source,
+                width,
+                height,
+                regions,
+                draw_overlay,
+            ),
+        }
+    }
+
     pub fn set_title(&mut self, title: &str) {
         match &mut self.inner {
             WindowInner::Minifb(window) => window.set_title(title),
@@ -231,6 +359,44 @@ impl Window {
                 Some((x, y))
             }
         }
+    }
+}
+
+#[derive(Clone, Copy, Debug)]
+pub struct CopyRegion {
+    pub x: usize,
+    pub y: usize,
+    pub width: usize,
+    pub height: usize,
+}
+
+impl CopyRegion {
+    pub const fn new(x: usize, y: usize, width: usize, height: usize) -> Self {
+        Self {
+            x,
+            y,
+            width,
+            height,
+        }
+    }
+
+    const fn is_empty(self) -> bool {
+        self.width == 0 || self.height == 0
+    }
+
+    fn buffer_offset(
+        self,
+        frame_width: usize,
+    ) -> Result<vk::DeviceSize, Box<dyn std::error::Error>> {
+        let pixels = self
+            .y
+            .checked_mul(frame_width)
+            .and_then(|row| row.checked_add(self.x))
+            .ok_or_else(|| other_error("overlay region offset overflows usize"))?;
+        pixels
+            .checked_mul(std::mem::size_of::<u32>())
+            .and_then(|bytes| vk::DeviceSize::try_from(bytes).ok())
+            .ok_or_else(|| other_error("overlay region byte offset overflows VkDeviceSize"))
     }
 }
 
@@ -274,6 +440,7 @@ struct VulkanWindow {
     queue_family_index: u32,
     queue: vk::Queue,
     swapchain_loader: ash::khr::swapchain::Device,
+    external_memory_fd_loader: ash::khr::external_memory_fd::Device,
     swapchain: vk::SwapchainKHR,
     swapchain_images: Vec<vk::Image>,
     swapchain_image_initialized: Vec<bool>,
@@ -287,9 +454,22 @@ struct VulkanWindow {
     staging_memory: vk::DeviceMemory,
     staging_ptr: *mut u32,
     staging_bytes: usize,
+    shared_buffer: vk::Buffer,
+    shared_memory: vk::DeviceMemory,
+    hip_external_memory: HipExternalMemory,
+    hip_mapped_ptr: *mut u32,
+    shared_bytes: usize,
     width: usize,
     height: usize,
     input: InputState,
+}
+
+struct VulkanSharedMemory {
+    buffer: vk::Buffer,
+    memory: vk::DeviceMemory,
+    hip_external_memory: HipExternalMemory,
+    hip_mapped_ptr: *mut u32,
+    bytes: usize,
 }
 
 impl VulkanWindow {
@@ -339,13 +519,19 @@ impl VulkanWindow {
         let queue_info = vk::DeviceQueueCreateInfo::default()
             .queue_family_index(queue_family_index)
             .queue_priorities(&queue_priority);
-        let device_extensions = [ash::khr::swapchain::NAME.as_ptr()];
+        let device_extensions = [
+            ash::khr::swapchain::NAME.as_ptr(),
+            ash::khr::external_memory::NAME.as_ptr(),
+            ash::khr::external_memory_fd::NAME.as_ptr(),
+        ];
         let device_info = vk::DeviceCreateInfo::default()
             .queue_create_infos(std::slice::from_ref(&queue_info))
             .enabled_extension_names(&device_extensions);
         let device = unsafe { instance.create_device(physical_device, &device_info, None)? };
         let queue = unsafe { device.get_device_queue(queue_family_index, 0) };
         let swapchain_loader = ash::khr::swapchain::Device::new(&instance, &device);
+        let external_memory_fd_loader =
+            ash::khr::external_memory_fd::Device::new(&instance, &device);
         let memory_properties =
             unsafe { instance.get_physical_device_memory_properties(physical_device) };
 
@@ -362,6 +548,7 @@ impl VulkanWindow {
             queue_family_index,
             queue,
             swapchain_loader,
+            external_memory_fd_loader,
             swapchain: vk::SwapchainKHR::null(),
             swapchain_images: Vec::new(),
             swapchain_image_initialized: Vec::new(),
@@ -375,6 +562,11 @@ impl VulkanWindow {
             staging_memory: vk::DeviceMemory::null(),
             staging_ptr: std::ptr::null_mut(),
             staging_bytes: 0,
+            shared_buffer: vk::Buffer::null(),
+            shared_memory: vk::DeviceMemory::null(),
+            hip_external_memory: ptr::null_mut(),
+            hip_mapped_ptr: ptr::null_mut(),
+            shared_bytes: 0,
             width,
             height,
             input: InputState {
@@ -452,17 +644,7 @@ impl VulkanWindow {
         width: usize,
         height: usize,
     ) -> Result<(), Box<dyn std::error::Error>> {
-        if width != self.width || height != self.height || buffer.len() != self.width * self.height
-        {
-            return Err(other_error(format!(
-                "Vulkan presenter got {}x{} frame with {} pixels, expected {}x{}",
-                width,
-                height,
-                buffer.len(),
-                self.width,
-                self.height
-            )));
-        }
+        self.validate_frame_shape(buffer.len(), width, height)?;
         let bytes = buffer
             .len()
             .checked_mul(std::mem::size_of::<u32>())
@@ -470,10 +652,85 @@ impl VulkanWindow {
         if bytes > self.staging_bytes || self.staging_ptr.is_null() {
             return Err(other_error("Vulkan staging buffer is not ready"));
         }
+        self.wait_for_in_flight("waiting for the previous Vulkan frame")?;
         unsafe {
             std::ptr::copy_nonoverlapping(buffer.as_ptr(), self.staging_ptr, buffer.len());
         }
+        self.present_from_buffers(self.staging_buffer, None)
+    }
+
+    fn present_with_host_draw<F>(
+        &mut self,
+        width: usize,
+        height: usize,
+        draw: F,
+    ) -> Result<(), Box<dyn std::error::Error>>
+    where
+        F: FnOnce(&mut [u32]),
+    {
+        self.validate_frame_shape(frame_pixel_len(width, height)?, width, height)?;
+        let bytes = frame_byte_len_usize(width, height)?;
+        if bytes > self.staging_bytes || self.staging_ptr.is_null() {
+            return Err(other_error("Vulkan staging buffer is not ready"));
+        }
         self.wait_for_in_flight("waiting for the previous Vulkan frame")?;
+        let frame =
+            unsafe { std::slice::from_raw_parts_mut(self.staging_ptr, self.width * self.height) };
+        draw(frame);
+        self.present_from_buffers(self.staging_buffer, None)
+    }
+
+    fn present_device_frame(
+        &mut self,
+        source: &DeviceBuffer<u32>,
+        width: usize,
+        height: usize,
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        self.validate_frame_shape(source.len(), width, height)?;
+        let bytes = frame_byte_len_usize(width, height)?;
+        if bytes > self.shared_bytes || self.hip_mapped_ptr.is_null() {
+            return Err(other_error("Vulkan/HIP shared buffer is not ready"));
+        }
+        self.wait_for_in_flight("waiting for the previous Vulkan frame")?;
+        unsafe {
+            source.copy_to_device_ptr(self.hip_mapped_ptr, source.len())?;
+        }
+        self.present_from_buffers(self.shared_buffer, None)
+    }
+
+    fn present_device_frame_with_host_regions(
+        &mut self,
+        source: &DeviceBuffer<u32>,
+        width: usize,
+        height: usize,
+        regions: &[CopyRegion],
+        draw_overlay: impl FnOnce(&mut [u32]),
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        self.validate_frame_shape(source.len(), width, height)?;
+        validate_regions(width, height, regions)?;
+        let bytes = frame_byte_len_usize(width, height)?;
+        if bytes > self.shared_bytes || self.hip_mapped_ptr.is_null() {
+            return Err(other_error("Vulkan/HIP shared buffer is not ready"));
+        }
+        if bytes > self.staging_bytes || self.staging_ptr.is_null() {
+            return Err(other_error("Vulkan overlay staging buffer is not ready"));
+        }
+        self.wait_for_in_flight("waiting for the previous Vulkan frame")?;
+        unsafe {
+            source.copy_to_device_ptr(self.hip_mapped_ptr, source.len())?;
+        }
+        let overlay =
+            unsafe { std::slice::from_raw_parts_mut(self.staging_ptr, self.width * self.height) };
+        clear_regions(overlay, self.width, self.height, regions)?;
+        draw_overlay(overlay);
+        self.present_from_buffers(self.shared_buffer, Some(regions))
+    }
+
+    fn present_from_buffers(
+        &mut self,
+        frame_buffer: vk::Buffer,
+        overlay_regions: Option<&[CopyRegion]>,
+    ) -> Result<(), Box<dyn std::error::Error>> {
         unsafe {
             self.device.reset_fences(&[self.in_flight])?;
         }
@@ -497,7 +754,7 @@ impl VulkanWindow {
             }
             Err(err) => return Err(other_error(format!("Vulkan acquire image failed: {err:?}"))),
         };
-        self.record_present_commands(image_index as usize)?;
+        self.record_present_commands(image_index as usize, frame_buffer, overlay_regions)?;
         let wait_stages = [vk::PipelineStageFlags::TRANSFER];
         let submit = vk::SubmitInfo::default()
             .wait_semaphores(std::slice::from_ref(&self.image_available))
@@ -521,6 +778,21 @@ impl VulkanWindow {
             Err(err) => return Err(other_error(format!("Vulkan present failed: {err:?}"))),
         }
         Ok(())
+    }
+
+    fn validate_frame_shape(
+        &self,
+        len: usize,
+        width: usize,
+        height: usize,
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        if width != self.width || height != self.height {
+            return Err(other_error(format!(
+                "Vulkan presenter got {width}x{height} frame, expected {}x{}",
+                self.width, self.height
+            )));
+        }
+        validate_frame_shape("device", len, width, height)
     }
 
     fn create_resources(&mut self) -> Result<(), Box<dyn std::error::Error>> {
@@ -575,6 +847,12 @@ impl VulkanWindow {
         let fence_info = vk::FenceCreateInfo::default().flags(vk::FenceCreateFlags::SIGNALED);
         self.in_flight = unsafe { self.device.create_fence(&fence_info, None)? };
         self.create_staging_buffer()?;
+        let shared = self.create_shared_memory(frame_byte_len_usize(self.width, self.height)?)?;
+        self.shared_buffer = shared.buffer;
+        self.shared_memory = shared.memory;
+        self.hip_external_memory = shared.hip_external_memory;
+        self.hip_mapped_ptr = shared.hip_mapped_ptr;
+        self.shared_bytes = shared.bytes;
         Ok(())
     }
 
@@ -624,9 +902,91 @@ impl VulkanWindow {
         Ok(())
     }
 
+    fn create_shared_memory(
+        &self,
+        bytes: usize,
+    ) -> Result<VulkanSharedMemory, Box<dyn std::error::Error>> {
+        let mut external_buffer = vk::ExternalMemoryBufferCreateInfo::default()
+            .handle_types(vk::ExternalMemoryHandleTypeFlags::OPAQUE_FD);
+        let buffer_info = vk::BufferCreateInfo::default()
+            .size(bytes as vk::DeviceSize)
+            .usage(vk::BufferUsageFlags::TRANSFER_SRC)
+            .sharing_mode(vk::SharingMode::EXCLUSIVE)
+            .push_next(&mut external_buffer);
+        let buffer = unsafe { self.device.create_buffer(&buffer_info, None)? };
+        let requirements = unsafe { self.device.get_buffer_memory_requirements(buffer) };
+        let memory_type_index = find_memory_type(
+            self.memory_properties,
+            requirements.memory_type_bits,
+            vk::MemoryPropertyFlags::DEVICE_LOCAL,
+        )?;
+        let mut export_info = vk::ExportMemoryAllocateInfo::default()
+            .handle_types(vk::ExternalMemoryHandleTypeFlags::OPAQUE_FD);
+        let alloc_info = vk::MemoryAllocateInfo::default()
+            .allocation_size(requirements.size)
+            .memory_type_index(memory_type_index)
+            .push_next(&mut export_info);
+        let memory = match unsafe { self.device.allocate_memory(&alloc_info, None) } {
+            Ok(memory) => memory,
+            Err(err) => {
+                unsafe {
+                    self.device.destroy_buffer(buffer, None);
+                }
+                return Err(other_error(format!(
+                    "Vulkan exportable buffer allocation failed: {err:?}"
+                )));
+            }
+        };
+        if let Err(err) = unsafe { self.device.bind_buffer_memory(buffer, memory, 0) } {
+            unsafe {
+                self.device.free_memory(memory, None);
+                self.device.destroy_buffer(buffer, None);
+            }
+            return Err(other_error(format!(
+                "Vulkan shared buffer bind failed: {err:?}"
+            )));
+        }
+        let fd_info = vk::MemoryGetFdInfoKHR::default()
+            .memory(memory)
+            .handle_type(vk::ExternalMemoryHandleTypeFlags::OPAQUE_FD);
+        let fd = match unsafe { self.external_memory_fd_loader.get_memory_fd(&fd_info) } {
+            Ok(fd) => fd,
+            Err(err) => {
+                unsafe {
+                    self.device.free_memory(memory, None);
+                    self.device.destroy_buffer(buffer, None);
+                }
+                return Err(other_error(format!(
+                    "Vulkan exportable memory FD query failed: {err:?}"
+                )));
+            }
+        };
+        let (hip_external_memory, hip_mapped_ptr) =
+            match import_hip_external_memory_fd(fd, requirements.size, bytes) {
+                Ok(imported) => imported,
+                Err(err) => {
+                    unsafe {
+                        drop(OwnedFd::from_raw_fd(fd));
+                        self.device.free_memory(memory, None);
+                        self.device.destroy_buffer(buffer, None);
+                    }
+                    return Err(err);
+                }
+            };
+        Ok(VulkanSharedMemory {
+            buffer,
+            memory,
+            hip_external_memory,
+            hip_mapped_ptr,
+            bytes,
+        })
+    }
+
     fn record_present_commands(
         &mut self,
         image_index: usize,
+        frame_buffer: vk::Buffer,
+        overlay_regions: Option<&[CopyRegion]>,
     ) -> Result<(), Box<dyn std::error::Error>> {
         let swapchain_image = self.swapchain_images[image_index];
         unsafe {
@@ -669,11 +1029,39 @@ impl VulkanWindow {
         unsafe {
             self.device.cmd_copy_buffer_to_image(
                 self.command_buffer,
-                self.staging_buffer,
+                frame_buffer,
                 swapchain_image,
                 vk::ImageLayout::TRANSFER_DST_OPTIMAL,
                 std::slice::from_ref(&copy),
             );
+        }
+        if let Some(regions) = overlay_regions {
+            for region in regions.iter().copied().filter(|region| !region.is_empty()) {
+                let copy = vk::BufferImageCopy::default()
+                    .buffer_offset(region.buffer_offset(self.width)?)
+                    .buffer_row_length(u32_from_usize(self.width, "overlay row width")?)
+                    .buffer_image_height(u32_from_usize(self.height, "overlay row height")?)
+                    .image_subresource(color_subresource_layers())
+                    .image_offset(vk::Offset3D {
+                        x: i32_from_usize(region.x, "overlay x")?,
+                        y: i32_from_usize(region.y, "overlay y")?,
+                        z: 0,
+                    })
+                    .image_extent(vk::Extent3D {
+                        width: u32_from_usize(region.width, "overlay width")?,
+                        height: u32_from_usize(region.height, "overlay height")?,
+                        depth: 1,
+                    });
+                unsafe {
+                    self.device.cmd_copy_buffer_to_image(
+                        self.command_buffer,
+                        self.staging_buffer,
+                        swapchain_image,
+                        vk::ImageLayout::TRANSFER_DST_OPTIMAL,
+                        std::slice::from_ref(&copy),
+                    );
+                }
+            }
         }
         self.image_barrier(
             swapchain_image,
@@ -742,6 +1130,19 @@ impl VulkanWindow {
     fn destroy_frame_resources(&mut self) -> Result<(), Box<dyn std::error::Error>> {
         self.wait_for_in_flight("destroying Vulkan visual presenter resources")?;
         unsafe {
+            if !self.hip_external_memory.is_null() {
+                let _ = hipDestroyExternalMemory(self.hip_external_memory);
+                self.hip_external_memory = ptr::null_mut();
+                self.hip_mapped_ptr = ptr::null_mut();
+            }
+            if self.shared_buffer != vk::Buffer::null() {
+                self.device.destroy_buffer(self.shared_buffer, None);
+                self.shared_buffer = vk::Buffer::null();
+            }
+            if self.shared_memory != vk::DeviceMemory::null() {
+                self.device.free_memory(self.shared_memory, None);
+                self.shared_memory = vk::DeviceMemory::null();
+            }
             if self.staging_memory != vk::DeviceMemory::null() && !self.staging_ptr.is_null() {
                 self.device.unmap_memory(self.staging_memory);
                 self.staging_ptr = std::ptr::null_mut();
@@ -779,6 +1180,7 @@ impl VulkanWindow {
             self.swapchain_images.clear();
             self.swapchain_image_initialized.clear();
             self.staging_bytes = 0;
+            self.shared_bytes = 0;
         }
         Ok(())
     }
@@ -830,7 +1232,16 @@ fn pick_vulkan_device(
 ) -> Result<(vk::PhysicalDevice, u32), Box<dyn std::error::Error>> {
     let physical_devices = unsafe { instance.enumerate_physical_devices()? };
     for physical_device in physical_devices {
-        if !vulkan_device_has_extension(instance, physical_device, ash::khr::swapchain::NAME)? {
+        if !vulkan_device_has_extension(instance, physical_device, ash::khr::swapchain::NAME)?
+            || !vulkan_device_has_extension(
+                instance,
+                physical_device,
+                ash::khr::external_memory_fd::NAME,
+            )?
+        {
+            continue;
+        }
+        if !vulkan_external_buffer_exportable(instance, physical_device) {
             continue;
         }
         let queue_families =
@@ -850,7 +1261,7 @@ fn pick_vulkan_device(
         }
     }
     Err(other_error(
-        "no Vulkan device supports graphics and presentation for this surface",
+        "no Vulkan device supports graphics, presentation, and exportable OPAQUE_FD transfer buffers",
     ))
 }
 
@@ -864,6 +1275,27 @@ fn vulkan_device_has_extension(
         let extension_name = unsafe { CStr::from_ptr(extension.extension_name.as_ptr()) };
         extension_name == name
     }))
+}
+
+fn vulkan_external_buffer_exportable(
+    instance: &ash::Instance,
+    physical_device: vk::PhysicalDevice,
+) -> bool {
+    let info = vk::PhysicalDeviceExternalBufferInfo::default()
+        .usage(vk::BufferUsageFlags::TRANSFER_SRC)
+        .handle_type(vk::ExternalMemoryHandleTypeFlags::OPAQUE_FD);
+    let mut properties = vk::ExternalBufferProperties::default();
+    unsafe {
+        instance.get_physical_device_external_buffer_properties(
+            physical_device,
+            &info,
+            &mut properties,
+        );
+    }
+    properties
+        .external_memory_properties
+        .external_memory_features
+        .contains(vk::ExternalMemoryFeatureFlags::EXPORTABLE)
 }
 
 fn choose_surface_format(
@@ -955,6 +1387,160 @@ fn color_subresource_range() -> vk::ImageSubresourceRange {
         .level_count(1)
         .base_array_layer(0)
         .layer_count(1)
+}
+
+fn import_hip_external_memory_fd(
+    fd: c_int,
+    allocation_size: vk::DeviceSize,
+    buffer_size: usize,
+) -> Result<(HipExternalMemory, *mut u32), Box<dyn std::error::Error>> {
+    let handle_desc = HipExternalMemoryHandleDesc {
+        handle_type: HIP_EXTERNAL_MEMORY_HANDLE_TYPE_OPAQUE_FD,
+        handle: HipExternalMemoryHandle { fd },
+        size: allocation_size,
+        flags: 0,
+        reserved: [0; 16],
+    };
+    let mut external_memory = ptr::null_mut();
+    unsafe {
+        rocm_oxide::hip::check(hipImportExternalMemory(&mut external_memory, &handle_desc))
+            .map_err(|err| {
+                other_error(format!("hipImportExternalMemory(Vulkan OPAQUE_FD): {err}"))
+            })?;
+    }
+    let buffer_desc = HipExternalMemoryBufferDesc {
+        offset: 0,
+        size: buffer_size as u64,
+        flags: 0,
+        reserved: [0; 16],
+    };
+    let mut mapped = ptr::null_mut();
+    let mapped_result = unsafe {
+        rocm_oxide::hip::check(hipExternalMemoryGetMappedBuffer(
+            &mut mapped,
+            external_memory,
+            &buffer_desc,
+        ))
+        .map_err(|err| {
+            other_error(format!(
+                "hipExternalMemoryGetMappedBuffer(Vulkan shared buffer): {err}"
+            ))
+        })
+    };
+    if let Err(err) = mapped_result {
+        unsafe {
+            let _ = hipDestroyExternalMemory(external_memory);
+        }
+        return Err(err);
+    }
+    Ok((external_memory, mapped.cast::<u32>()))
+}
+
+fn ensure_frame_len(
+    frame: &mut Vec<u32>,
+    width: usize,
+    height: usize,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let len = frame_pixel_len(width, height)?;
+    if frame.len() != len {
+        frame.resize(len, 0);
+    }
+    Ok(())
+}
+
+fn validate_frame_shape(
+    label: &str,
+    len: usize,
+    width: usize,
+    height: usize,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let expected = frame_pixel_len(width, height)?;
+    if len != expected {
+        return Err(other_error(format!(
+            "{label} frame has {len} pixels, expected {expected} for {width}x{height}"
+        )));
+    }
+    Ok(())
+}
+
+fn frame_pixel_len(width: usize, height: usize) -> Result<usize, Box<dyn std::error::Error>> {
+    width
+        .checked_mul(height)
+        .ok_or_else(|| other_error("frame pixel count overflows usize"))
+}
+
+fn frame_byte_len_usize(width: usize, height: usize) -> Result<usize, Box<dyn std::error::Error>> {
+    frame_pixel_len(width, height)?
+        .checked_mul(std::mem::size_of::<u32>())
+        .ok_or_else(|| other_error("frame byte length overflows usize"))
+}
+
+fn validate_regions(
+    width: usize,
+    height: usize,
+    regions: &[CopyRegion],
+) -> Result<(), Box<dyn std::error::Error>> {
+    for region in regions {
+        let right = region
+            .x
+            .checked_add(region.width)
+            .ok_or_else(|| other_error("overlay region width overflows usize"))?;
+        let bottom = region
+            .y
+            .checked_add(region.height)
+            .ok_or_else(|| other_error("overlay region height overflows usize"))?;
+        if right > width || bottom > height {
+            return Err(other_error(format!(
+                "overlay region {:?} exceeds frame bounds {width}x{height}",
+                region
+            )));
+        }
+    }
+    Ok(())
+}
+
+fn copy_regions(
+    dst: &mut [u32],
+    src: &[u32],
+    width: usize,
+    height: usize,
+    regions: &[CopyRegion],
+) -> Result<(), Box<dyn std::error::Error>> {
+    validate_frame_shape("destination", dst.len(), width, height)?;
+    validate_frame_shape("source", src.len(), width, height)?;
+    validate_regions(width, height, regions)?;
+    for region in regions.iter().copied().filter(|region| !region.is_empty()) {
+        for row in region.y..region.y + region.height {
+            let start = row
+                .checked_mul(width)
+                .and_then(|base| base.checked_add(region.x))
+                .ok_or_else(|| other_error("overlay copy row offset overflows usize"))?;
+            let end = start + region.width;
+            dst[start..end].copy_from_slice(&src[start..end]);
+        }
+    }
+    Ok(())
+}
+
+fn clear_regions(
+    frame: &mut [u32],
+    width: usize,
+    height: usize,
+    regions: &[CopyRegion],
+) -> Result<(), Box<dyn std::error::Error>> {
+    validate_frame_shape("frame", frame.len(), width, height)?;
+    validate_regions(width, height, regions)?;
+    for region in regions.iter().copied().filter(|region| !region.is_empty()) {
+        for row in region.y..region.y + region.height {
+            let start = row
+                .checked_mul(width)
+                .and_then(|base| base.checked_add(region.x))
+                .ok_or_else(|| other_error("overlay clear row offset overflows usize"))?;
+            let end = start + region.width;
+            frame[start..end].fill(0);
+        }
+    }
+    Ok(())
 }
 
 fn find_memory_type(
@@ -1090,6 +1676,10 @@ fn demo_key_from_sdl(key: sdl2::keyboard::Keycode) -> Option<Key> {
 
 fn u32_from_usize(value: usize, label: &str) -> Result<u32, Box<dyn std::error::Error>> {
     u32::try_from(value).map_err(|_| other_error(format!("{label} exceeds u32")))
+}
+
+fn i32_from_usize(value: usize, label: &str) -> Result<i32, Box<dyn std::error::Error>> {
+    i32::try_from(value).map_err(|_| other_error(format!("{label} exceeds i32")))
 }
 
 fn vulkan_wait_timeout_error(action: &str) -> Box<dyn std::error::Error> {
