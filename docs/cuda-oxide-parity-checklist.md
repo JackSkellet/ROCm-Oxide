@@ -33,8 +33,16 @@ Primary upstream reference:
 - [x] Stream-aware raw kernel launch.
 - [x] Explicit HIP graph builder for empty/dependency nodes, 1D memcpy, typed
       H2D/D2H/D2D memcpy helpers, memset, kernel nodes, node retargeting,
-      instantiate/replay, and exec update. Event nodes and host callback nodes
-      are not implemented.
+      instantiate/replay, and exec update. Includes event-record, event-wait,
+      and host-callback graph nodes.
+- [x] HIP graph event-record node (`Graph::add_event_record_node`) and
+      event-wait node (`Graph::add_event_wait_node`) for cross-stream
+      synchronization within a graph.
+- [x] HIP graph host-callback node (`Graph::add_host_node`) and
+      `GraphNode::set_host_params` retargeter for scheduling CPU-side callbacks
+      inside a graph.
+- [x] `Stream::launch_host_func` for inserting a host callback into the HIP
+      stream dispatch queue without an explicit graph.
 - [x] HIP graph memory allocation/free nodes with a graph-managed allocation
       plan object.
 - [x] Owned HIP memory pools with access-policy controls.
@@ -43,6 +51,9 @@ Primary upstream reference:
       wrappers over `DeviceBuffer`.
 - [x] rocPRIM/hipCUB wrappers for signed/float sum reductions and scans, `u32`
       radix sort, flagged select, and transform-add over `DeviceBuffer`.
+- [x] rocThrust-backed `u32` sort, sort-by-key, unique (consecutive duplicate
+      removal), and count-equal wrappers over `DeviceBuffer` with stream and
+      synchronous variants. Reported in `RocmLibraryReport::rocthrust`.
 - [x] Matrix integration candidate reporting for hipBLASLt, Composable Kernel,
       and rocWMMA, plus hipBLASLt handle/version loading. Composable Kernel and
       rocWMMA are probe-only until execution wrappers exist.

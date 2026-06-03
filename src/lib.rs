@@ -20,15 +20,16 @@ pub mod profiling;
 mod runtime;
 
 pub use hip::{
-    DeviceBuffer, DevicePod, DeviceVirtualMemory, Event, Global, ManagedBuffer, ManagedMemoryKind,
-    MemAccessFlags, MemAllocationGranularity, MemLocation, MemPool, OwnedMemPool, PinnedHostBuffer,
-    Stream,
+    DeviceBuffer, DevicePod, DeviceVirtualMemory, Event, Global, Graph, GraphExec,
+    GraphMemoryAllocation, GraphNode, HipHostFn, ManagedBuffer, ManagedMemoryKind, MemAccessFlags,
+    MemAllocationGranularity, MemLocation, MemPool, OwnedMemPool, PinnedHostBuffer, Stream,
 };
 pub use libraries::{
     Comgr, ComgrVersion, DeviceAlgorithmTemporaryStorage, HipBlasLt, HipBlasLtHandle,
     HipBlasLtHeuristicSummary, HipBlasLtMatmulProblem, HipBlasLtMatrixLayout, LibraryAvailability,
     MatrixIntegrationReport, RocBlas, RocBlasHandle, RocFft, RocFftComplexDirection,
-    RocFftExecutionInfo, RocFftPlan, RocFftSession, RocPrim, RocmLibraryReport, SgemmLayout,
+    RocFftExecutionInfo, RocFftPlan, RocFftSession, RocPrim, RocThrust, RocmLibraryReport,
+    SgemmLayout,
 };
 pub use operation::{
     CapturedGraph, DeviceCopyCompletion, DeviceFuture, DeviceMemset, DeviceMemsetCompletion,

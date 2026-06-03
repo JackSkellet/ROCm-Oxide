@@ -186,6 +186,15 @@ struct HipMemAllocNodeParams {
     dptr: *mut c_void,
 }
 
+/// Callback type for `hipGraphAddHostNode` and `hipLaunchHostFunc`.
+pub type HipHostFn = unsafe extern "C" fn(*mut c_void);
+
+#[repr(C)]
+struct HipHostNodeParams {
+    func: HipHostFn,
+    user_data: *mut c_void,
+}
+
 unsafe extern "C" {
     fn hipGetErrorString(error: HipError) -> *const c_char;
     fn hipGetDeviceCount(count: *mut c_int) -> HipError;
@@ -387,6 +396,32 @@ unsafe extern "C" {
         dependencies: *const HipGraphNode,
         num_dependencies: usize,
     ) -> HipError;
+    fn hipGraphAddEventRecordNode(
+        graph_node: *mut HipGraphNode,
+        graph: HipGraph,
+        dependencies: *const HipGraphNode,
+        num_dependencies: usize,
+        event: HipEvent,
+    ) -> HipError;
+    fn hipGraphAddEventWaitNode(
+        graph_node: *mut HipGraphNode,
+        graph: HipGraph,
+        dependencies: *const HipGraphNode,
+        num_dependencies: usize,
+        event: HipEvent,
+    ) -> HipError;
+    fn hipGraphAddHostNode(
+        graph_node: *mut HipGraphNode,
+        graph: HipGraph,
+        dependencies: *const HipGraphNode,
+        num_dependencies: usize,
+        node_params: *const HipHostNodeParams,
+    ) -> HipError;
+    fn hipGraphHostNodeSetParams(
+        node: HipGraphNode,
+        node_params: *const HipHostNodeParams,
+    ) -> HipError;
+    fn hipLaunchHostFunc(stream: HipStream, func: HipHostFn, user_data: *mut c_void) -> HipError;
     fn hipGraphExecUpdate(
         graph_exec: HipGraphExec,
         graph: HipGraph,
@@ -1052,6 +1087,17 @@ impl Stream {
         unsafe { check(hipStreamSynchronize(self.inner.raw)) }
     }
 
+    /// Enqueues a host callback on this stream. `func(user_data)` is called
+    /// on the host after all previously enqueued stream work completes.
+    ///
+    /// # Safety
+    ///
+    /// `func` must be safe to call from any thread with `user_data` as its
+    /// argument. `user_data` must remain valid until the callback fires.
+    pub unsafe fn launch_host_func(&self, func: HipHostFn, user_data: *mut c_void) -> Result<()> {
+        unsafe { check(hipLaunchHostFunc(self.inner.raw, func, user_data)) }
+    }
+
     pub fn begin_capture(&self, mode: StreamCaptureMode) -> Result<()> {
         unsafe { check(hipStreamBeginCapture(self.inner.raw, mode.as_raw())) }
     }
@@ -1187,6 +1233,18 @@ impl GraphNode {
     ) -> Result<()> {
         let params = hip_kernel_node_params(function, grid, block, shared_mem_bytes, params);
         unsafe { check(hipGraphKernelNodeSetParams(self.raw, &params)) }
+    }
+
+    /// Retargets a host-callback node with a new function and user data.
+    ///
+    /// # Safety
+    ///
+    /// `self` must be a host node. `func` must be safe to call from any thread
+    /// with `user_data` as its argument. `user_data` must remain valid until
+    /// the next callback fires.
+    pub unsafe fn set_host_params(self, func: HipHostFn, user_data: *mut c_void) -> Result<()> {
+        let params = HipHostNodeParams { func, user_data };
+        unsafe { check(hipGraphHostNodeSetParams(self.raw, &params)) }
     }
 }
 
@@ -1490,6 +1548,81 @@ impl Graph {
         let mut raw = ptr::null_mut();
         unsafe {
             check(hipGraphAddKernelNode(
+                &mut raw,
+                self.raw,
+                dependencies,
+                dependency_count,
+                &params,
+            ))?;
+        }
+        Ok(GraphNode::new(raw, self.id))
+    }
+
+    /// Adds a node that records `event` when the graph reaches this point.
+    ///
+    /// The event must outlive the graph and any `GraphExec` launched from it.
+    pub fn add_event_record_node(
+        &self,
+        dependencies: &[GraphNode],
+        event: &Event,
+    ) -> Result<GraphNode> {
+        let dependency_handles = self.dependency_handles(dependencies)?;
+        let (dependencies, dependency_count) = graph_dependency_slice(&dependency_handles);
+        let mut raw = ptr::null_mut();
+        unsafe {
+            check(hipGraphAddEventRecordNode(
+                &mut raw,
+                self.raw,
+                dependencies,
+                dependency_count,
+                event.raw,
+            ))?;
+        }
+        Ok(GraphNode::new(raw, self.id))
+    }
+
+    /// Adds a node that waits for `event` before the graph continues.
+    ///
+    /// The event must outlive the graph and any `GraphExec` launched from it.
+    pub fn add_event_wait_node(
+        &self,
+        dependencies: &[GraphNode],
+        event: &Event,
+    ) -> Result<GraphNode> {
+        let dependency_handles = self.dependency_handles(dependencies)?;
+        let (dependencies, dependency_count) = graph_dependency_slice(&dependency_handles);
+        let mut raw = ptr::null_mut();
+        unsafe {
+            check(hipGraphAddEventWaitNode(
+                &mut raw,
+                self.raw,
+                dependencies,
+                dependency_count,
+                event.raw,
+            ))?;
+        }
+        Ok(GraphNode::new(raw, self.id))
+    }
+
+    /// Adds a host-callback node that calls `func(user_data)` on the host
+    /// when the executable graph reaches this point.
+    ///
+    /// # Safety
+    ///
+    /// `func` must be safe to call from any thread with `user_data` as its
+    /// argument. `user_data` must remain valid until the callback fires.
+    pub unsafe fn add_host_node(
+        &self,
+        dependencies: &[GraphNode],
+        func: HipHostFn,
+        user_data: *mut c_void,
+    ) -> Result<GraphNode> {
+        let dependency_handles = self.dependency_handles(dependencies)?;
+        let (dependencies, dependency_count) = graph_dependency_slice(&dependency_handles);
+        let params = HipHostNodeParams { func, user_data };
+        let mut raw = ptr::null_mut();
+        unsafe {
+            check(hipGraphAddHostNode(
                 &mut raw,
                 self.raw,
                 dependencies,
@@ -3074,7 +3207,7 @@ pub fn set_device(device_id: i32) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::{
-        DeviceBuffer, DeviceVirtualMemory, Global, Graph, HIP_ERROR_NOT_SUPPORTED,
+        DeviceBuffer, DeviceVirtualMemory, Event, Global, Graph, HIP_ERROR_NOT_SUPPORTED,
         HIP_MEMCPY_DEVICE_TO_DEVICE, ManagedBuffer, MemAccessFlags, MemLocation, MemPool,
         ModuleInner, PinnedHostBuffer, Stream, current_device,
     };
@@ -3499,6 +3632,81 @@ mod tests {
             .add_dependency(node_a, node_b)
             .expect_err("cross-graph dependency edge should fail");
         assert!(err.to_string().contains("belongs to graph"));
+    }
+
+    #[test]
+    fn graph_event_record_and_wait_nodes_round_trip() {
+        // Build a graph that records an event, then a second dependency graph
+        // that waits on it. Instantiate and launch both; after the stream
+        // synchronizes both events should be resolvable via the stream.
+        let event = Event::new().expect("event should be created");
+        let stream = Stream::new().expect("stream should be created");
+
+        let graph = Graph::new().expect("graph should be created");
+        let empty = graph
+            .add_empty_node(&[])
+            .expect("empty node should be created");
+        let record_node = graph
+            .add_event_record_node(&[empty], &event)
+            .expect("event record node should be created");
+        graph
+            .add_event_wait_node(&[record_node], &event)
+            .expect("event wait node should be created");
+
+        let exec = graph.instantiate().expect("graph should instantiate");
+        exec.launch(&stream).expect("graph launch should work");
+        stream.synchronize().expect("stream should finish");
+    }
+
+    #[test]
+    fn graph_host_callback_node_fires_after_launch() {
+        use std::sync::Arc;
+        use std::sync::atomic::{AtomicU32, Ordering};
+
+        let counter = Arc::new(AtomicU32::new(0));
+        let counter_ptr = Arc::into_raw(counter.clone()) as *mut c_void;
+
+        unsafe extern "C" fn increment(data: *mut c_void) {
+            let counter = unsafe { &*(data as *const AtomicU32) };
+            counter.fetch_add(1, Ordering::SeqCst);
+        }
+
+        let graph = Graph::new().expect("graph should be created");
+        unsafe { graph.add_host_node(&[], increment, counter_ptr) }
+            .expect("host callback node should be created");
+
+        let exec = graph.instantiate().expect("graph should instantiate");
+        let stream = Stream::new().expect("stream should be created");
+        exec.launch(&stream).expect("graph launch should work");
+        stream.synchronize().expect("stream should finish");
+
+        // Reclaim the Arc ref we handed to the raw pointer.
+        let _ = unsafe { Arc::from_raw(counter_ptr as *const AtomicU32) };
+
+        assert_eq!(counter.load(Ordering::SeqCst), 1);
+    }
+
+    #[test]
+    fn stream_launch_host_func_fires_after_synchronize() {
+        use std::sync::Arc;
+        use std::sync::atomic::{AtomicU32, Ordering};
+
+        let counter = Arc::new(AtomicU32::new(0));
+        let counter_ptr = Arc::into_raw(counter.clone()) as *mut c_void;
+
+        unsafe extern "C" fn bump(data: *mut c_void) {
+            let counter = unsafe { &*(data as *const AtomicU32) };
+            counter.fetch_add(1, Ordering::SeqCst);
+        }
+
+        let stream = Stream::new().expect("stream should be created");
+        unsafe { stream.launch_host_func(bump, counter_ptr) }
+            .expect("stream host func should enqueue");
+        stream.synchronize().expect("stream should finish");
+
+        let _ = unsafe { Arc::from_raw(counter_ptr as *const AtomicU32) };
+
+        assert_eq!(counter.load(Ordering::SeqCst), 1);
     }
 
     #[test]

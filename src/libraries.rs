@@ -340,6 +340,27 @@ unsafe extern "C" {
         size: usize,
         stream: *mut c_void,
     ) -> RocPrimStatus;
+    fn rocm_oxide_thrust_available() -> c_int;
+    fn rocm_oxide_thrust_sort_u32(data: *mut u32, size: usize, stream: *mut c_void) -> c_int;
+    fn rocm_oxide_thrust_sort_by_key_u32(
+        keys: *mut u32,
+        values: *mut u32,
+        size: usize,
+        stream: *mut c_void,
+    ) -> c_int;
+    fn rocm_oxide_thrust_unique_u32(
+        data: *mut u32,
+        size: usize,
+        new_size_out: *mut usize,
+        stream: *mut c_void,
+    ) -> c_int;
+    fn rocm_oxide_thrust_count_u32(
+        data: *const u32,
+        size: usize,
+        value: u32,
+        count_out: *mut usize,
+        stream: *mut c_void,
+    ) -> c_int;
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -355,6 +376,7 @@ pub struct RocmLibraryReport {
     pub hipblaslt: LibraryAvailability,
     pub comgr: LibraryAvailability,
     pub rocprim: LibraryAvailability,
+    pub rocthrust: LibraryAvailability,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -473,6 +495,10 @@ pub struct Comgr {
 }
 
 pub struct RocPrim;
+
+/// Compile-time rocThrust wrapper (header-only, no dynamic loading required).
+#[derive(Clone, Copy, Debug)]
+pub struct RocThrust;
 
 pub struct DeviceAlgorithmTemporaryStorage {
     buffer: DeviceBuffer<u8>,
@@ -633,6 +659,10 @@ impl RocmLibraryReport {
             },
             rocprim: match RocPrim::open() {
                 Ok(_) => LibraryAvailability::available("compiled rocPRIM/hipCUB shim"),
+                Err(err) => LibraryAvailability::unavailable(err.to_string()),
+            },
+            rocthrust: match RocThrust::open() {
+                Ok(_) => LibraryAvailability::available("compiled rocThrust shim"),
                 Err(err) => LibraryAvailability::unavailable(err.to_string()),
             },
         }
@@ -2174,6 +2204,129 @@ impl RocPrim {
     }
 }
 
+impl RocThrust {
+    pub fn open() -> Result<Self> {
+        if unsafe { rocm_oxide_thrust_available() } != 0 {
+            Ok(Self)
+        } else {
+            Err(Error::Library(
+                "rocThrust headers were unavailable when ROCm-Oxide was built".to_string(),
+            ))
+        }
+    }
+
+    pub fn is_available() -> bool {
+        Self::open().is_ok()
+    }
+
+    /// Sorts `data` in ascending order in-place.
+    pub fn sort_u32_on_stream(&self, stream: &Stream, data: &mut DeviceBuffer<u32>) -> Result<()> {
+        unsafe {
+            check_thrust(
+                rocm_oxide_thrust_sort_u32(data.as_mut_ptr(), data.len(), stream.as_raw()),
+                "rocThrust sort_u32",
+            )
+        }
+    }
+
+    pub fn sort_u32(&self, data: &mut DeviceBuffer<u32>) -> Result<()> {
+        let stream = Stream::new()?;
+        self.sort_u32_on_stream(&stream, data)?;
+        Ok(stream.synchronize()?)
+    }
+
+    /// Sorts `keys` and reorders `values` to match, both in ascending key
+    /// order, in-place.
+    pub fn sort_by_key_u32_on_stream(
+        &self,
+        stream: &Stream,
+        keys: &mut DeviceBuffer<u32>,
+        values: &mut DeviceBuffer<u32>,
+    ) -> Result<()> {
+        validate_buffer_len("rocThrust sort_by_key values", values.len(), keys.len())?;
+        unsafe {
+            check_thrust(
+                rocm_oxide_thrust_sort_by_key_u32(
+                    keys.as_mut_ptr(),
+                    values.as_mut_ptr(),
+                    keys.len(),
+                    stream.as_raw(),
+                ),
+                "rocThrust sort_by_key_u32",
+            )
+        }
+    }
+
+    pub fn sort_by_key_u32(
+        &self,
+        keys: &mut DeviceBuffer<u32>,
+        values: &mut DeviceBuffer<u32>,
+    ) -> Result<()> {
+        let stream = Stream::new()?;
+        self.sort_by_key_u32_on_stream(&stream, keys, values)?;
+        Ok(stream.synchronize()?)
+    }
+
+    /// Removes consecutive duplicate elements in `data`. Returns the number of
+    /// unique elements; the suffix of `data` beyond that count is undefined.
+    pub fn unique_u32_on_stream(
+        &self,
+        stream: &Stream,
+        data: &mut DeviceBuffer<u32>,
+    ) -> Result<usize> {
+        let mut new_size = 0usize;
+        unsafe {
+            check_thrust(
+                rocm_oxide_thrust_unique_u32(
+                    data.as_mut_ptr(),
+                    data.len(),
+                    &mut new_size,
+                    stream.as_raw(),
+                ),
+                "rocThrust unique_u32",
+            )?;
+        }
+        Ok(new_size)
+    }
+
+    pub fn unique_u32(&self, data: &mut DeviceBuffer<u32>) -> Result<usize> {
+        let stream = Stream::new()?;
+        let n = self.unique_u32_on_stream(&stream, data)?;
+        stream.synchronize()?;
+        Ok(n)
+    }
+
+    /// Counts elements in `data` equal to `value`.
+    pub fn count_u32_on_stream(
+        &self,
+        stream: &Stream,
+        data: &DeviceBuffer<u32>,
+        value: u32,
+    ) -> Result<usize> {
+        let mut count = 0usize;
+        unsafe {
+            check_thrust(
+                rocm_oxide_thrust_count_u32(
+                    data.as_ptr(),
+                    data.len(),
+                    value,
+                    &mut count,
+                    stream.as_raw(),
+                ),
+                "rocThrust count_u32",
+            )?;
+        }
+        Ok(count)
+    }
+
+    pub fn count_u32(&self, data: &DeviceBuffer<u32>, value: u32) -> Result<usize> {
+        let stream = Stream::new()?;
+        let n = self.count_u32_on_stream(&stream, data, value)?;
+        stream.synchronize()?;
+        Ok(n)
+    }
+}
+
 impl DeviceAlgorithmTemporaryStorage {
     pub fn new(bytes: usize) -> Result<Self> {
         Ok(Self {
@@ -2481,6 +2634,20 @@ fn check_rocprim(status: RocPrimStatus, op: &str) -> Result<()> {
     } else {
         Err(Error::Library(format!(
             "{op} returned HIP/rocPRIM status {status}"
+        )))
+    }
+}
+
+fn check_thrust(status: c_int, op: &str) -> Result<()> {
+    if status == 0 {
+        Ok(())
+    } else if status == ROCPRIM_SHIM_STATUS_UNAVAILABLE {
+        Err(Error::Library(format!(
+            "{op} is unavailable because the rocThrust shim was built without Thrust headers"
+        )))
+    } else {
+        Err(Error::Library(format!(
+            "{op} returned HIP/Thrust status {status}"
         )))
     }
 }
