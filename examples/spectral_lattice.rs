@@ -26,6 +26,8 @@ mod generated {
 const PANEL_W: usize = 318;
 const BLOCK_X: u32 = 256;
 const DEFAULT_OUTPUT: &str = "target/spectral_lattice.png";
+const VULKAN_PRESENT_WAIT_TIMEOUT_NS: u64 = 2_000_000_000;
+const VULKAN_PRESENT_WAIT_TIMEOUT_MS: u64 = VULKAN_PRESENT_WAIT_TIMEOUT_NS / 1_000_000;
 const MODES: [&str; 4] = ["Core", "LDS", "Atomic", "Chain"];
 const FPS_LIMITS: [usize; 7] = [30, 60, 90, 120, 144, 240, 0];
 const PRESENT_SCALES: [usize; 3] = [1, 2, 4];
@@ -1236,7 +1238,7 @@ impl VulkanPresenter {
         size: RenderSize,
         present_scale: usize,
     ) -> Result<(), Box<dyn std::error::Error>> {
-        self.destroy_frame_resources();
+        self.destroy_frame_resources()?;
         self.window
             .set_size(
                 checked_window_dim(size.width, present_scale)?,
@@ -1340,10 +1342,7 @@ impl VulkanPresenter {
         overlay: &OverlayFrame,
     ) -> Result<(f64, f64), Box<dyn std::error::Error>> {
         let interop_start = Instant::now();
-        unsafe {
-            self.device
-                .wait_for_fences(&[self.in_flight], true, u64::MAX)?;
-        }
+        self.wait_for_in_flight("waiting for the previous Vulkan frame")?;
         let required_bytes = frame_byte_len_usize(self.size)?;
         if self.shared_bytes < required_bytes {
             return Err(other_error(format!(
@@ -1362,12 +1361,17 @@ impl VulkanPresenter {
         let (image_index, suboptimal) = match unsafe {
             self.swapchain_loader.acquire_next_image(
                 self.swapchain,
-                u64::MAX,
+                VULKAN_PRESENT_WAIT_TIMEOUT_NS,
                 self.image_available,
                 vk::Fence::null(),
             )
         } {
             Ok(result) => result,
+            Err(vk::Result::TIMEOUT) => {
+                return Err(vulkan_wait_timeout_error(
+                    "acquiring the next Vulkan swapchain image",
+                ));
+            }
             Err(vk::Result::ERROR_OUT_OF_DATE_KHR) => {
                 self.recreate_frame_resources(self.size, self.present_scale)?;
                 return Ok((interop_ms, 0.0));
@@ -1827,9 +1831,25 @@ impl VulkanPresenter {
         Ok((image, memory))
     }
 
-    fn destroy_frame_resources(&mut self) {
+    fn wait_for_in_flight(&self, action: &str) -> Result<(), Box<dyn std::error::Error>> {
+        if self.in_flight == vk::Fence::null() {
+            return Ok(());
+        }
+        match unsafe {
+            self.device
+                .wait_for_fences(&[self.in_flight], true, VULKAN_PRESENT_WAIT_TIMEOUT_NS)
+        } {
+            Ok(()) => Ok(()),
+            Err(vk::Result::TIMEOUT) => Err(vulkan_wait_timeout_error(action)),
+            Err(err) => Err(other_error(format!(
+                "{action} failed while waiting for in-flight Vulkan work: {err:?}"
+            ))),
+        }
+    }
+
+    fn destroy_frame_resources(&mut self) -> Result<(), Box<dyn std::error::Error>> {
+        self.wait_for_in_flight("destroying Vulkan frame resources")?;
         unsafe {
-            let _ = self.device.device_wait_idle();
             if !self.hip_external_memory.is_null() {
                 let _ = hipDestroyExternalMemory(self.hip_external_memory);
                 self.hip_external_memory = ptr::null_mut();
@@ -1891,12 +1911,16 @@ impl VulkanPresenter {
             self.shared_bytes = 0;
             self.overlay_bytes = 0;
         }
+        Ok(())
     }
 }
 
 impl Drop for VulkanPresenter {
     fn drop(&mut self) {
-        self.destroy_frame_resources();
+        if let Err(err) = self.destroy_frame_resources() {
+            eprintln!("skipping Vulkan resource cleanup after timeout/error: {err}");
+            return;
+        }
         unsafe {
             self.device.destroy_device(None);
             self.surface_loader.destroy_surface(self.surface, None);
@@ -2699,6 +2723,12 @@ fn checked_window_dim(value: usize, scale: usize) -> Result<u32, Box<dyn std::er
 
 fn other_error(message: impl Into<String>) -> Box<dyn std::error::Error> {
     Box::new(std::io::Error::other(message.into()))
+}
+
+fn vulkan_wait_timeout_error(action: &str) -> Box<dyn std::error::Error> {
+    other_error(format!(
+        "{action} timed out after {VULKAN_PRESENT_WAIT_TIMEOUT_MS} ms"
+    ))
 }
 
 impl ResourceSnapshot {

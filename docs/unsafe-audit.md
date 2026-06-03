@@ -12,7 +12,8 @@ contracts before downstream users depend on them.
 Covered surfaces:
 
 - `src/hip.rs`: HIP streams, events, buffers, modules, globals, graphs, memory
-  pools, VMM, raw module launches, and async stream-ordered operations;
+  pools, VMM, raw module launches, cooperative multi-device launch FFI, and
+  async stream-ordered operations;
 - `src/runtime.rs`: checked raw kernel launch, checked graph-node insertion,
   checked stream launches, and cooperative launch wrappers;
 - `src/libraries.rs`: optional rocBLAS, rocFFT, hipBLASLt, COMGR, and
@@ -37,8 +38,21 @@ Covered surfaces:
   keep the owning `Module`/`Kernel` alive, must not unload or destroy the raw
   handles through foreign APIs, and must make the reported `device_ordinal()`
   current before passing the handle to HIP interop calls.
+- Low-level cooperative multi-device launch is unsafe and caller-validated:
+  each launch entry must already have device support, resident launch shape,
+  stream/device ownership, and raw ABI parameter lifetimes checked before HIP.
 - Graph nodes and graph memory allocations carry graph membership tokens so
   safe graph builders reject cross-graph dependencies before entering HIP.
+  Supported graph node classes are empty/dependency, 1D memcpy, typed H2D/D2H/D2D
+  memcpy helpers, memset, kernel, memory allocation, and memory free. Event and
+  host-callback graph nodes remain unsupported.
+- Async-created `DeviceBuffer` values use a blocking destructor: Drop enqueues
+  `hipFreeAsync` on the retained allocation stream and synchronizes that stream
+  so error paths do not silently switch to unordered `hipFree`.
+- `StreamPool` construction is capped at 64 streams. The pool limits stream
+  fanout, but async operation futures still need caller-side back-pressure
+  because each `async_on` operation owns a host worker thread until it
+  synchronizes.
 - Device-side raw helpers are explicitly documented as GPU-only escape hatches:
   callers must uphold pointer address-space, alignment, aliasing, lifetime,
   memory-scope, and per-lane scratch participation rules.
@@ -52,7 +66,8 @@ The production gate includes negative tests for these unsafe/FFI edges:
 - VMM zero-size reservations and invalid HIP memory-access flag decoding;
 - rocPRIM/hipCUB undersized temporary storage before launch;
 - COMGR and HIPRTC specialization cache separation by backend key;
-- hipBLASLt invalid SGEMM leading dimensions and nonpositive heuristic counts.
+- hipBLASLt invalid SGEMM leading dimensions, nonpositive or excessive
+  heuristic counts, and excessive automatic workspace caps.
 
 HIP VMM map/unmap ordering is intentionally RAII-only in the public wrapper:
 `DeviceVirtualMemory::new_for_device` reserves, creates, maps, and sets access

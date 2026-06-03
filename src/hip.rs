@@ -1,6 +1,7 @@
 use std::ffi::{CStr, c_char, c_int, c_uint, c_void};
 use std::fmt;
 use std::marker::PhantomData;
+use std::mem::size_of;
 use std::ptr::{self, NonNull};
 use std::sync::{
     Arc,
@@ -45,6 +46,9 @@ pub const HIP_DEVICE_ATTRIBUTE_MANAGED_MEMORY: c_int = 24;
 pub const HIP_DEVICE_ATTRIBUTE_MAX_BLOCK_DIM_X: c_int = 26;
 pub const HIP_DEVICE_ATTRIBUTE_MAX_BLOCK_DIM_Y: c_int = 27;
 pub const HIP_DEVICE_ATTRIBUTE_MAX_BLOCK_DIM_Z: c_int = 28;
+pub const HIP_DEVICE_ATTRIBUTE_MAX_GRID_DIM_X: c_int = 29;
+pub const HIP_DEVICE_ATTRIBUTE_MAX_GRID_DIM_Y: c_int = 30;
+pub const HIP_DEVICE_ATTRIBUTE_MAX_GRID_DIM_Z: c_int = 31;
 pub const HIP_DEVICE_ATTRIBUTE_MAX_THREADS_PER_BLOCK: c_int = 56;
 pub const HIP_DEVICE_ATTRIBUTE_MULTIPROCESSOR_COUNT: c_int = 63;
 pub const HIP_DEVICE_ATTRIBUTE_PAGEABLE_MEMORY_ACCESS: c_int = 65;
@@ -147,6 +151,20 @@ struct HipKernelNodeParams {
     grid_dim: HipDim3,
     kernel_params: *mut *mut c_void,
     shared_mem_bytes: c_uint,
+}
+
+#[repr(C)]
+struct HipFunctionLaunchParams {
+    function: HipFunction,
+    grid_dim_x: c_uint,
+    grid_dim_y: c_uint,
+    grid_dim_z: c_uint,
+    block_dim_x: c_uint,
+    block_dim_y: c_uint,
+    block_dim_z: c_uint,
+    shared_mem_bytes: c_uint,
+    stream: HipStream,
+    kernel_params: *mut *mut c_void,
 }
 
 #[repr(C)]
@@ -277,6 +295,11 @@ unsafe extern "C" {
         shared_mem_bytes: c_uint,
         stream: HipStream,
         kernel_params: *mut *mut c_void,
+    ) -> HipError;
+    fn hipModuleLaunchCooperativeKernelMultiDevice(
+        launch_params_list: *mut HipFunctionLaunchParams,
+        num_devices: c_uint,
+        flags: c_uint,
     ) -> HipError;
     fn hipModuleOccupancyMaxPotentialBlockSize(
         grid_size: *mut c_int,
@@ -2339,6 +2362,97 @@ impl<T> DeviceBuffer<T> {
     }
 }
 
+impl Graph {
+    /// Adds a typed device-to-device memcpy node between equal-length buffers.
+    ///
+    /// The buffers must outlive every executable graph launch that can reach
+    /// this node.
+    pub fn add_memcpy_node_device_to_device<T>(
+        &self,
+        dependencies: &[GraphNode],
+        dst: &DeviceBuffer<T>,
+        src: &DeviceBuffer<T>,
+    ) -> Result<GraphNode> {
+        validate_slice_len("graph device-to-device source", src.len, dst.len)?;
+        let bytes = checked_allocation_bytes::<T>(dst.len, "graph device-to-device copy")?;
+        if bytes == 0 {
+            return self.add_empty_node(dependencies);
+        }
+        unsafe {
+            self.add_memcpy_node_1d(
+                dependencies,
+                dst.ptr.cast::<c_void>(),
+                src.ptr.cast::<c_void>(),
+                bytes,
+                HIP_MEMCPY_DEVICE_TO_DEVICE,
+            )
+        }
+    }
+
+    /// Adds a typed byte-pattern memset node for a device buffer.
+    ///
+    /// The buffer must outlive every executable graph launch that can reach this
+    /// node.
+    pub fn add_memset_node_device<T>(
+        &self,
+        dependencies: &[GraphNode],
+        dst: &DeviceBuffer<T>,
+        value: u8,
+    ) -> Result<GraphNode> {
+        let bytes = checked_allocation_bytes::<T>(dst.len, "graph device memset")?;
+        if bytes == 0 {
+            return self.add_empty_node(dependencies);
+        }
+        unsafe { self.add_memset_node_1d(dependencies, dst.ptr.cast::<c_void>(), value, bytes) }
+    }
+}
+
+impl GraphNode {
+    /// Retargets a typed device-to-device memcpy node between equal-length buffers.
+    ///
+    /// # Safety
+    ///
+    /// `self` must be a memcpy node. The buffers must outlive every executable
+    /// graph launch that can reach this node, and they must not alias.
+    pub unsafe fn set_memcpy_device_to_device<T>(
+        self,
+        dst: &DeviceBuffer<T>,
+        src: &DeviceBuffer<T>,
+    ) -> Result<()> {
+        validate_slice_len("graph device-to-device source", src.len, dst.len)?;
+        let bytes = checked_allocation_bytes::<T>(dst.len, "graph device-to-device copy")?;
+        if bytes == 0 {
+            return Err(Error::invalid_value(
+                "cannot retarget a HIP graph memcpy node to a zero-byte device buffer copy",
+            ));
+        }
+        unsafe {
+            self.set_memcpy_1d(
+                dst.ptr.cast::<c_void>(),
+                src.ptr.cast::<c_void>(),
+                bytes,
+                HIP_MEMCPY_DEVICE_TO_DEVICE,
+            )
+        }
+    }
+
+    /// Retargets a typed byte-pattern memset node for a device buffer.
+    ///
+    /// # Safety
+    ///
+    /// `self` must be a memset node. The buffer must outlive every executable
+    /// graph launch that can reach this node.
+    pub unsafe fn set_memset_device<T>(self, dst: &DeviceBuffer<T>, value: u8) -> Result<()> {
+        let bytes = checked_allocation_bytes::<T>(dst.len, "graph device memset")?;
+        if bytes == 0 {
+            return Err(Error::invalid_value(
+                "cannot retarget a HIP graph memset node to a zero-byte device buffer",
+            ));
+        }
+        unsafe { self.set_memset_1d(dst.ptr.cast::<c_void>(), value, bytes) }
+    }
+}
+
 pub struct PinnedHostBuffer<T> {
     ptr: *mut T,
     len: usize,
@@ -2564,6 +2678,99 @@ pub struct Function {
 // keeps the entry-point handle valid for the lifetime of `Function`.
 unsafe impl Send for Function {}
 unsafe impl Sync for Function {}
+
+/// Raw module-function launch entry for HIP cooperative multi-device launch.
+///
+/// This descriptor does not validate device support, residency, stream/device
+/// ownership, or ABI parameters. Use the checked runtime-level cooperative
+/// launch helpers when a `Kernel` is available.
+pub struct CooperativeFunctionLaunch<'a> {
+    function: &'a Function,
+    grid: (u32, u32, u32),
+    block: (u32, u32, u32),
+    shared_mem_bytes: u32,
+    stream: &'a Stream,
+    params: &'a mut [*mut c_void],
+}
+
+impl<'a> CooperativeFunctionLaunch<'a> {
+    pub fn new(
+        function: &'a Function,
+        grid: (u32, u32, u32),
+        block: (u32, u32, u32),
+        shared_mem_bytes: u32,
+        stream: &'a Stream,
+        params: &'a mut [*mut c_void],
+    ) -> Self {
+        Self {
+            function,
+            grid,
+            block,
+            shared_mem_bytes,
+            stream,
+            params,
+        }
+    }
+}
+
+/// Launches cooperative kernels across multiple devices through HIP's module API.
+///
+/// # Safety
+///
+/// The caller must make sure every function, stream, and kernel parameter slice
+/// belongs to the intended device/context, every launch shape is valid and
+/// resident for cooperative execution, and every pointed-to argument remains
+/// valid until the corresponding stream reaches the launch.
+pub unsafe fn launch_cooperative_multi_device(
+    launches: &mut [CooperativeFunctionLaunch<'_>],
+    flags: u32,
+) -> Result<()> {
+    if launches.len() < 2 {
+        return Err(Error::invalid_value(
+            "HIP cooperative multi-device launch requires at least two launch entries",
+        ));
+    }
+    let num_devices = c_uint::try_from(launches.len()).map_err(|_| {
+        Error::invalid_value(format!(
+            "HIP cooperative multi-device launch has {} entries, exceeding unsigned int",
+            launches.len()
+        ))
+    })?;
+    let flags = c_uint::try_from(flags).map_err(|_| {
+        Error::invalid_value(format!(
+            "HIP cooperative multi-device launch flags value {flags} exceeds unsigned int"
+        ))
+    })?;
+    let mut raw = launches
+        .iter_mut()
+        .map(|launch| {
+            let kernel_params = if launch.params.is_empty() {
+                ptr::null_mut()
+            } else {
+                launch.params.as_mut_ptr()
+            };
+            HipFunctionLaunchParams {
+                function: launch.function.raw,
+                grid_dim_x: launch.grid.0,
+                grid_dim_y: launch.grid.1,
+                grid_dim_z: launch.grid.2,
+                block_dim_x: launch.block.0,
+                block_dim_y: launch.block.1,
+                block_dim_z: launch.block.2,
+                shared_mem_bytes: launch.shared_mem_bytes,
+                stream: launch.stream.as_raw(),
+                kernel_params,
+            }
+        })
+        .collect::<Vec<_>>();
+    unsafe {
+        check(hipModuleLaunchCooperativeKernelMultiDevice(
+            raw.as_mut_ptr(),
+            num_devices,
+            flags,
+        ))
+    }
+}
 
 impl Function {
     /// Returns the HIP function handle without transferring ownership.
@@ -2872,6 +3079,14 @@ mod tests {
 
     fn is_not_supported(err: &super::Error) -> bool {
         err.code() == Some(HIP_ERROR_NOT_SUPPORTED)
+    }
+
+    #[test]
+    fn cooperative_multi_device_launch_rejects_empty_list_before_ffi() {
+        let mut launches = Vec::<super::CooperativeFunctionLaunch<'_>>::new();
+        let err = unsafe { super::launch_cooperative_multi_device(&mut launches, 0) }
+            .expect_err("empty cooperative multi-device launch should fail before FFI");
+        assert!(err.to_string().contains("at least two launch entries"));
     }
 
     #[test]
@@ -3190,6 +3405,74 @@ mod tests {
             output.copy_to_vec().expect("download B should work"),
             [9, 10, 11, 12]
         );
+    }
+
+    #[test]
+    fn typed_graph_memcpy_and_memset_nodes_round_trip() {
+        let input_a = DeviceBuffer::from_slice(&[31u32, 32, 33, 34]).expect("upload A");
+        let input_b = DeviceBuffer::from_slice(&[41u32, 42, 43, 44]).expect("upload B");
+        let output = DeviceBuffer::<u32>::new(4).expect("output allocation should work");
+        let bytes = DeviceBuffer::<u8>::new(8).expect("byte output allocation should work");
+        let stream = Stream::new().expect("stream should be created");
+
+        let graph = Graph::new().expect("graph should be created");
+        let clear = graph
+            .add_memset_node_device(&[], &bytes, 0xa5)
+            .expect("typed graph memset should work");
+        graph
+            .add_memcpy_node_device_to_device(&[clear], &output, &input_a)
+            .expect("typed graph copy should work");
+        let exec = graph.instantiate().expect("graph instantiate should work");
+        exec.launch(&stream).expect("graph launch should work");
+        stream.synchronize().expect("graph stream should finish");
+        assert_eq!(
+            output.copy_to_vec().expect("download A should work"),
+            [31, 32, 33, 34]
+        );
+        assert_eq!(
+            bytes.copy_to_vec().expect("download bytes should work"),
+            [0xa5; 8]
+        );
+
+        let graph_b = Graph::new().expect("graph B should be created");
+        let copy = graph_b
+            .add_memcpy_node_device_to_device(&[], &output, &input_a)
+            .expect("typed graph copy B should work");
+        unsafe {
+            copy.set_memcpy_device_to_device(&output, &input_b)
+                .expect("typed graph memcpy retarget should work");
+        }
+        let exec_b = graph_b
+            .instantiate()
+            .expect("graph B instantiate should work");
+        exec_b.launch(&stream).expect("graph B launch should work");
+        stream.synchronize().expect("graph B stream should finish");
+        assert_eq!(
+            output.copy_to_vec().expect("download B should work"),
+            [41, 42, 43, 44]
+        );
+    }
+
+    #[test]
+    fn typed_graph_memcpy_rejects_length_mismatch_before_ffi() {
+        let input = DeviceBuffer::from_slice(&[1u32, 2]).expect("input upload");
+        let output = DeviceBuffer::<u32>::new(4).expect("output allocation should work");
+        let graph = Graph::new().expect("graph should be created");
+        let err = graph
+            .add_memcpy_node_device_to_device(&[], &output, &input)
+            .expect_err("short typed graph copy should fail");
+        assert!(err.to_string().contains("length mismatch"));
+    }
+
+    #[test]
+    fn typed_graph_memcpy_retarget_rejects_zero_length_before_ffi() {
+        let input = DeviceBuffer::<u32>::new(0).expect("zero input allocation");
+        let output = DeviceBuffer::<u32>::new(0).expect("zero output allocation");
+        let graph = Graph::new().expect("graph should be created");
+        let node = graph.add_empty_node(&[]).expect("empty node should work");
+        let err = unsafe { node.set_memcpy_device_to_device(&output, &input) }
+            .expect_err("zero-byte graph memcpy retarget should fail");
+        assert!(err.to_string().contains("zero-byte"));
     }
 
     #[test]

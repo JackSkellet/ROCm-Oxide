@@ -16,7 +16,7 @@ ROCm-Oxide is an active prototype that combines:
 
 - Compiles HIP kernels at runtime (HIPRTC / COMGR backend support)
 - Loads GPU modules and launches kernels through Rust APIs
-- Provides typed GPU buffers, streams, events, pinned memory, managed memory, and graph helpers
+- Provides typed GPU buffers, streams, events, pinned memory, managed memory, and explicit graph helpers for empty/dependency, memcpy, memset, kernel, allocation/free, replay, and update paths
 
 ### Rust device-kernel path
 
@@ -83,6 +83,8 @@ cargo run --example rust_device_generated_bindings
   otherwise crops the latest desktop video-stream frame before rendering
   matrix/glass/thermal/xray effects on the GPU
 - **`compiler_feature_lab`**: GUI for probing compiler/runtime/device feature slices
+- **`stress_test_gui` / `stress_3d_gui`**: interactive stress controls with
+  bounded work-iteration presets
 - **`performance_probe`**: emits timing/resource snapshots and JSON benchmark output
 
 Example commands:
@@ -90,8 +92,8 @@ Example commands:
 ```bash
 cargo run --example spectral_lattice
 cargo run --example spectral_lattice -- --frames 3 --resolution 4k --fps-limit 120
-cargo run --example spectral_lattice -- --present gl --resolution 1440p --fps-limit uncapped
-cargo run --example spectral_lattice -- --present vulkan --resolution 1440p --fps-limit uncapped
+cargo run --example spectral_lattice -- --present gl --resolution 1440p --fps-limit 120
+cargo run --example spectral_lattice -- --present vulkan --resolution 1440p --fps-limit 120
 
 cargo run --example matrix_lens -- --resolution 720p --mode matrix
 cargo run --example matrix_lens -- --capture video --resolution 720p --mode matrix
@@ -100,8 +102,17 @@ cargo run --example matrix_lens -- --frames 30 --capture pattern --resolution 54
 cargo run --example compiler_feature_lab
 cargo run --example compiler_feature_lab -- --frames 1
 
+cargo run --example stress_test_gui
+cargo run --example stress_3d_gui
+
 cargo run --example performance_probe -- --json target/performance_probe.json
 ```
+
+The interactive stress examples clamp work-iteration controls to bounded safe
+presets, currently no more than 4096 iterations per launch. Treat uncapped FPS or
+resolution experiments as manual profiling only; regression runs should use
+finite frame counts, explicit FPS limits, and the smallest resolution that
+exercises the path under test.
 
 `spectral_lattice --present vulkan` allocates exportable Vulkan device memory,
 imports its `OPAQUE_FD` handle into HIP, and copies the rendered frame

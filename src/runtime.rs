@@ -423,6 +423,7 @@ impl Dim3 {
 pub struct DeviceLimits {
     pub max_threads_per_block: u32,
     pub max_block_dim: Dim3,
+    pub max_grid_dim: Dim3,
     pub max_shared_mem_per_block: u32,
     pub max_shared_mem_per_block_optin: u32,
     pub max_shared_mem_per_multiprocessor: u32,
@@ -433,6 +434,7 @@ impl DeviceLimits {
         Self {
             max_threads_per_block: 1024,
             max_block_dim: Dim3::new(1024, 1024, 1024),
+            max_grid_dim: Dim3::new(u32::MAX, u32::MAX, u32::MAX),
             max_shared_mem_per_block: 64 * 1024,
             max_shared_mem_per_block_optin: 64 * 1024,
             max_shared_mem_per_multiprocessor: 64 * 1024,
@@ -449,6 +451,11 @@ impl DeviceLimits {
                 hip::device_attribute(ordinal, hip::HIP_DEVICE_ATTRIBUTE_MAX_BLOCK_DIM_X)?,
                 hip::device_attribute(ordinal, hip::HIP_DEVICE_ATTRIBUTE_MAX_BLOCK_DIM_Y)?,
                 hip::device_attribute(ordinal, hip::HIP_DEVICE_ATTRIBUTE_MAX_BLOCK_DIM_Z)?,
+            ),
+            max_grid_dim: Dim3::new(
+                hip::device_attribute(ordinal, hip::HIP_DEVICE_ATTRIBUTE_MAX_GRID_DIM_X)?,
+                hip::device_attribute(ordinal, hip::HIP_DEVICE_ATTRIBUTE_MAX_GRID_DIM_Y)?,
+                hip::device_attribute(ordinal, hip::HIP_DEVICE_ATTRIBUTE_MAX_GRID_DIM_Z)?,
             ),
             max_shared_mem_per_block: hip::device_attribute(
                 ordinal,
@@ -612,19 +619,70 @@ impl LaunchConfig {
         }
     }
 
+    pub fn try_new(grid: Dim3, block: Dim3) -> Result<Self> {
+        let config = Self::new(grid, block);
+        if config.grid.x == 0
+            || config.grid.y == 0
+            || config.grid.z == 0
+            || config.block.x == 0
+            || config.block.y == 0
+            || config.block.z == 0
+        {
+            return Err(Error::InvalidLaunch(format!(
+                "grid and block dimensions must be nonzero, got grid=({}, {}, {}) block=({}, {}, {})",
+                config.grid.x,
+                config.grid.y,
+                config.grid.z,
+                config.block.x,
+                config.block.y,
+                config.block.z
+            )));
+        }
+        Ok(config)
+    }
+
     pub fn for_num_elems(num_elems: usize) -> Self {
         Self::for_num_elems_with_block_size(num_elems, Self::DEFAULT_BLOCK_X)
     }
 
+    pub fn try_for_num_elems(num_elems: usize) -> Result<Self> {
+        Self::try_for_num_elems_with_block_size(num_elems, Self::DEFAULT_BLOCK_X)
+    }
+
     pub fn for_num_elems_with_block_size(num_elems: usize, block_x: u32) -> Self {
-        let grid_x = (num_elems as u32).div_ceil(block_x);
-        Self::new(Dim3::x(grid_x), Dim3::x(block_x))
+        Self::try_for_num_elems_with_block_size(num_elems, block_x)
+            .expect("invalid one-dimensional launch configuration")
+    }
+
+    pub fn try_for_num_elems_with_block_size(num_elems: usize, block_x: u32) -> Result<Self> {
+        if block_x == 0 {
+            return Err(Error::InvalidLaunch(
+                "one-dimensional launch block size must be nonzero".to_string(),
+            ));
+        }
+        let grid_x = num_elems.div_ceil(block_x as usize);
+        let grid_x = u32::try_from(grid_x).map_err(|_| {
+            Error::InvalidLaunch(format!(
+                "one-dimensional launch for {num_elems} elements with block.x={block_x} requires grid.x={grid_x}, exceeding u32 launch limit"
+            ))
+        })?;
+        Self::try_new(Dim3::x(grid_x), Dim3::x(block_x))
     }
 
     pub fn for_2d(width: u32, height: u32, block_x: u32, block_y: u32) -> Self {
+        Self::try_for_2d(width, height, block_x, block_y)
+            .expect("invalid two-dimensional launch configuration")
+    }
+
+    pub fn try_for_2d(width: u32, height: u32, block_x: u32, block_y: u32) -> Result<Self> {
+        if block_x == 0 || block_y == 0 {
+            return Err(Error::InvalidLaunch(format!(
+                "two-dimensional launch block dimensions must be nonzero, got block=({block_x}, {block_y})"
+            )));
+        }
         let grid_x = width.div_ceil(block_x);
         let grid_y = height.div_ceil(block_y);
-        Self::new(Dim3::new(grid_x, grid_y, 1), Dim3::new(block_x, block_y, 1))
+        Self::try_new(Dim3::new(grid_x, grid_y, 1), Dim3::new(block_x, block_y, 1))
     }
 
     pub const fn with_shared_mem_bytes(mut self, shared_mem_bytes: u32) -> Self {
@@ -702,6 +760,21 @@ pub fn validate_launch_config_for_limits(
         )));
     }
 
+    if config.grid.x > limits.max_grid_dim.x
+        || config.grid.y > limits.max_grid_dim.y
+        || config.grid.z > limits.max_grid_dim.z
+    {
+        return Err(Error::InvalidLaunch(format!(
+            "grid dimensions ({}, {}, {}) exceed device maximum ({}, {}, {})",
+            config.grid.x,
+            config.grid.y,
+            config.grid.z,
+            limits.max_grid_dim.x,
+            limits.max_grid_dim.y,
+            limits.max_grid_dim.z
+        )));
+    }
+
     let total_shared_mem = metadata.static_shared_mem_bytes as u64 + config.shared_mem_bytes as u64;
     if metadata.uses_dynamic_shared_mem && config.shared_mem_bytes == 0 {
         return Err(Error::InvalidLaunch(
@@ -769,6 +842,42 @@ pub fn validate_cooperative_launch_for_device(
     if grid_blocks > resident_blocks {
         return Err(Error::InvalidLaunch(format!(
             "cooperative launch requests {grid_blocks} blocks, but the device can keep at most {resident_blocks} resident blocks ({} multiprocessors * {} blocks per multiprocessor)",
+            properties.multiprocessor_count, occupancy.blocks_per_multiprocessor
+        )));
+    }
+    Ok(())
+}
+
+pub fn validate_cooperative_multi_device_launch_for_device(
+    config: LaunchConfig,
+    properties: DeviceProperties,
+    occupancy: OccupancyActiveBlocks,
+) -> Result<()> {
+    validate_cooperative_launch_config(config)?;
+    if !properties.cooperative_multi_device_launch {
+        return Err(Error::InvalidLaunch(format!(
+            "device {} does not support cooperative multi-device launch",
+            properties.ordinal
+        )));
+    }
+
+    let grid_blocks = cooperative_grid_blocks(config)?;
+    let resident_blocks = (properties.multiprocessor_count as u64)
+        .checked_mul(occupancy.blocks_per_multiprocessor as u64)
+        .ok_or_else(|| {
+            Error::InvalidLaunch(
+                "cooperative multi-device resident block capacity overflows u64".to_string(),
+            )
+        })?;
+    if resident_blocks == 0 {
+        return Err(Error::InvalidLaunch(format!(
+            "cooperative multi-device launch has no resident block capacity: multiprocessors={} blocks_per_multiprocessor={}",
+            properties.multiprocessor_count, occupancy.blocks_per_multiprocessor
+        )));
+    }
+    if grid_blocks > resident_blocks {
+        return Err(Error::InvalidLaunch(format!(
+            "cooperative multi-device launch requests {grid_blocks} blocks, but the device can keep at most {resident_blocks} resident blocks ({} multiprocessors * {} blocks per multiprocessor)",
             properties.multiprocessor_count, occupancy.blocks_per_multiprocessor
         )));
     }
@@ -955,6 +1064,34 @@ pub struct Kernel {
     metadata: KernelMetadata,
 }
 
+/// Checked runtime launch entry for cooperative multi-device module launches.
+///
+/// `Kernel` methods validate the launch shape and device support for each entry
+/// before delegating to the low-level HIP wrapper. Raw ABI and pointed-to
+/// argument lifetimes remain the caller's responsibility.
+pub struct CooperativeKernelLaunch<'a> {
+    pub kernel: &'a Kernel,
+    pub stream: &'a hip::Stream,
+    pub config: LaunchConfig,
+    pub params: &'a mut [*mut c_void],
+}
+
+impl<'a> CooperativeKernelLaunch<'a> {
+    pub fn new(
+        kernel: &'a Kernel,
+        stream: &'a hip::Stream,
+        config: LaunchConfig,
+        params: &'a mut [*mut c_void],
+    ) -> Self {
+        Self {
+            kernel,
+            stream,
+            config,
+            params,
+        }
+    }
+}
+
 unsafe impl Send for Kernel {}
 unsafe impl Sync for Kernel {}
 
@@ -1053,8 +1190,9 @@ impl Kernel {
                 "HIP occupancy returned a zero block-size recommendation".to_string(),
             ));
         }
-        let config = LaunchConfig::for_num_elems_with_block_size(num_elems, potential.block_size)
-            .with_shared_mem_bytes(dynamic_shared_mem_per_block);
+        let config =
+            LaunchConfig::try_for_num_elems_with_block_size(num_elems, potential.block_size)?
+                .with_shared_mem_bytes(dynamic_shared_mem_per_block);
         validate_launch_config_for_limits(config, self.limits, self.metadata)?;
         let active = self.occupancy_for_config(config)?;
         let waves_per_block = self
@@ -1255,6 +1393,72 @@ impl Kernel {
         }
         Ok(())
     }
+
+    /// Validates and launches cooperative kernels across multiple devices.
+    ///
+    /// # Safety
+    ///
+    /// Validation covers launch shape, reported cooperative multi-device
+    /// support, and resident block capacity for each entry. It does not
+    /// validate the raw kernel ABI, cross-device topology, peer-memory
+    /// visibility, or the lifetime of pointed-to kernel arguments. Each
+    /// `params` entry must match its kernel ABI exactly, every pointed-to
+    /// argument must remain valid until the corresponding stream reaches the
+    /// launch, and each stream must belong to the intended device/context.
+    pub unsafe fn launch_cooperative_multi_device_raw(
+        launches: &mut [CooperativeKernelLaunch<'_>],
+    ) -> Result<()> {
+        unsafe { Self::launch_cooperative_multi_device_raw_with_flags(launches, 0) }
+    }
+
+    /// Validates and launches cooperative kernels across multiple devices with
+    /// HIP launch flags.
+    ///
+    /// # Safety
+    ///
+    /// Has the same caller obligations as
+    /// [`Kernel::launch_cooperative_multi_device_raw`]. `flags` is passed
+    /// through to HIP and must be valid for
+    /// `hipModuleLaunchCooperativeKernelMultiDevice`.
+    pub unsafe fn launch_cooperative_multi_device_raw_with_flags(
+        launches: &mut [CooperativeKernelLaunch<'_>],
+        flags: u32,
+    ) -> Result<()> {
+        if launches.len() < 2 {
+            return Err(Error::InvalidLaunch(
+                "cooperative multi-device launch requires at least two launch entries".to_string(),
+            ));
+        }
+        for launch in launches.iter() {
+            validate_launch_config_for_limits(
+                launch.config,
+                launch.kernel.limits,
+                launch.kernel.metadata,
+            )?;
+            let occupancy = launch.kernel.occupancy_for_config(launch.config)?;
+            let properties = DeviceProperties::query(launch.kernel.device_ordinal)?;
+            validate_cooperative_multi_device_launch_for_device(
+                launch.config,
+                properties,
+                occupancy,
+            )?;
+        }
+        let mut raw_launches = launches
+            .iter_mut()
+            .map(|launch| {
+                hip::CooperativeFunctionLaunch::new(
+                    &launch.kernel.function,
+                    launch.config.grid.as_tuple(),
+                    launch.config.block.as_tuple(),
+                    launch.config.shared_mem_bytes,
+                    launch.stream,
+                    launch.params,
+                )
+            })
+            .collect::<Vec<_>>();
+        unsafe { hip::launch_cooperative_multi_device(&mut raw_launches, flags)? };
+        Ok(())
+    }
 }
 
 fn detect_arch() -> Option<String> {
@@ -1366,10 +1570,46 @@ void raw_handle_probe(unsigned int* out) {
     }
 
     #[test]
+    fn fallible_one_dimensional_launch_rejects_zero_block_size() {
+        let err = LaunchConfig::try_for_num_elems_with_block_size(1_025, 0)
+            .expect_err("zero block size should fail");
+        assert!(err.to_string().contains("must be nonzero"));
+    }
+
+    #[test]
+    fn fallible_one_dimensional_launch_rejects_zero_elements() {
+        let err = LaunchConfig::try_for_num_elems(0).expect_err("zero elements should fail");
+        assert!(err.to_string().contains("nonzero"));
+    }
+
+    #[test]
+    #[cfg(target_pointer_width = "64")]
+    fn fallible_one_dimensional_launch_rejects_grid_overflow() {
+        let num_elems = usize::try_from(u64::from(u32::MAX) + 1)
+            .expect("u32::MAX + 1 should fit on 64-bit targets");
+        let err = LaunchConfig::try_for_num_elems_with_block_size(num_elems, 1)
+            .expect_err("grid.x beyond u32 should fail");
+        assert!(err.to_string().contains("exceeding u32 launch limit"));
+    }
+
+    #[test]
     fn two_dimensional_launch_config_rounds_up() {
         let config = LaunchConfig::for_2d(1_025, 513, 16, 16);
         assert_eq!(config.grid, Dim3::new(65, 33, 1));
         assert_eq!(config.block, Dim3::new(16, 16, 1));
+    }
+
+    #[test]
+    fn fallible_two_dimensional_launch_rejects_zero_block_size() {
+        let err = LaunchConfig::try_for_2d(1_025, 513, 0, 16)
+            .expect_err("zero 2D block size should fail");
+        assert!(err.to_string().contains("must be nonzero"));
+    }
+
+    #[test]
+    fn fallible_two_dimensional_launch_rejects_zero_extent() {
+        let err = LaunchConfig::try_for_2d(0, 513, 16, 16).expect_err("zero 2D extent should fail");
+        assert!(err.to_string().contains("nonzero"));
     }
 
     #[test]
@@ -1419,6 +1659,19 @@ void raw_handle_probe(unsigned int* out) {
     }
 
     #[test]
+    fn launch_config_rejects_excess_grid_dimensions() {
+        let config = LaunchConfig::new(Dim3::new(3, 1, 1), Dim3::x(256));
+        let limits = DeviceLimits {
+            max_grid_dim: Dim3::new(2, 1, 1),
+            ..DeviceLimits::prototype()
+        };
+        let err =
+            super::validate_launch_config_for_limits(config, limits, KernelMetadata::default())
+                .expect_err("grid beyond device limit should fail");
+        assert!(err.to_string().contains("grid dimensions"));
+    }
+
+    #[test]
     fn launch_config_rejects_missing_dynamic_shared_memory() {
         let config = LaunchConfig::new(Dim3::x(1), Dim3::x(256));
         let metadata = KernelMetadata {
@@ -1465,6 +1718,47 @@ void raw_handle_probe(unsigned int* out) {
         };
         super::validate_cooperative_launch_for_device(config, properties, occupancy)
             .expect("resident cooperative launch should validate");
+    }
+
+    #[test]
+    fn cooperative_multi_device_launch_validation_requires_device_support() {
+        let config = LaunchConfig::new(Dim3::x(1), Dim3::x(64));
+        let properties = cooperative_props();
+        let occupancy = super::OccupancyActiveBlocks {
+            blocks_per_multiprocessor: 1,
+        };
+        let err = super::validate_cooperative_multi_device_launch_for_device(
+            config, properties, occupancy,
+        )
+        .expect_err("device without cooperative multi-device support should fail");
+        assert!(err.to_string().contains("multi-device"));
+    }
+
+    #[test]
+    fn cooperative_multi_device_launch_validation_rejects_nonresident_grid() {
+        let config = LaunchConfig::new(Dim3::x(5), Dim3::x(64));
+        let mut properties = cooperative_props();
+        properties.cooperative_multi_device_launch = true;
+        let occupancy = super::OccupancyActiveBlocks {
+            blocks_per_multiprocessor: 1,
+        };
+        let err = super::validate_cooperative_multi_device_launch_for_device(
+            config, properties, occupancy,
+        )
+        .expect_err("multi-device grid larger than resident capacity should fail");
+        assert!(err.to_string().contains("resident blocks"));
+    }
+
+    #[test]
+    fn cooperative_multi_device_launch_validation_accepts_resident_grid() {
+        let config = LaunchConfig::new(Dim3::x(4), Dim3::x(64));
+        let mut properties = cooperative_props();
+        properties.cooperative_multi_device_launch = true;
+        let occupancy = super::OccupancyActiveBlocks {
+            blocks_per_multiprocessor: 1,
+        };
+        super::validate_cooperative_multi_device_launch_for_device(config, properties, occupancy)
+            .expect("resident cooperative multi-device launch should validate");
     }
 
     #[test]

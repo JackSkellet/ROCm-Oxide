@@ -114,6 +114,8 @@ const DEFAULT_OUTPUT: &str = "target/matrix_lens.png";
 const DEFAULT_FPS_LIMIT: usize = 60;
 const DEFAULT_CAPTURE_WARMUP_TIMEOUT_MS: u64 = 30_000;
 const DEFAULT_DRM_RENDER_NODE: &str = "/dev/dri/renderD128";
+const VULKAN_PRESENT_WAIT_TIMEOUT_NS: u64 = 2_000_000_000;
+const VULKAN_PRESENT_WAIT_TIMEOUT_MS: u64 = VULKAN_PRESENT_WAIT_TIMEOUT_NS / 1_000_000;
 const HIP_EXTERNAL_MEMORY_HANDLE_TYPE_OPAQUE_FD: c_int = 1;
 const DRM_FORMAT_ARGB8888: u32 = fourcc(*b"AR24");
 const DRM_FORMAT_XRGB8888: u32 = fourcc(*b"XR24");
@@ -1654,7 +1656,7 @@ impl VulkanPresenter {
         &mut self,
         size: RenderSize,
     ) -> Result<(), Box<dyn std::error::Error>> {
-        self.destroy_frame_resources();
+        self.destroy_frame_resources()?;
         let byte_len = frame_byte_len(size)?;
         let surface_caps = unsafe {
             self.surface_loader
@@ -1770,11 +1772,8 @@ impl VulkanPresenter {
             )));
         }
         let copy_start = Instant::now();
-        unsafe {
-            self.device
-                .wait_for_fences(&[self.in_flight], true, u64::MAX)?;
-            source.copy_to_device_ptr(self.input_hip_mapped_ptr, source.len())?;
-        }
+        self.wait_for_in_flight("waiting for the previous Vulkan frame before input upload")?;
+        unsafe { source.copy_to_device_ptr(self.input_hip_mapped_ptr, source.len())? };
         Stream::null().synchronize()?;
         Ok(copy_start.elapsed().as_secs_f64() * 1000.0)
     }
@@ -1792,12 +1791,17 @@ impl VulkanPresenter {
         let (image_index, suboptimal) = match unsafe {
             self.swapchain_loader.acquire_next_image(
                 self.swapchain,
-                u64::MAX,
+                VULKAN_PRESENT_WAIT_TIMEOUT_NS,
                 self.image_available,
                 vk::Fence::null(),
             )
         } {
             Ok(result) => result,
+            Err(vk::Result::TIMEOUT) => {
+                return Err(vulkan_wait_timeout_error(
+                    "acquiring the next Vulkan swapchain image",
+                ));
+            }
             Err(vk::Result::ERROR_OUT_OF_DATE_KHR) => {
                 self.recreate_frame_resources(self.size)?;
                 return Ok(0.0);
@@ -1859,15 +1863,14 @@ impl VulkanPresenter {
             )));
         }
         let copy_start = Instant::now();
-        unsafe {
-            self.device
-                .wait_for_fences(&[self.in_flight], true, u64::MAX)?;
-        }
+        self.wait_for_in_flight("waiting for the previous Vulkan frame before dma-buf import")?;
         let imported = self.import_dma_capture_image(frame)?;
         let copy_result = self.copy_imported_image_to_input(&imported);
-        unsafe {
-            self.device.destroy_image(imported.image, None);
-            self.device.free_memory(imported.memory, None);
+        if copy_result.is_ok() {
+            unsafe {
+                self.device.destroy_image(imported.image, None);
+                self.device.free_memory(imported.memory, None);
+            }
         }
         copy_result?;
         Ok(copy_start.elapsed().as_secs_f64() * 1000.0)
@@ -2027,9 +2030,8 @@ impl VulkanPresenter {
         unsafe {
             self.device
                 .queue_submit(self.queue, std::slice::from_ref(&submit), self.in_flight)?;
-            self.device
-                .wait_for_fences(&[self.in_flight], true, u64::MAX)?;
         }
+        self.wait_for_in_flight("waiting for the dma-buf copy to finish")?;
         Ok(())
     }
 
@@ -2285,12 +2287,28 @@ impl VulkanPresenter {
         Ok((image, memory))
     }
 
-    fn destroy_frame_resources(&mut self) {
+    fn wait_for_in_flight(&self, action: &str) -> Result<(), Box<dyn std::error::Error>> {
+        if self.in_flight == vk::Fence::null() {
+            return Ok(());
+        }
+        match unsafe {
+            self.device
+                .wait_for_fences(&[self.in_flight], true, VULKAN_PRESENT_WAIT_TIMEOUT_NS)
+        } {
+            Ok(()) => Ok(()),
+            Err(vk::Result::TIMEOUT) => Err(vulkan_wait_timeout_error(action)),
+            Err(err) => Err(other_error(format!(
+                "{action} failed while waiting for in-flight Vulkan work: {err:?}"
+            ))),
+        }
+    }
+
+    fn destroy_frame_resources(&mut self) -> Result<(), Box<dyn std::error::Error>> {
+        if self.device.handle().is_null() {
+            return Ok(());
+        }
+        self.wait_for_in_flight("destroying Vulkan frame resources")?;
         unsafe {
-            if self.device.handle().is_null() {
-                return;
-            }
-            let _ = self.device.device_wait_idle();
             if !self.hip_external_memory.is_null() {
                 let _ = hipDestroyExternalMemory(self.hip_external_memory);
                 self.hip_external_memory = ptr::null_mut();
@@ -2352,12 +2370,16 @@ impl VulkanPresenter {
             self.shared_bytes = 0;
             self.input_shared_bytes = 0;
         }
+        Ok(())
     }
 }
 
 impl Drop for VulkanPresenter {
     fn drop(&mut self) {
-        self.destroy_frame_resources();
+        if let Err(err) = self.destroy_frame_resources() {
+            eprintln!("skipping Vulkan resource cleanup after timeout/error: {err}");
+            return;
+        }
         unsafe {
             if self.device.handle() != vk::Device::null() {
                 self.device.destroy_device(None);
@@ -3063,4 +3085,10 @@ mod tests {
 
 fn other_error(message: impl Into<String>) -> Box<dyn std::error::Error> {
     Box::new(std::io::Error::other(message.into()))
+}
+
+fn vulkan_wait_timeout_error(action: &str) -> Box<dyn std::error::Error> {
+    other_error(format!(
+        "{action} timed out after {VULKAN_PRESENT_WAIT_TIMEOUT_MS} ms"
+    ))
 }

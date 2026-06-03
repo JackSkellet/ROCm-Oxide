@@ -31,8 +31,10 @@ pub use libraries::{
     RocFftExecutionInfo, RocFftPlan, RocFftSession, RocPrim, RocmLibraryReport, SgemmLayout,
 };
 pub use operation::{
-    CapturedGraph, DeviceFuture, DeviceOperation, ExecutionContext, KernelLaunchCompletion,
-    StreamPool, Value,
+    CapturedGraph, DeviceCopyCompletion, DeviceFuture, DeviceMemset, DeviceMemsetCompletion,
+    DeviceOperation, DeviceTileTransfer, DeviceToDeviceCopy, ExecutionContext, HostToDeviceCopy,
+    KernelLaunchCompletion, StreamPool, Value, copy_device_to_device, copy_host_to_device,
+    memset_device, tile_transfer_device_to_device, zero_device,
 };
 pub use parity::{
     CudaPortingConcept, MatrixMathBackend, RocmAdvancedHardwareRewritePlan,
@@ -43,11 +45,12 @@ pub use parity::{
 };
 pub use profiling::{RocTx, RocTxScopedRange, RocTxVersion};
 pub use runtime::{
-    AtomicMemoryKind, Device, DeviceLimits, DeviceProperties, DeviceSlice, DeviceSliceMut, Dim3,
-    Error, HostReferenceCaptureVisibility, Kernel, KernelMetadata, KernelResource, LaunchConfig,
-    LaunchRecommendation, Module, OccupancyActiveBlocks, OccupancyMaxPotentialBlockSize, Result,
-    SystemScopeAtomicVisibility, validate_block_x, validate_buffer_len,
-    validate_cooperative_launch_config, validate_cooperative_launch_for_device,
+    AtomicMemoryKind, CooperativeKernelLaunch, Device, DeviceLimits, DeviceProperties, DeviceSlice,
+    DeviceSliceMut, Dim3, Error, HostReferenceCaptureVisibility, Kernel, KernelMetadata,
+    KernelResource, LaunchConfig, LaunchRecommendation, Module, OccupancyActiveBlocks,
+    OccupancyMaxPotentialBlockSize, Result, SystemScopeAtomicVisibility, validate_block_x,
+    validate_buffer_len, validate_cooperative_launch_config,
+    validate_cooperative_launch_for_device, validate_cooperative_multi_device_launch_for_device,
     validate_device_buffers_disjoint, validate_launch_config, validate_launch_config_for_limits,
 };
 

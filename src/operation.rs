@@ -1,10 +1,14 @@
-use crate::{Device, Result, Stream, hip};
+use crate::{Device, DeviceBuffer, DevicePod, Error, Result, RocmTileTransferPlan, Stream, hip};
+use std::ffi::c_void;
 use std::future::Future;
+use std::mem;
 use std::pin::Pin;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex, mpsc};
 use std::task::{Context, Poll, Waker};
 use std::thread;
+
+const MAX_STREAM_POOL_SIZE: usize = 64;
 
 #[must_use = "keeps launch resources alive until the execution context is synchronized"]
 pub struct KernelLaunchCompletion {
@@ -78,6 +82,11 @@ pub struct StreamPool {
 impl StreamPool {
     pub fn new(device: &Device, streams: usize) -> Result<Self> {
         let streams = streams.max(1);
+        if streams > MAX_STREAM_POOL_SIZE {
+            return Err(crate::Error::Async(format!(
+                "stream pool size {streams} exceeds ROCm-Oxide safety cap {MAX_STREAM_POOL_SIZE}"
+            )));
+        }
         let mut contexts = Vec::with_capacity(streams);
         for _ in 0..streams {
             contexts.push(ExecutionContext::new(device)?);
@@ -260,6 +269,450 @@ where
     }
 }
 
+#[must_use = "keeps stream-enqueued copy resources alive until the execution context is synchronized"]
+pub struct DeviceCopyCompletion<T> {
+    destination: Arc<DeviceBuffer<T>>,
+    completion: KernelLaunchCompletion,
+}
+
+impl<T> DeviceCopyCompletion<T> {
+    pub fn destination(&self) -> &Arc<DeviceBuffer<T>> {
+        &self.destination
+    }
+
+    pub fn retained_count(&self) -> usize {
+        self.completion.retained_count()
+    }
+}
+
+#[must_use = "keeps stream-enqueued memset resources alive until the execution context is synchronized"]
+pub struct DeviceMemsetCompletion<T> {
+    buffer: Arc<DeviceBuffer<T>>,
+    completion: KernelLaunchCompletion,
+}
+
+impl<T> DeviceMemsetCompletion<T> {
+    pub fn buffer(&self) -> &Arc<DeviceBuffer<T>> {
+        &self.buffer
+    }
+
+    pub fn retained_count(&self) -> usize {
+        self.completion.retained_count()
+    }
+}
+
+#[must_use = "device copy jobs do not enqueue until executed as a DeviceOperation"]
+pub struct HostToDeviceCopy<T> {
+    destination: Arc<DeviceBuffer<T>>,
+    input: Vec<T>,
+}
+
+impl<T: DevicePod> HostToDeviceCopy<T> {
+    pub fn new(destination: Arc<DeviceBuffer<T>>, input: Vec<T>) -> Result<Self> {
+        validate_operation_len("host-to-device source", input.len(), destination.len())?;
+        Ok(Self { destination, input })
+    }
+
+    pub fn len(&self) -> usize {
+        self.input.len()
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.input.is_empty()
+    }
+}
+
+impl<T: DevicePod> DeviceOperation for HostToDeviceCopy<T> {
+    type Output = DeviceCopyCompletion<T>;
+
+    fn execute(self, context: &ExecutionContext) -> Result<Self::Output> {
+        unsafe {
+            self.destination
+                .copy_from_host_async(context.stream(), self.input.as_slice())?;
+        }
+        let mut completion = KernelLaunchCompletion::new();
+        completion.keep_alive(Arc::clone(&self.destination));
+        completion.keep_alive(self.input);
+        Ok(DeviceCopyCompletion {
+            destination: self.destination,
+            completion,
+        })
+    }
+}
+
+#[must_use = "device copy jobs do not enqueue until executed as a DeviceOperation"]
+pub struct DeviceToDeviceCopy<T> {
+    destination: Arc<DeviceBuffer<T>>,
+    source: Arc<DeviceBuffer<T>>,
+}
+
+impl<T: DevicePod> DeviceToDeviceCopy<T> {
+    pub fn new(destination: Arc<DeviceBuffer<T>>, source: Arc<DeviceBuffer<T>>) -> Self {
+        Self {
+            destination,
+            source,
+        }
+    }
+
+    pub fn try_new(
+        destination: Arc<DeviceBuffer<T>>,
+        source: Arc<DeviceBuffer<T>>,
+    ) -> Result<Self> {
+        validate_operation_len("device-to-device source", source.len(), destination.len())?;
+        validate_distinct_buffers(
+            "device-to-device copy",
+            destination.as_ref(),
+            source.as_ref(),
+        )?;
+        Ok(Self::new(destination, source))
+    }
+
+    pub fn len(&self) -> usize {
+        self.destination.len()
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.destination.is_empty()
+    }
+}
+
+impl<T: DevicePod> DeviceOperation for DeviceToDeviceCopy<T> {
+    type Output = DeviceCopyCompletion<T>;
+
+    fn execute(self, context: &ExecutionContext) -> Result<Self::Output> {
+        validate_operation_len(
+            "device-to-device source",
+            self.source.len(),
+            self.destination.len(),
+        )?;
+        validate_distinct_buffers(
+            "device-to-device copy",
+            self.destination.as_ref(),
+            self.source.as_ref(),
+        )?;
+        unsafe {
+            self.destination
+                .copy_from_device_async(context.stream(), self.source.as_ref())?;
+        }
+        let mut completion = KernelLaunchCompletion::new();
+        completion.keep_alive(Arc::clone(&self.destination));
+        completion.keep_alive(Arc::clone(&self.source));
+        Ok(DeviceCopyCompletion {
+            destination: self.destination,
+            completion,
+        })
+    }
+}
+
+#[must_use = "device memset jobs do not enqueue until executed as a DeviceOperation"]
+pub struct DeviceMemset<T> {
+    buffer: Arc<DeviceBuffer<T>>,
+    value: u8,
+}
+
+impl<T: DevicePod> DeviceMemset<T> {
+    pub fn new(buffer: Arc<DeviceBuffer<T>>, value: u8) -> Self {
+        Self { buffer, value }
+    }
+
+    pub fn zero(buffer: Arc<DeviceBuffer<T>>) -> Self {
+        Self::new(buffer, 0)
+    }
+
+    pub fn len(&self) -> usize {
+        self.buffer.len()
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.buffer.is_empty()
+    }
+
+    pub fn value(&self) -> u8 {
+        self.value
+    }
+}
+
+impl<T: DevicePod> DeviceOperation for DeviceMemset<T> {
+    type Output = DeviceMemsetCompletion<T>;
+
+    fn execute(self, context: &ExecutionContext) -> Result<Self::Output> {
+        unsafe {
+            self.buffer.memset_async(context.stream(), self.value)?;
+        }
+        let mut completion = KernelLaunchCompletion::new();
+        completion.keep_alive(Arc::clone(&self.buffer));
+        Ok(DeviceMemsetCompletion {
+            buffer: self.buffer,
+            completion,
+        })
+    }
+}
+
+#[must_use = "tile transfer jobs do not enqueue until executed as a DeviceOperation"]
+pub struct DeviceTileTransfer<T> {
+    plan: RocmTileTransferPlan,
+    destination: Arc<DeviceBuffer<T>>,
+    source: Arc<DeviceBuffer<T>>,
+}
+
+impl<T: DevicePod> DeviceTileTransfer<T> {
+    pub fn new(
+        plan: RocmTileTransferPlan,
+        destination: Arc<DeviceBuffer<T>>,
+        source: Arc<DeviceBuffer<T>>,
+    ) -> Result<Self> {
+        validate_tile_transfer_plan::<T>(plan, destination.len())?;
+        validate_operation_len(
+            "tile device-to-device source",
+            source.len(),
+            destination.len(),
+        )?;
+        validate_distinct_buffers(
+            "tile device-to-device copy",
+            destination.as_ref(),
+            source.as_ref(),
+        )?;
+        Ok(Self {
+            plan,
+            destination,
+            source,
+        })
+    }
+
+    pub fn plan(&self) -> RocmTileTransferPlan {
+        self.plan
+    }
+
+    pub fn len(&self) -> usize {
+        self.destination.len()
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.destination.is_empty()
+    }
+}
+
+impl<T: DevicePod> DeviceOperation for DeviceTileTransfer<T> {
+    type Output = DeviceCopyCompletion<T>;
+
+    fn execute(self, context: &ExecutionContext) -> Result<Self::Output> {
+        validate_tile_transfer_plan::<T>(self.plan, self.destination.len())?;
+        unsafe {
+            self.destination
+                .copy_from_device_async(context.stream(), self.source.as_ref())?;
+        }
+        let mut completion = KernelLaunchCompletion::new();
+        completion.keep_alive(Arc::clone(&self.destination));
+        completion.keep_alive(Arc::clone(&self.source));
+        Ok(DeviceCopyCompletion {
+            destination: self.destination,
+            completion,
+        })
+    }
+}
+
+pub fn copy_host_to_device<T: DevicePod>(
+    destination: Arc<DeviceBuffer<T>>,
+    input: Vec<T>,
+) -> Result<HostToDeviceCopy<T>> {
+    HostToDeviceCopy::new(destination, input)
+}
+
+pub fn copy_device_to_device<T: DevicePod>(
+    destination: Arc<DeviceBuffer<T>>,
+    source: Arc<DeviceBuffer<T>>,
+) -> Result<DeviceToDeviceCopy<T>> {
+    DeviceToDeviceCopy::try_new(destination, source)
+}
+
+pub fn memset_device<T: DevicePod>(buffer: Arc<DeviceBuffer<T>>, value: u8) -> DeviceMemset<T> {
+    DeviceMemset::new(buffer, value)
+}
+
+pub fn zero_device<T: DevicePod>(buffer: Arc<DeviceBuffer<T>>) -> DeviceMemset<T> {
+    DeviceMemset::zero(buffer)
+}
+
+pub fn tile_transfer_device_to_device<T: DevicePod>(
+    plan: RocmTileTransferPlan,
+    destination: Arc<DeviceBuffer<T>>,
+    source: Arc<DeviceBuffer<T>>,
+) -> Result<DeviceTileTransfer<T>> {
+    DeviceTileTransfer::new(plan, destination, source)
+}
+
+impl hip::Graph {
+    /// Adds a typed host-to-device memcpy node.
+    ///
+    /// # Safety
+    ///
+    /// `dst` and `src` must remain valid until every executable graph launch
+    /// that can reach this node has completed. `src` must not be mutated while
+    /// a graph launch may read it.
+    pub unsafe fn add_typed_memcpy_host_to_device_node<T: DevicePod>(
+        &self,
+        dependencies: &[hip::GraphNode],
+        dst: &DeviceBuffer<T>,
+        src: &[T],
+    ) -> Result<hip::GraphNode> {
+        validate_operation_len("graph host-to-device source", src.len(), dst.len())?;
+        let bytes = checked_operation_bytes::<T>(dst.len(), "graph host-to-device copy")?;
+        if bytes == 0 {
+            return Ok(self.add_empty_node(dependencies)?);
+        }
+        unsafe {
+            Ok(self.add_memcpy_node_1d(
+                dependencies,
+                dst.as_mut_ptr().cast::<c_void>(),
+                src.as_ptr().cast::<c_void>(),
+                bytes,
+                hip::HIP_MEMCPY_HOST_TO_DEVICE,
+            )?)
+        }
+    }
+
+    /// Adds a typed device-to-host memcpy node.
+    ///
+    /// # Safety
+    ///
+    /// `src` and `dst` must remain valid until every executable graph launch
+    /// that can reach this node has completed. `dst` must not be read, written,
+    /// dropped, or aliased while a graph launch may write it.
+    pub unsafe fn add_typed_memcpy_device_to_host_node<T: DevicePod>(
+        &self,
+        dependencies: &[hip::GraphNode],
+        dst: &mut [T],
+        src: &DeviceBuffer<T>,
+    ) -> Result<hip::GraphNode> {
+        validate_operation_len("graph device-to-host destination", dst.len(), src.len())?;
+        let bytes = checked_operation_bytes::<T>(src.len(), "graph device-to-host copy")?;
+        if bytes == 0 {
+            return Ok(self.add_empty_node(dependencies)?);
+        }
+        unsafe {
+            Ok(self.add_memcpy_node_1d(
+                dependencies,
+                dst.as_mut_ptr().cast::<c_void>(),
+                src.as_ptr().cast::<c_void>(),
+                bytes,
+                hip::HIP_MEMCPY_DEVICE_TO_HOST,
+            )?)
+        }
+    }
+}
+
+impl hip::GraphNode {
+    /// Retargets a typed host-to-device memcpy node.
+    ///
+    /// # Safety
+    ///
+    /// `self` must be a memcpy node. `dst` and `src` must remain valid until
+    /// every executable graph launch that can reach this node has completed.
+    /// `src` must not be mutated while a graph launch may read it.
+    pub unsafe fn set_typed_memcpy_host_to_device<T: DevicePod>(
+        self,
+        dst: &DeviceBuffer<T>,
+        src: &[T],
+    ) -> Result<()> {
+        validate_operation_len("graph host-to-device source", src.len(), dst.len())?;
+        let bytes = checked_operation_bytes::<T>(dst.len(), "graph host-to-device copy")?;
+        if bytes == 0 {
+            return Err(Error::InvalidLaunch(
+                "cannot retarget a HIP graph memcpy node to a zero-byte host-to-device copy"
+                    .to_string(),
+            ));
+        }
+        unsafe {
+            Ok(self.set_memcpy_1d(
+                dst.as_mut_ptr().cast::<c_void>(),
+                src.as_ptr().cast::<c_void>(),
+                bytes,
+                hip::HIP_MEMCPY_HOST_TO_DEVICE,
+            )?)
+        }
+    }
+
+    /// Retargets a typed device-to-host memcpy node.
+    ///
+    /// # Safety
+    ///
+    /// `self` must be a memcpy node. `src` and `dst` must remain valid until
+    /// every executable graph launch that can reach this node has completed.
+    /// `dst` must not be read, written, dropped, or aliased while a graph launch
+    /// may write it.
+    pub unsafe fn set_typed_memcpy_device_to_host<T: DevicePod>(
+        self,
+        dst: &mut [T],
+        src: &DeviceBuffer<T>,
+    ) -> Result<()> {
+        validate_operation_len("graph device-to-host destination", dst.len(), src.len())?;
+        let bytes = checked_operation_bytes::<T>(src.len(), "graph device-to-host copy")?;
+        if bytes == 0 {
+            return Err(Error::InvalidLaunch(
+                "cannot retarget a HIP graph memcpy node to a zero-byte device-to-host copy"
+                    .to_string(),
+            ));
+        }
+        unsafe {
+            Ok(self.set_memcpy_1d(
+                dst.as_mut_ptr().cast::<c_void>(),
+                src.as_ptr().cast::<c_void>(),
+                bytes,
+                hip::HIP_MEMCPY_DEVICE_TO_HOST,
+            )?)
+        }
+    }
+}
+
+fn checked_operation_bytes<T>(len: usize, label: &str) -> Result<usize> {
+    len.checked_mul(mem::size_of::<T>()).ok_or_else(|| {
+        Error::InvalidLaunch(format!(
+            "{label} byte size overflows usize for {len} elements"
+        ))
+    })
+}
+
+fn validate_operation_len(label: &str, actual: usize, expected: usize) -> Result<()> {
+    if actual == expected {
+        Ok(())
+    } else {
+        Err(Error::InvalidLaunch(format!(
+            "{label} length mismatch: got {actual}, expected {expected}"
+        )))
+    }
+}
+
+fn validate_distinct_buffers<T>(
+    label: &str,
+    dst: &DeviceBuffer<T>,
+    src: &DeviceBuffer<T>,
+) -> Result<()> {
+    if dst.is_empty() || src.is_empty() || !std::ptr::eq(dst.as_ptr(), src.as_ptr()) {
+        Ok(())
+    } else {
+        Err(Error::InvalidLaunch(format!(
+            "{label} source and destination buffers alias"
+        )))
+    }
+}
+
+fn validate_tile_transfer_plan<T>(plan: RocmTileTransferPlan, len: usize) -> Result<()> {
+    let element_size = mem::size_of::<T>();
+    if element_size == 0 {
+        return Err(Error::InvalidLaunch(
+            "tile transfer element type must have nonzero size".to_string(),
+        ));
+    }
+    if plan.tile_bytes % element_size != 0 {
+        return Err(Error::InvalidLaunch(format!(
+            "tile transfer byte size {} is not divisible by element size {element_size}",
+            plan.tile_bytes
+        )));
+    }
+    let expected_len = plan.tile_bytes / element_size;
+    validate_operation_len("tile transfer buffer", len, expected_len)
+}
+
 pub struct Map<Op, F> {
     operation: Op,
     map: F,
@@ -364,8 +817,13 @@ impl<T> Future for DeviceFuture<T> {
 
 #[cfg(test)]
 mod tests {
-    use super::{DeviceOperation, Value};
-    use crate::{ExecutionContext, Result};
+    use super::{
+        DeviceMemset, DeviceOperation, DeviceToDeviceCopy, Value, copy_device_to_device,
+        copy_host_to_device, memset_device, tile_transfer_device_to_device,
+    };
+    use crate::{DeviceBuffer, ExecutionContext, PinnedHostBuffer, Result, RocmTileTransferPlan};
+    use std::mem::size_of;
+    use std::sync::Arc;
 
     fn fake_context() -> ExecutionContext {
         ExecutionContext {
@@ -394,6 +852,90 @@ mod tests {
     }
 
     #[test]
+    fn stream_pool_size_is_bounded() -> Result<()> {
+        let device = crate::Device::first()?;
+        let pool = super::StreamPool::new(&device, 0)?;
+        assert_eq!(pool.len(), 1);
+
+        let err = match super::StreamPool::new(&device, super::MAX_STREAM_POOL_SIZE + 1) {
+            Ok(_) => panic!("oversized stream pool should fail before creating streams"),
+            Err(err) => err,
+        };
+        assert!(err.to_string().contains("safety cap"));
+        Ok(())
+    }
+
+    #[test]
+    fn owned_copy_memset_and_tile_operations_round_trip() -> Result<()> {
+        let device = crate::Device::first()?;
+        let context = device.execution_context()?;
+
+        let upload = Arc::new(DeviceBuffer::<u32>::new(4)?);
+        let completion =
+            copy_host_to_device(Arc::clone(&upload), vec![1, 2, 3, 4])?.sync_on(&context)?;
+        assert_eq!(completion.retained_count(), 2);
+        assert_eq!(upload.copy_to_vec()?, [1, 2, 3, 4]);
+
+        let completion = memset_device(Arc::clone(&upload), 0).sync_on(&context)?;
+        assert_eq!(completion.retained_count(), 1);
+        assert_eq!(upload.copy_to_vec()?, [0, 0, 0, 0]);
+
+        let _completion =
+            copy_host_to_device(Arc::clone(&upload), vec![9, 10, 11, 12])?.sync_on(&context)?;
+        let copy = Arc::new(DeviceBuffer::<u32>::new(4)?);
+        let completion =
+            copy_device_to_device(Arc::clone(&copy), Arc::clone(&upload))?.sync_on(&context)?;
+        assert_eq!(completion.retained_count(), 2);
+        assert_eq!(copy.copy_to_vec()?, [9, 10, 11, 12]);
+
+        let plan =
+            RocmTileTransferPlan::for_2d_tile(device.properties()?, size_of::<u32>(), 2, 2, 1)?;
+        let tile = Arc::new(DeviceBuffer::<u32>::new(4)?);
+        let completion =
+            tile_transfer_device_to_device(plan, Arc::clone(&tile), Arc::clone(&copy))?
+                .sync_on(&context)?;
+        assert_eq!(completion.retained_count(), 2);
+        assert_eq!(tile.copy_to_vec()?, [9, 10, 11, 12]);
+        Ok(())
+    }
+
+    #[test]
+    fn typed_graph_host_copy_helpers_round_trip() -> Result<()> {
+        let buffer = DeviceBuffer::<u32>::new(4)?;
+        let mut input = PinnedHostBuffer::<u32>::new_zeroed(4)?;
+        input.as_mut_slice().copy_from_slice(&[13, 21, 34, 55]);
+        let mut output = PinnedHostBuffer::<u32>::new_zeroed(4)?;
+        let graph = crate::hip::Graph::new()?;
+
+        let upload =
+            unsafe { graph.add_typed_memcpy_host_to_device_node(&[], &buffer, input.as_slice())? };
+        unsafe {
+            graph.add_typed_memcpy_device_to_host_node(
+                &[upload],
+                output.as_mut_slice(),
+                &buffer,
+            )?;
+        }
+
+        let exec = graph.instantiate()?;
+        let stream = crate::Stream::new()?;
+        exec.launch(&stream)?;
+        stream.synchronize()?;
+        assert_eq!(output.as_slice(), [13, 21, 34, 55]);
+        Ok(())
+    }
+
+    #[test]
+    fn owned_copy_operation_rejects_length_mismatch_before_ffi() -> Result<()> {
+        let dst = Arc::new(DeviceBuffer::<u32>::new(0)?);
+        let Err(err) = copy_host_to_device(Arc::clone(&dst), vec![1]) else {
+            panic!("length mismatch should fail before enqueue");
+        };
+        assert!(err.to_string().contains("length mismatch"));
+        Ok(())
+    }
+
+    #[test]
     fn device_operation_error_after_async_enqueue_cleans_up_buffers() -> Result<()> {
         let device = crate::Device::first()?;
         let context = ExecutionContext::new(&device)?;
@@ -409,6 +951,45 @@ mod tests {
         assert!(matches!(result, Err(crate::Error::Async(_))));
         let buffer = crate::DeviceBuffer::from_slice(&[1u32, 2, 3, 4])?;
         assert_eq!(buffer.copy_to_vec()?, [1, 2, 3, 4]);
+        Ok(())
+    }
+
+    #[test]
+    fn device_copy_operation_round_trips() -> Result<()> {
+        let device = crate::Device::first()?;
+        let source = Arc::new(crate::DeviceBuffer::from_slice(&[8u32, 6, 7, 5])?);
+        let destination = Arc::new(crate::DeviceBuffer::<u32>::new(4)?);
+        let completion =
+            DeviceToDeviceCopy::new(Arc::clone(&destination), Arc::clone(&source)).sync(&device)?;
+
+        assert_eq!(completion.retained_count(), 2);
+        assert!(Arc::ptr_eq(completion.destination(), &destination));
+        assert_eq!(destination.copy_to_vec()?, [8, 6, 7, 5]);
+        Ok(())
+    }
+
+    #[test]
+    fn device_copy_operation_rejects_length_mismatch() -> Result<()> {
+        let device = crate::Device::first()?;
+        let source = Arc::new(crate::DeviceBuffer::from_slice(&[1u32, 2])?);
+        let destination = Arc::new(crate::DeviceBuffer::<u32>::new(4)?);
+        let err = match DeviceToDeviceCopy::new(destination, source).sync(&device) {
+            Ok(_) => panic!("short lazy copy should fail"),
+            Err(err) => err,
+        };
+        assert!(err.to_string().contains("length mismatch"));
+        Ok(())
+    }
+
+    #[test]
+    fn device_memset_operation_round_trips() -> Result<()> {
+        let device = crate::Device::first()?;
+        let buffer = Arc::new(crate::DeviceBuffer::<u8>::new(8)?);
+        let completion = DeviceMemset::new(Arc::clone(&buffer), 0x3c).sync(&device)?;
+
+        assert_eq!(completion.retained_count(), 1);
+        assert!(Arc::ptr_eq(completion.buffer(), &buffer));
+        assert_eq!(buffer.copy_to_vec()?, [0x3c; 8]);
         Ok(())
     }
 }

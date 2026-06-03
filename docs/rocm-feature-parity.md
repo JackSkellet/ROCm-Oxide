@@ -10,7 +10,7 @@ uses HIP capabilities where they exist.
 | --- | --- |
 | Thread block clusters | HIP cooperative grid launch when the device reports `hipDeviceAttributeCooperativeLaunch`; otherwise stream/graph-scheduled workgroup tiles with an explicit global-memory rendezvous. |
 | Tensor Memory Accelerator | Stream-ordered HIP copies into device buffers, then explicit LDS/shared-memory tile staging sized through `LaunchConfig::shared_mem_bytes`. |
-| WGMMA | rocWMMA-style wavefront fragments where that stack is installed, rocBLAS/hipBLAS library calls for host-orchestrated GEMM, and tiled Rust kernels as the portable fallback. |
+| WGMMA | Checked hipBLASLt SGEMM execution for the host-orchestrated GEMM path, Composable Kernel and rocWMMA candidate/probe reporting only, and tiled Rust kernels as the portable fallback. |
 | NVVM/LTOIR | AMDGPU LLVM IR, LLVM bitcode, or HIP source that is retargeted before code-object emission. |
 | nvJitLink | COMGR or ROCm `clang` links relocatable AMDGPU objects into executable HSACO code objects; loading uses HIP module/library APIs. |
 
@@ -22,11 +22,24 @@ uses HIP capabilities where they exist.
   `Device::supports_cooperative_multi_device_launch()` expose direct probes.
 - `Kernel::launch_cooperative_raw_on_stream()` wraps
   `hipModuleLaunchCooperativeKernel` for module-loaded kernels.
+- `Kernel::launch_cooperative_multi_device_raw()` validates each entry's launch
+  shape, cooperative multi-device support, and occupancy-derived resident grid
+  capacity before delegating to HIP.
+- `hip::launch_cooperative_multi_device()` wraps
+  `hipModuleLaunchCooperativeKernelMultiDevice` for callers that have already
+  validated every device, stream, launch shape, and raw ABI parameter list.
 - `validate_cooperative_launch_config()` keeps HIP's per-dimension
   `grid * block < 2^32` cooperative-launch limit explicit before launch.
 - `validate_cooperative_launch_for_device()` checks cooperative-launch support
   and the occupancy-derived resident block capacity. `Kernel` cooperative
   launches call this path before reaching HIP.
+- `DeviceLimits` includes HIP max-grid dimensions, so checked launch paths
+  reject oversized grids before the module launch call.
+- Explicit HIP graph support currently covers empty/dependency nodes, 1D
+  memcpy, typed host-to-device/device-to-host/device-to-device memcpy helpers,
+  memset, kernel nodes, graph memory allocation/free nodes, instantiate/replay,
+  node retargeting, and graph exec update. Event nodes and host-callback nodes
+  are not implemented runtime surfaces yet.
 - `rocm_feature_parity_for_device()` turns a probed device into a
   `RocmFeatureSet` for code generators and examples.
 - `rocm_advanced_hardware_rewrite_plan()` makes CUDA thread-block clusters,
@@ -40,6 +53,10 @@ uses HIP capabilities where they exist.
 The important boundary is still explicit: CUDA DSMEM clusters, Hopper TMA, and
 NVIDIA WGMMA are not promised as ABI-compatible concepts. NVVM, LTOIR, PTX,
 cubin, and nvJitLink artifacts are not accepted as ROCm binary contracts.
+Composable Kernel and rocWMMA are reported as availability candidates until a
+real execution wrapper lands; hipBLASLt SGEMM is the current checked matrix
+library execution path. Candidate reporting must not be described as kernel
+execution or feature completion.
 Ports should use the replacement plan as a source-level rewrite target, then
 use ROCm-Oxide runtime and generated-binding checks for launch shape,
 cooperative-launch support, resident cooperative grids, rendezvous buffers,

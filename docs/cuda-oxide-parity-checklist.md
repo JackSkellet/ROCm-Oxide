@@ -31,8 +31,10 @@ Primary upstream reference:
 - [x] Pinned host buffer wrapper.
 - [x] Stream-aware async H2D/D2H copies.
 - [x] Stream-aware raw kernel launch.
-- [x] Explicit HIP graph builder for empty nodes, dependencies, memcpy, memset,
-      kernel nodes, node retargeting, instantiate/replay, and exec update.
+- [x] Explicit HIP graph builder for empty/dependency nodes, 1D memcpy, typed
+      H2D/D2H/D2D memcpy helpers, memset, kernel nodes, node retargeting,
+      instantiate/replay, and exec update. Event nodes and host callback nodes
+      are not implemented.
 - [x] HIP graph memory allocation/free nodes with a graph-managed allocation
       plan object.
 - [x] Owned HIP memory pools with access-policy controls.
@@ -42,7 +44,8 @@ Primary upstream reference:
 - [x] rocPRIM/hipCUB wrappers for signed/float sum reductions and scans, `u32`
       radix sort, flagged select, and transform-add over `DeviceBuffer`.
 - [x] Matrix integration candidate reporting for hipBLASLt, Composable Kernel,
-      and rocWMMA, plus hipBLASLt handle/version loading.
+      and rocWMMA, plus hipBLASLt handle/version loading. Composable Kernel and
+      rocWMMA are probe-only until execution wrappers exist.
 - [x] Checked hipBLASLt FP32 column-major SGEMM descriptor and heuristic query
       wrapper.
 - [x] Checked hipBLASLt FP32 SGEMM execution wrapper over `DeviceBuffer<f32>`.
@@ -89,8 +92,8 @@ Primary upstream reference:
       vote, and additional reduction helpers.
 - [x] rocTX host profiler markers/ranges and HIP clock-rate metadata for
       ROCm-native debug/profiling parity where stable runtime APIs exist.
-- [x] Generated-kernel performance probe for vector, ABI, 3D stress, and
-      raytrace kernels.
+- [x] Generated-kernel performance probe for vector, ABI, bounded 3D stress,
+      and raytrace kernels.
 - [x] Per-kernel resource inspection for VGPR, SGPR, LDS, private segment,
       kernarg, spills, wavefront, and dynamic stack.
 - [x] JSON benchmark snapshots with timings and resource counters.
@@ -164,7 +167,9 @@ Primary upstream reference:
 - [x] Runtime safety:
   - [x] fallible allocation-size overflow errors instead of panics
   - [x] stream-ordered allocation/free where supported by HIP, including
-        async-aware drop cleanup for `DeviceBuffer`
+        async-aware drop cleanup for `DeviceBuffer`. Dropping an async-created
+        `DeviceBuffer` enqueues `hipFreeAsync` on the retained allocation stream
+        and blocks for cleanup; hot paths should use explicit ordered frees.
   - [x] GPU-side memset and device-to-device buffer copies
   - [x] sync and async raw device-pointer copies for device-visible interop
         destinations and sources
@@ -178,7 +183,10 @@ Primary upstream reference:
   - [x] lazy `DeviceOperation` trait
   - [x] sync and async execution entry points
   - [x] operation chaining
-  - [x] stream pool scheduling
+  - [x] stream pool scheduling with a 64-stream safety cap. `async_on` still
+        uses one host worker thread per operation, so callers should keep
+        outstanding futures bounded instead of treating the pool as an
+        unlimited queue.
   - [x] keep in-flight results alive if futures are dropped
 - [x] Constant/global memory:
   - [x] source marker for device globals
@@ -236,8 +244,10 @@ Primary upstream reference:
 - [x] TMA-style async tensor copies should map to stream-ordered HIP copies,
       explicit LDS staging, and pipeline tokens only after synchronization
       semantics are validated on AMD hardware.
-- [x] WGMMA-style matrix operations should map to rocWMMA, hipBLASLt,
-      Composable Kernel, rocBLAS, or tiled Rust kernels.
+- [x] WGMMA-style matrix operations should map to checked hipBLASLt execution,
+      future rocWMMA/Composable Kernel execution wrappers, rocBLAS, or tiled Rust
+      kernels. Current rocWMMA and Composable Kernel support is
+      candidate/probe-only.
 - [x] DSMEM and CUDA cluster launch should map to HIP cooperative launch where
       available, otherwise graph/stream-scheduled tiling plus global-memory
       rendezvous.

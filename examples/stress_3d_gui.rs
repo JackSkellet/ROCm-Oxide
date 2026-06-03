@@ -8,6 +8,7 @@ mod generated {
 
 const WIDTH: usize = 1024;
 const HEIGHT: usize = 512;
+const MAX_STRESS_WORK_ITERS: u32 = 4_096;
 const MODES: [&str; 8] = [
     "cube lattice",
     "ray tunnel",
@@ -52,9 +53,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             match key {
                 Key::Right => mode = (mode + 1) % MODES.len(),
                 Key::Left => mode = (mode + MODES.len() - 1) % MODES.len(),
-                Key::Up => work_iters = work_iters.saturating_add(16),
+                Key::Up => work_iters = clamp_work_iters(work_iters.saturating_add(16)),
                 Key::Down => work_iters = work_iters.saturating_sub(16).max(1),
-                Key::PageUp => work_iters = work_iters.saturating_add(128),
+                Key::PageUp => work_iters = clamp_work_iters(work_iters.saturating_add(128)),
                 Key::PageDown => work_iters = work_iters.saturating_sub(128).max(1),
                 Key::Space => paused = !paused,
                 Key::Key1 => work_iters = 32,
@@ -64,6 +65,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 _ => {}
             }
         }
+        work_iters = clamp_work_iters(work_iters);
 
         if !paused {
             frame_index = start.elapsed().as_millis() as u32 / 16;
@@ -99,4 +101,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     }
 
     Ok(())
+}
+
+fn clamp_work_iters(value: u32) -> u32 {
+    value.clamp(1, MAX_STRESS_WORK_ITERS)
 }

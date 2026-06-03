@@ -13,6 +13,7 @@ mod generated {
 const WIDTH: usize = 1024;
 const HEIGHT: usize = 576;
 const CAMERA_PARAMS: usize = 16;
+const MAX_STRESS_WORK_ITERS: u32 = 4_096;
 const MODES: [&str; 4] = [
     "Rust rainbow kernel",
     "2D compute stress",
@@ -157,7 +158,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 Key::Key4 => mode = 3,
                 Key::Right => mode = (mode + 1) % MODES.len(),
                 Key::Left => mode = (mode + MODES.len() - 1) % MODES.len(),
-                Key::Up => work_iters = work_iters.saturating_add(32),
+                Key::Up => work_iters = clamp_work_iters(work_iters.saturating_add(32)),
                 Key::Down => work_iters = work_iters.saturating_sub(32).max(1),
                 Key::P => party = !party,
                 Key::Space => paused = !paused,
@@ -188,6 +189,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 _ => {}
             }
         }
+        work_iters = clamp_work_iters(work_iters);
 
         if !paused {
             frame_index = start.elapsed().as_millis() as u32 / 16;
@@ -327,6 +329,10 @@ fn render_mode(
     }
     rocm_oxide::hip::synchronize()?;
     Ok(())
+}
+
+fn clamp_work_iters(value: u32) -> u32 {
+    value.clamp(1, MAX_STRESS_WORK_ITERS)
 }
 
 fn launch_party_post(

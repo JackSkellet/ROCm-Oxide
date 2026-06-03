@@ -15,6 +15,8 @@ const HIP_R_32F: c_int = 0;
 const HIPBLASLT_MATMUL_DESC_TRANSA: c_int = 0;
 const HIPBLASLT_MATMUL_DESC_TRANSB: c_int = 1;
 const HIPBLASLT_MATMUL_PREF_MAX_WORKSPACE_BYTES: c_int = 1;
+const HIPBLASLT_MAX_REQUESTED_ALGOS: i32 = 64;
+const HIPBLASLT_MAX_WORKSPACE_BYTES: u64 = 256 * 1024 * 1024;
 const AMD_COMGR_STATUS_SUCCESS: c_int = 0;
 const AMD_COMGR_LANGUAGE_HIP: c_int = 0x3;
 const AMD_COMGR_DATA_KIND_SOURCE: c_int = 0x1;
@@ -724,6 +726,11 @@ impl HipBlasLtMatmulProblem {
                 "hipBLASLt SGEMM dimensions m, n, and k must be nonzero, got m={m}, n={n}, k={k}"
             )));
         }
+        if max_workspace_bytes > HIPBLASLT_MAX_WORKSPACE_BYTES {
+            return Err(Error::Library(format!(
+                "hipBLASLt SGEMM workspace cap is {max_workspace_bytes} bytes, but ROCm-Oxide limits automatic workspace to {HIPBLASLT_MAX_WORKSPACE_BYTES} bytes"
+            )));
+        }
         let a = HipBlasLtMatrixLayout::fp32_column_major("A", m, k, lda)?;
         let b = HipBlasLtMatrixLayout::fp32_column_major("B", k, n, ldb)?;
         let c = HipBlasLtMatrixLayout::fp32_column_major("C", m, n, ldc)?;
@@ -954,6 +961,7 @@ impl HipBlasLtHandle {
         let (results, returned_algo_count) =
             self.sgemm_nn_heuristic_results(problem, requested_algo_count)?;
         let best = best_hipblaslt_heuristic(&results, returned_algo_count)?;
+        validate_hipblaslt_workspace(best.workspace_size, problem.max_workspace_bytes)?;
         let workspace = (best.workspace_size > 0)
             .then(|| DeviceAlgorithmTemporaryStorage::new(best.workspace_size))
             .transpose()?;
@@ -1006,6 +1014,7 @@ impl HipBlasLtHandle {
         let (results, returned_algo_count) =
             self.sgemm_nn_heuristic_results(problem, requested_algo_count)?;
         let best = best_hipblaslt_heuristic(&results, returned_algo_count)?;
+        validate_hipblaslt_workspace(best.workspace_size, problem.max_workspace_bytes)?;
         unsafe {
             self.launch_sgemm_nn_on_stream(
                 stream,
@@ -1037,6 +1046,11 @@ impl HipBlasLtHandle {
         if requested_algo_count <= 0 {
             return Err(Error::Library(format!(
                 "hipBLASLt requested algorithm count must be positive, got {requested_algo_count}"
+            )));
+        }
+        if requested_algo_count > HIPBLASLT_MAX_REQUESTED_ALGOS {
+            return Err(Error::Library(format!(
+                "hipBLASLt requested algorithm count {requested_algo_count} exceeds ROCm-Oxide cap {HIPBLASLT_MAX_REQUESTED_ALGOS}"
             )));
         }
 
@@ -2781,6 +2795,25 @@ fn best_hipblaslt_heuristic(
     Ok(best)
 }
 
+fn validate_hipblaslt_workspace(workspace_size: usize, workspace_limit_bytes: u64) -> Result<()> {
+    let workspace_size_u64 = u64::try_from(workspace_size).map_err(|_| {
+        Error::Library(format!(
+            "hipBLASLt returned workspace size {workspace_size} that cannot fit u64"
+        ))
+    })?;
+    if workspace_size_u64 > workspace_limit_bytes {
+        return Err(Error::Library(format!(
+            "hipBLASLt returned workspace size {workspace_size_u64} bytes, exceeding requested limit {workspace_limit_bytes} bytes"
+        )));
+    }
+    if workspace_size_u64 > HIPBLASLT_MAX_WORKSPACE_BYTES {
+        return Err(Error::Library(format!(
+            "hipBLASLt returned workspace size {workspace_size_u64} bytes, exceeding ROCm-Oxide automatic workspace cap {HIPBLASLT_MAX_WORKSPACE_BYTES} bytes"
+        )));
+    }
+    Ok(())
+}
+
 fn summarize_hipblaslt_heuristics(
     requested_algo_count: i32,
     returned_algo_count: i32,
@@ -2870,6 +2903,13 @@ mod tests {
         assert_eq!(problem.b.rows, 64);
         assert_eq!(problem.b.cols, 32);
         assert_eq!(problem.max_workspace_bytes, 1024);
+    }
+
+    #[test]
+    fn hipblaslt_sgemm_problem_rejects_excess_workspace_cap() {
+        let err = HipBlasLtMatmulProblem::sgemm_nn(16, 16, 16, HIPBLASLT_MAX_WORKSPACE_BYTES + 1)
+            .expect_err("oversized automatic workspace cap should fail");
+        assert!(err.to_string().contains("automatic workspace"));
     }
 
     #[test]
@@ -3012,6 +3052,22 @@ mod tests {
             .sgemm_nn_heuristics(problem, 0)
             .expect_err("nonpositive algorithm count should fail before FFI");
         assert!(err.to_string().contains("requested algorithm count"));
+    }
+
+    #[test]
+    fn hipblaslt_heuristics_reject_excess_algorithm_count_if_library_is_available() {
+        let Ok(lt) = HipBlasLt::open() else {
+            return;
+        };
+        let Ok(handle) = lt.create_handle() else {
+            return;
+        };
+        let problem = HipBlasLtMatmulProblem::sgemm_nn(16, 16, 16, 0)
+            .expect("valid SGEMM descriptor should be accepted");
+        let err = handle
+            .sgemm_nn_heuristics(problem, HIPBLASLT_MAX_REQUESTED_ALGOS + 1)
+            .expect_err("excess algorithm count should fail before FFI");
+        assert!(err.to_string().contains("exceeds ROCm-Oxide cap"));
     }
 
     #[test]

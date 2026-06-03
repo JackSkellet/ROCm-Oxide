@@ -25,6 +25,11 @@ scripts/verify.sh --full
 All profiles write logs and artifacts under
 `target/production-readiness/`.
 
+Each verifier command is wrapped in a per-command timeout, defaulting to 1200
+seconds. Set `ROCM_OXIDE_VERIFY_TIMEOUT=<duration>` to tune it, or
+`ROCM_OXIDE_VERIFY_TIMEOUT=0` to disable the wrapper for a deliberate manual
+run.
+
 The host-only CI profile is:
 
 ```bash
@@ -65,6 +70,21 @@ GPU profiles run Rust tests with one test thread. HIP, COMGR, graph, VMM, and
 optional-library tests can share process-wide runtime state, and production
 verification should avoid relying on default test parallelism.
 
+## Performance And Demo Safety
+
+Interactive stress demos are bounded probes, not open-ended burn-in tools.
+`stress_test_gui`, `stress_3d_gui`, and `possibilities_window` clamp interactive
+work-iteration controls to a maximum of 4096 before launch. Keep that cap, keep
+increment controls saturating, and prefer finite frame counts, bounded
+resolutions, and explicit FPS limits for regression runs.
+
+The performance path should remain honest about what executes. hipBLASLt SGEMM
+has a checked execution wrapper and workspace/heuristic caps; Composable Kernel
+and rocWMMA are candidate/probe-only until ROCm-Oxide has real execution
+wrappers for them. The graph runtime currently covers empty/dependency, memcpy,
+memset, kernel, memory allocation/free, instantiate/replay, node retargeting, and
+exec update. Event and host-callback graph nodes are future work.
+
 ## CI Gates
 
 Detailed promotion rules are captured in [CI and release gates](release-gates.md).
@@ -102,6 +122,11 @@ profiles are listed in [Supported ROCm and GPU matrix](supported-rocm-gpu-matrix
    - stream-enqueued async allocation, copy, and memset APIs are `unsafe` when
      the caller must keep buffers, streams, memory pools, or output slices alive
      until the stream reaches the work.
+   - async-created `DeviceBuffer` Drop is blocking cleanup on the retained
+     allocation stream; latency-sensitive paths should free explicitly.
+   - `StreamPool` is capped at 64 streams, but callers still need to bound
+     outstanding async operations because pooled execution is not an unlimited
+     queue.
 2. API stability:
    - decide which modules are stable public API, experimental public API, or
      crate-private implementation detail;

@@ -8,6 +8,8 @@
 use rocm_oxide_device as gpu;
 use rocm_oxide_kernel::{device_global, kernel, shared};
 
+const MAX_STRESS_WORK_ITERS: u32 = 4_096;
+
 #[device_global]
 pub static mut ADD_ONE_DELTA: f32 = 1.0;
 
@@ -1138,6 +1140,11 @@ pub unsafe extern "C" fn stress_pattern(
     mode: u32,
     work_iters: u32,
 ) {
+    let work_iters = if work_iters > MAX_STRESS_WORK_ITERS {
+        MAX_STRESS_WORK_ITERS
+    } else {
+        work_iters
+    };
     let i = gpu::global_id_x();
     if i >= frame.len() {
         return;
@@ -1161,7 +1168,10 @@ pub unsafe extern "C" fn stress_pattern(
                 .wrapping_add(y.wrapping_mul(12_345))
                 .wrapping_add(k.wrapping_mul(2_654_435_761)),
         );
-        k = k.wrapping_add(1);
+        if k == work_iters {
+            break;
+        }
+        k += 1;
     }
 
     let t = frame_index.wrapping_mul(3);
@@ -1207,6 +1217,11 @@ pub unsafe extern "C" fn stress_3d(
     mode: u32,
     work_iters: u32,
 ) {
+    let work_iters = if work_iters > MAX_STRESS_WORK_ITERS {
+        MAX_STRESS_WORK_ITERS
+    } else {
+        work_iters
+    };
     let i = gpu::global_id_x();
     if i >= frame.len() {
         return;
@@ -1282,7 +1297,10 @@ pub unsafe extern "C" fn stress_3d(
             break;
         }
 
-        k = k.wrapping_add(1);
+        if k == work_iters {
+            break;
+        }
+        k += 1;
     }
 
     let rgb = if hit != 0 {

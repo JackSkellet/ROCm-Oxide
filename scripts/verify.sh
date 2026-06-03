@@ -29,6 +29,7 @@ Runs the ROCm-Oxide production verification gate.
   --full     Full local gate, including heavier examples and visual artifacts.
 
 Artifacts are written under target/production-readiness/.
+Set ROCM_OXIDE_VERIFY_TIMEOUT=0 to disable the default 1200s per-command timeout.
 USAGE
   exit 0
 fi
@@ -41,6 +42,7 @@ fi
 
 ARTIFACT_DIR="$ROOT/target/production-readiness"
 LOG="$ARTIFACT_DIR/verify-${PROFILE}.log"
+VERIFY_TIMEOUT="${ROCM_OXIDE_VERIFY_TIMEOUT:-1200s}"
 mkdir -p "$ARTIFACT_DIR"
 : > "$LOG"
 
@@ -53,7 +55,11 @@ run() {
     printf ' %q' "$@"
     printf '\n'
   } >> "$LOG"
-  "$@" 2>&1 | tee -a "$LOG"
+  if [[ -n "$VERIFY_TIMEOUT" && "$VERIFY_TIMEOUT" != "0" ]] && command -v timeout >/dev/null 2>&1; then
+    timeout --foreground "$VERIFY_TIMEOUT" "$@" 2>&1 | tee -a "$LOG"
+  else
+    "$@" 2>&1 | tee -a "$LOG"
+  fi
 }
 
 run cargo test --manifest-path crates/rocm-oxide-kernel/Cargo.toml -- --test-threads=1
