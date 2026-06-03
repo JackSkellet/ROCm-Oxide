@@ -1331,11 +1331,11 @@ impl Module {
 ///
 /// Obtain a `Kernel` from [`Module::kernel`]. The handle is `Send + Sync` and
 /// may be shared across threads; launching is always done through an exclusive
-/// [`Stream`].
+/// `Stream`.
 ///
 /// Typically you do not call launch methods directly on `Kernel` — use the
-/// [`launch!`] macro which builds the argument list and calls
-/// [`Kernel::launch`] for you:
+/// `launch!` macro which builds the argument list and calls
+/// `Kernel::launch` for you:
 ///
 /// ```rust,ignore
 /// launch!(kernel, config, stream, &input_buf, &mut output_buf, n)?;

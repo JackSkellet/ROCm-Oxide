@@ -445,12 +445,10 @@ fn check_rustc_channel() -> Diag {
 fn check_amdgpu_target_diag() -> Diag {
     diag_from_result(
         "amdgcn target",
-        &format!(
-            "this target requires nightly Rust with the amdgcn backend.\n\
-             Ensure you have nightly installed:\n\
-               rustup toolchain install nightly\n\
-               rustup component add rust-src"
-        ),
+        "this target requires nightly Rust with the amdgcn backend.\n\
+         Ensure you have nightly installed:\n\
+           rustup toolchain install nightly\n\
+           rustup component add rust-src",
         ensure_amdgpu_target().map(|()| format!("{TARGET} in rustc target list")),
     )
 }
@@ -698,7 +696,7 @@ fn doctor() -> Result<(), String> {
             diags.push(Diag::fail(
                 "ROCm llc",
                 "not found",
-                &format!(
+                format!(
                     "{rocm_path_fix}\nor set ROCM_OXIDE_LLC=/opt/rocm/lib/llvm/bin/llc"
                 ),
             ));
@@ -715,7 +713,7 @@ fn doctor() -> Result<(), String> {
         None => diags.push(Diag::fail(
             "ROCm clang",
             "not found",
-            &format!("{rocm_path_fix}\nor set ROCM_OXIDE_CLANG=/opt/rocm/bin/clang"),
+            format!("{rocm_path_fix}\nor set ROCM_OXIDE_CLANG=/opt/rocm/bin/clang"),
         )),
     }
 
