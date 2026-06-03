@@ -52,7 +52,15 @@ fn print_help() {
     cargo rocm-oxide pipeline [--build] [--crate PATH] [--output-stem NAME]
     cargo rocm-oxide profile [--trace] [--name NAME] [--pmc COUNTER[,COUNTER...]] [--output-directory DIR] [-- <program> ...]
     cargo rocm-oxide verify [--host-ci|--offline|--quick|--full]
-    cargo rocm-oxide new <path>"
+    cargo rocm-oxide new <path>
+
+Notes:
+    new       Creates a LOCAL SCAFFOLD tied to this ROCm-Oxide workspace via
+              relative paths. The project is not standalone and cannot be
+              published to crates.io. Run from within the ROCm-Oxide workspace.
+    verify    Source-workspace gate only. Run from the ROCm-Oxide repo root,
+              not from generated projects. Use `cargo build` in generated
+              projects to verify the build instead."
     );
 }
 
@@ -275,7 +283,13 @@ impl PipelineArgs {
 }
 
 fn verify(args: &[OsString]) -> Result<(), String> {
-    let root = source_workspace_root()?;
+    let root = source_workspace_root().map_err(|_| {
+        "`cargo rocm-oxide verify` only runs from within the ROCm-Oxide source workspace.\n\
+         It is a repository-level gate, not a per-project command.\n\
+         hint: cd into your cloned ROCm-Oxide directory and run `cargo rocm-oxide verify --quick`.\n\
+         hint: to check that your generated project builds, use `cargo build` inside it instead."
+            .to_string()
+    })?;
     let mut command = Command::new(root.join("scripts/verify.sh"));
     command.args(args).current_dir(&root);
     run_status(command, "run ROCm-Oxide verification gate")
@@ -599,24 +613,50 @@ fn new_project(args: &[OsString]) -> Result<(), String> {
         return Err(format!("target already exists: {}", path.display()));
     }
 
-    let source_root = source_workspace_root().ok();
-    let runtime_path = source_root
-        .as_ref()
-        .map(|root| root.display().to_string())
-        .unwrap_or_else(|| "..".to_string());
-    let device_api_path = source_root
-        .as_ref()
-        .map(|root| root.join("crates/rocm-oxide-device").display().to_string())
-        .unwrap_or_else(|| "../crates/rocm-oxide-device".to_string());
-    let kernel_macro_path = source_root
-        .as_ref()
-        .map(|root| root.join("crates/rocm-oxide-kernel").display().to_string())
-        .unwrap_or_else(|| "../crates/rocm-oxide-kernel".to_string());
+    // Require the source workspace to be reachable so we can compute correct
+    // relative paths. Running from outside the workspace is not supported yet.
+    let source_root = source_workspace_root().map_err(|_| {
+        "cargo rocm-oxide new must be run from within (or adjacent to) the \
+         ROCm-Oxide source workspace.\n\
+         hint: cd into the cloned ROCm-Oxide repository, then re-run this command."
+            .to_string()
+    })?;
+    // Canonicalize once so components compare correctly on all platforms.
+    let source_root = source_root
+        .canonicalize()
+        .unwrap_or(source_root);
+
+    // Absolute path of the project that is about to be created. We cannot
+    // canonicalize it yet (the directory does not exist), so we normalize
+    // lexically instead.
+    let cwd = env::current_dir()
+        .map_err(|err| format!("failed to read current directory: {err}"))?;
+    let project_abs = normalize_path(&cwd.join(&path));
+    let device_spike_abs = project_abs.join("device-spike");
+
+    // All dependency paths in generated files are relative so that the
+    // project + workspace can be moved together without breaking.
+    let runtime_path = relative_path_from_to(&project_abs, &source_root);
+    let runtime_path_from_device_spike =
+        relative_path_from_to(&device_spike_abs, &source_root);
+
+    let device_api_path = runtime_path_from_device_spike.join("crates/rocm-oxide-device");
+    let kernel_macro_path = runtime_path_from_device_spike.join("crates/rocm-oxide-kernel");
+
+    let runtime_path_str = runtime_path.display().to_string();
+    let device_api_path_str = device_api_path.display().to_string();
+    let kernel_macro_path_str = kernel_macro_path.display().to_string();
 
     fs::create_dir_all(path.join("src"))
         .map_err(|err| format!("failed to create {}: {err}", path.display()))?;
     fs::create_dir_all(path.join("device-spike/src"))
-        .map_err(|err| format!("failed to create {}: {err}", path.join("device-spike").display()))?;
+        .map_err(|err| {
+            format!(
+                "failed to create {}: {err}",
+                path.join("device-spike").display()
+            )
+        })?;
+
     fs::write(
         path.join("Cargo.toml"),
         format!(
@@ -626,13 +666,15 @@ version = "0.1.0"
 edition = "2024"
 
 [dependencies]
-rocm-oxide = {{ path = "{runtime_path}" }}
+rocm-oxide = {{ path = "{runtime_path_str}" }}
 "#
         ),
     )
     .map_err(|err| format!("failed to write Cargo.toml: {err}"))?;
-    fs::write(path.join("build.rs"), consumer_build_script(&runtime_path))
+
+    fs::write(path.join("build.rs"), consumer_build_script(&runtime_path_str))
         .map_err(|err| format!("failed to write build.rs: {err}"))?;
+
     fs::write(
         path.join("device-spike/Cargo.toml"),
         format!(
@@ -646,8 +688,8 @@ publish = false
 crate-type = ["rlib"]
 
 [dependencies]
-rocm-oxide-device = {{ path = "{device_api_path}" }}
-rocm-oxide-kernel = {{ path = "{kernel_macro_path}" }}
+rocm-oxide-device = {{ path = "{device_api_path_str}" }}
+rocm-oxide-kernel = {{ path = "{kernel_macro_path_str}" }}
 
 [profile.release]
 panic = "abort"
@@ -657,6 +699,7 @@ lto = false
         ),
     )
     .map_err(|err| format!("failed to write device-spike/Cargo.toml: {err}"))?;
+
     fs::write(
         path.join("device-spike/src/lib.rs"),
         r#"#![no_std]
@@ -675,6 +718,7 @@ pub unsafe extern "C" fn fill_indices(out: gpu::DeviceSliceMut<u32>, n: usize) {
 "#,
     )
     .map_err(|err| format!("failed to write device-spike/src/lib.rs: {err}"))?;
+
     fs::write(
         path.join("src/main.rs"),
         r#"use rocm_oxide::{Device, DeviceBuffer, LaunchConfig};
@@ -708,7 +752,97 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     )
     .map_err(|err| format!("failed to write src/main.rs: {err}"))?;
 
+    // Pin the same nightly toolchain the ROCm-Oxide workspace requires.
+    // Without this, cargo may use stable Rust and fail on `-Z build-std=core`.
+    fs::write(
+        path.join("rust-toolchain.toml"),
+        r#"[toolchain]
+channel = "nightly"
+components = ["rust-src", "clippy", "rustfmt"]
+"#,
+    )
+    .map_err(|err| format!("failed to write rust-toolchain.toml: {err}"))?;
+
+    fs::write(
+        path.join("README.md"),
+        format!(
+            r#"# rocm-oxide-app — ROCm-Oxide local scaffold
+
+> **Local scaffold only.** This project was generated by `cargo rocm-oxide new`
+> and depends on the ROCm-Oxide source workspace via a relative `path` dependency.
+> It is **not** a standalone project. See "Portability" below.
+
+## Build and run
+
+```sh
+cargo run
+```
+
+This will:
+1. Run `rocm-oxide-build` (from the ROCm-Oxide workspace) to compile the Rust
+   GPU kernel in `device-spike/` for `amdgcn-amd-amdhsa`.
+2. Produce a `.hsaco` code object and a typed `DeviceKernels` binding.
+3. Compile and run `src/main.rs`, which loads the kernel and verifies it on the GPU.
+
+## Write your own kernel
+
+1. Open `device-spike/src/lib.rs`.
+2. Add a `#[kernel]` function. Length contracts (for the generated binding's
+   runtime validation) are expressed as magic comments immediately before the
+   function — see `docs/kernel-contracts.md` in the ROCm-Oxide workspace.
+3. `cargo run` picks up the change automatically.
+
+## Portability
+
+This project was scaffolded with the following relative path to the ROCm-Oxide
+workspace:
+
+    {runtime_path_str}   (relative to this project's root)
+
+**What works:**
+- Moving this project and the ROCm-Oxide workspace together (preserving the
+  relative path between them).
+
+**What breaks:**
+- Moving only the ROCm-Oxide workspace without moving this project.
+- Cloning this project on a machine where ROCm-Oxide is not at the same
+  relative path.
+- `cargo publish` — `path` dependencies are rejected by crates.io.
+
+**Escape hatch — pre-built `rocm-oxide-build`:**
+Set `ROCM_OXIDE_BUILD=/path/to/rocm-oxide-build` to point `build.rs` to a
+pre-compiled build tool binary instead of using the source workspace. The
+`rocm-oxide` runtime dependency in `Cargo.toml` would still need to be updated
+to a crates.io version once one is published.
+
+See `docs/project_generation.md` in the ROCm-Oxide workspace for the full
+portability roadmap.
+
+## Prerequisites
+
+- AMD GPU (RDNA 2+, RDNA 3+, RDNA 4+, or CDNA 2/3)
+- ROCm 6.0+ at `/opt/rocm` (or set `ROCM_PATH`)
+- `/opt/rocm/bin` on `PATH` (`llc`, `clang`, `llvm-readelf`)
+- Rust nightly with `rust-src` (pinned by `rust-toolchain.toml` in this project)
+
+Run `cargo rocm-oxide doctor` from the ROCm-Oxide workspace to verify all tools.
+"#,
+            runtime_path_str = runtime_path_str
+        ),
+    )
+    .map_err(|err| format!("failed to write README.md: {err}"))?;
+
     println!("created {}", path.display());
+    println!();
+    println!("  Scaffold mode: local (relative paths to ROCm-Oxide workspace)");
+    println!("  ROCm-Oxide workspace: {runtime_path_str}  (relative from project root)");
+    println!();
+    println!("  Build and run:");
+    println!("    cd {}", path.display());
+    println!("    cargo run");
+    println!();
+    println!("  Note: `cargo rocm-oxide verify` must be run from the ROCm-Oxide");
+    println!("  source workspace, not from this project.");
     Ok(())
 }
 
@@ -815,5 +949,143 @@ fn run_status(mut command: Command, label: &str) -> Result<(), String> {
         Ok(())
     } else {
         Err(format!("{label} failed with status {status}"))
+    }
+}
+
+/// Return the path to `to` expressed relative to `from`.
+///
+/// Both paths must be absolute. Neither needs to exist on disk (no
+/// canonicalization is performed). The result is equivalent to what
+/// `pathdiff::diff_paths(to, from)` would return.
+fn relative_path_from_to(from: &Path, to: &Path) -> PathBuf {
+    let from_components: Vec<_> = from.components().collect();
+    let to_components: Vec<_> = to.components().collect();
+
+    let common_len = from_components
+        .iter()
+        .zip(to_components.iter())
+        .take_while(|(a, b)| a == b)
+        .count();
+
+    let up_count = from_components.len() - common_len;
+    let mut result = PathBuf::new();
+    for _ in 0..up_count {
+        result.push("..");
+    }
+    for component in &to_components[common_len..] {
+        result.push(component);
+    }
+    if result.as_os_str().is_empty() {
+        result.push(".");
+    }
+    result
+}
+
+/// Collapse `.` and `..` components in an absolute path without touching the
+/// filesystem (i.e. without calling `canonicalize()`). Symlinks are not
+/// resolved — this is a purely lexical operation.
+fn normalize_path(path: &Path) -> PathBuf {
+    use std::path::Component;
+    let mut result = PathBuf::new();
+    for component in path.components() {
+        match component {
+            Component::CurDir => {}
+            Component::ParentDir => {
+                result.pop();
+            }
+            other => result.push(other),
+        }
+    }
+    result
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn relative_path_sibling_directories() {
+        let from = Path::new("/home/user/my-project");
+        let to = Path::new("/home/user/ROCm-Oxide");
+        assert_eq!(
+            relative_path_from_to(from, to),
+            PathBuf::from("../ROCm-Oxide")
+        );
+    }
+
+    #[test]
+    fn relative_path_project_inside_workspace() {
+        // project scaffolded as a child of the workspace
+        let from = Path::new("/home/user/ROCm-Oxide/my-project");
+        let to = Path::new("/home/user/ROCm-Oxide");
+        assert_eq!(relative_path_from_to(from, to), PathBuf::from(".."));
+    }
+
+    #[test]
+    fn relative_path_device_spike_to_sibling_workspace() {
+        // device-spike/ is one level deeper than the project root
+        let from = Path::new("/home/user/my-project/device-spike");
+        let to = Path::new("/home/user/ROCm-Oxide");
+        assert_eq!(
+            relative_path_from_to(from, to),
+            PathBuf::from("../../ROCm-Oxide")
+        );
+    }
+
+    #[test]
+    fn relative_path_deeply_nested() {
+        let from = Path::new("/home/user/projects/deep/my-project");
+        let to = Path::new("/home/user/ROCm-Oxide");
+        assert_eq!(
+            relative_path_from_to(from, to),
+            PathBuf::from("../../../ROCm-Oxide")
+        );
+    }
+
+    #[test]
+    fn relative_path_same_directory() {
+        let from = Path::new("/home/user/dir");
+        let to = Path::new("/home/user/dir");
+        assert_eq!(relative_path_from_to(from, to), PathBuf::from("."));
+    }
+
+    #[test]
+    fn normalize_removes_dot() {
+        assert_eq!(
+            normalize_path(Path::new("/a/./b/./c")),
+            PathBuf::from("/a/b/c")
+        );
+    }
+
+    #[test]
+    fn normalize_removes_dotdot() {
+        assert_eq!(
+            normalize_path(Path::new("/a/b/../c")),
+            PathBuf::from("/a/c")
+        );
+    }
+
+    #[test]
+    fn consumer_build_script_uses_relative_path() {
+        let script = consumer_build_script("../ROCm-Oxide");
+        assert!(
+            script.contains(r#""../ROCm-Oxide""#),
+            "build.rs should embed the relative runtime path"
+        );
+    }
+
+    #[test]
+    fn consumer_build_script_no_home_paths() {
+        // Regression guard: generated build.rs must not bake in absolute home
+        // paths when a relative path is passed.
+        let script = consumer_build_script("../ROCm-Oxide");
+        assert!(
+            !script.contains("/home/"),
+            "generated build.rs must not contain absolute /home/ paths"
+        );
+        assert!(
+            !script.contains("/root/"),
+            "generated build.rs must not contain absolute /root/ paths"
+        );
     }
 }

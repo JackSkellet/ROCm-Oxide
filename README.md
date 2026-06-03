@@ -76,16 +76,22 @@ messages, see [docs/getting-started.md](docs/getting-started.md).
 
 ---
 
-### Full new-project workflow
+### Local scaffold (develop alongside this workspace)
 
-The `cargo rocm-oxide` subcommand automates project scaffolding, health checks,
-and build verification. Install it once from within this workspace:
+> **Local scaffold only.** `cargo rocm-oxide new` creates a project that
+> depends on this ROCm-Oxide workspace via relative `path` links. It is not a
+> standalone project and cannot be published to crates.io. Generated projects
+> and the workspace must be moved together to remain functional.
+>
+> **Full details →** [docs/project_generation.md](docs/project_generation.md)
+
+Install the tool from the **repo root** once:
 
 ```sh
 cargo install --path tools/cargo-rocm-oxide
 ```
 
-Then:
+Then, from within the ROCm-Oxide workspace:
 
 **1. Check prerequisites**
 
@@ -95,12 +101,19 @@ cargo rocm-oxide doctor
 
 This validates your ROCm installation, GPU visibility, and Rust nightly toolchain.
 
-**2. Create your first project**
+**2. Create a local scaffold project**
 
 ```sh
 cargo rocm-oxide new my-gpu-project
 cd my-gpu-project
 ```
+
+The generated project contains:
+- A `Cargo.toml` with a relative `path` dependency on `rocm-oxide`
+- A `build.rs` that invokes `rocm-oxide-build` from the workspace
+- A `rust-toolchain.toml` that pins nightly + `rust-src`
+- A `README.md` explaining the scaffold's portability constraints
+- A sample `#[kernel]` function and host program
 
 **3. Build and run**
 
@@ -111,15 +124,21 @@ cargo run
 This compiles your Rust kernel for `amdgcn-amd-amdhsa`, links a `.hsaco` code
 object, and launches it on your AMD GPU.
 
-**4. Validate**
+**4. Verify a repo-wide build (source workspace only)**
 
 ```sh
+# Run this from the ROCm-Oxide repo root, not from the generated project
 cargo rocm-oxide verify --quick
 ```
+
+Note: `verify` is a repository gate and only works inside the ROCm-Oxide source
+tree. To verify your generated project builds, use `cargo build` inside it.
 
 **Full walkthrough →** [docs/getting-started.md](docs/getting-started.md)
 
 **API reference →** [docs/api_overview.md](docs/api_overview.md)
+
+**Project generation details →** [docs/project_generation.md](docs/project_generation.md)
 
 ---
 
