@@ -115,6 +115,38 @@ Walkthrough:
 
 ---
 
+## Creating a consumer project
+
+> **Manual project creation is not supported.** Hand-authoring `Cargo.toml`,
+> `build.rs`, or `rust-toolchain.toml` will produce incorrect path dependencies
+> and opaque compiler errors. Always use `cargo rocm-oxide new`.
+
+Install the cargo subcommand once from the repository root:
+
+```sh
+cargo install --path tools/cargo-rocm-oxide
+```
+
+Then run the three-command sequence:
+
+```sh
+# 1. Clone (or cd into) the ROCm-Oxide workspace
+git clone https://github.com/JackSkellet/ROCm-Oxide.git
+cd ROCm-Oxide
+
+# 2. Generate the scaffold — paths are computed automatically
+cargo rocm-oxide new ../my-project
+
+# 3. Build and run
+cd ../my-project && cargo run
+```
+
+The generated project uses relative `path` links back to this workspace.
+Move both together and the build stays intact. See
+[docs/project_generation.md](docs/project_generation.md) for portability options.
+
+---
+
 ## Requirements
 
 Required:
@@ -320,6 +352,7 @@ See:
 
 - [docs/troubleshooting.md](docs/troubleshooting.md)
 - [docs/project_generation.md](docs/project_generation.md)
+- [docs/scaffold-required-files.md](docs/scaffold-required-files.md)
 - [docs/toolchain-discovery.md](docs/toolchain-discovery.md)
 - [docs/supported-rocm-gpu-matrix.md](docs/supported-rocm-gpu-matrix.md)
 

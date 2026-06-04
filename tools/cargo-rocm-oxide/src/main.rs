@@ -33,6 +33,7 @@ fn run() -> Result<(), String> {
         "profile" => profile(&args),
         "verify" => verify(&args),
         "new" => new_project(&args),
+        "check-consumer" => check_consumer(),
         "help" | "--help" | "-h" => {
             print_help();
             Ok(())
@@ -53,14 +54,18 @@ fn print_help() {
     cargo rocm-oxide profile [--trace] [--name NAME] [--pmc COUNTER[,COUNTER...]] [--output-directory DIR] [-- <program> ...]
     cargo rocm-oxide verify [--host-ci|--offline|--quick|--full]
     cargo rocm-oxide new <path>
+    cargo rocm-oxide check-consumer
 
 Notes:
-    new       Creates a LOCAL SCAFFOLD tied to this ROCm-Oxide workspace via
-              relative paths. The project is not standalone and cannot be
-              published to crates.io. Run from within the ROCm-Oxide workspace.
-    verify    Source-workspace gate only. Run from the ROCm-Oxide repo root,
-              not from generated projects. Use `cargo build` in generated
-              projects to verify the build instead."
+    new              Creates a LOCAL SCAFFOLD tied to this ROCm-Oxide workspace via
+                     relative paths. The project is not standalone and cannot be
+                     published to crates.io. Run from within the ROCm-Oxide workspace.
+    check-consumer   Validates a generated scaffold project. Run from inside the
+                     consumer project directory. Checks path dependencies, build.rs,
+                     and rust-toolchain.toml.
+    verify           Source-workspace gate only. Run from the ROCm-Oxide repo root,
+                     not from generated projects. Use `cargo build` in generated
+                     projects to verify the build instead."
     );
 }
 
@@ -604,6 +609,132 @@ fn find_latest_metadata(root: &Path, device_crate: &Path, output_stem: &std::ffi
     path.is_file().then_some(path)
 }
 
+fn check_consumer() -> Result<(), String> {
+    let root = project_root()?;
+    let manifest = root.join("Cargo.toml");
+    let device_manifest = root.join("device-spike/Cargo.toml");
+    let build_rs = root.join("build.rs");
+    let toolchain = root.join("rust-toolchain.toml");
+
+    let mut all_pass = true;
+
+    // Check root Cargo.toml path dependencies resolve
+    let manifest_content = fs::read_to_string(&manifest)
+        .map_err(|err| format!("failed to read Cargo.toml: {err}"))?;
+    for (dep, resolved) in extract_path_deps(&manifest_content, &root) {
+        let dep_manifest = resolved.join("Cargo.toml");
+        if dep_manifest.is_file() {
+            println!("[pass] {dep} path dependency resolves");
+        } else {
+            println!("[fail] {dep} path dependency does not resolve — {}", dep_manifest.display());
+            all_pass = false;
+        }
+    }
+
+    // Check device-spike/Cargo.toml if present
+    if device_manifest.is_file() {
+        let device_content = fs::read_to_string(&device_manifest)
+            .map_err(|err| format!("failed to read device-spike/Cargo.toml: {err}"))?;
+        for (dep, resolved) in extract_path_deps(&device_content, &root.join("device-spike")) {
+            let dep_manifest = resolved.join("Cargo.toml");
+            if dep_manifest.is_file() {
+                println!("[pass] device-spike: {dep} path dependency resolves");
+            } else {
+                println!("[fail] device-spike: {dep} path dependency does not resolve — {}", dep_manifest.display());
+                all_pass = false;
+            }
+        }
+    } else {
+        println!("[warn] device-spike/Cargo.toml not found — skipping device crate dependency checks");
+    }
+
+    // Check build.rs exists and emits ROCM_OXIDE_DEVICE_BINDINGS
+    if build_rs.is_file() {
+        let build_content = fs::read_to_string(&build_rs)
+            .map_err(|err| format!("failed to read build.rs: {err}"))?;
+        if build_content.contains("ROCM_OXIDE_DEVICE_BINDINGS") {
+            println!("[pass] build.rs present and sets ROCM_OXIDE_DEVICE_BINDINGS");
+        } else {
+            println!("[warn] build.rs present but does not appear to set ROCM_OXIDE_DEVICE_BINDINGS");
+        }
+    } else {
+        println!("[fail] build.rs not found — run `cargo rocm-oxide new` to regenerate scaffold");
+        all_pass = false;
+    }
+
+    // Check rust-toolchain.toml exists and requests rust-src
+    if toolchain.is_file() {
+        let toolchain_content = fs::read_to_string(&toolchain)
+            .map_err(|err| format!("failed to read rust-toolchain.toml: {err}"))?;
+        if toolchain_content.contains("rust-src") {
+            println!("[pass] rust-toolchain.toml present and requests rust-src");
+        } else {
+            println!("[warn] rust-toolchain.toml present but does not list rust-src component");
+        }
+    } else {
+        println!("[fail] rust-toolchain.toml not found — without it cargo may use stable Rust and fail -Z build-std=core");
+        all_pass = false;
+    }
+
+    if all_pass {
+        println!();
+        println!("all checks passed");
+    } else {
+        println!();
+        println!("one or more checks failed — re-run `cargo rocm-oxide new <path>` to regenerate the scaffold");
+    }
+    Ok(())
+}
+
+/// Extract `path = "..."` values from a Cargo.toml string and resolve them
+/// relative to `base`. Returns (dependency-name, resolved-path) pairs.
+fn extract_path_deps(toml: &str, base: &Path) -> Vec<(String, PathBuf)> {
+    let mut deps = Vec::new();
+    let mut current_dep: Option<String> = None;
+    for line in toml.lines() {
+        let trimmed = line.trim();
+        // Detect [dependencies.foo] or foo = { ... } style headers
+        if let Some(rest) = trimmed.strip_prefix('[') {
+            if let Some(name) = rest
+                .strip_prefix("dependencies.")
+                .and_then(|s| s.strip_suffix(']'))
+            {
+                current_dep = Some(name.trim().to_owned());
+            } else {
+                current_dep = None;
+            }
+        } else if let Some((lhs, rhs)) = trimmed.split_once('=') {
+            let dep_name = lhs.trim().to_owned();
+            let rhs = rhs.trim();
+            // Inline: foo = { path = "..." }
+            if let Some(path_val) = extract_path_value(rhs) {
+                deps.push((dep_name.clone(), normalize_path(&base.join(path_val))));
+            }
+            // path = "..." inside a [dependencies.foo] section
+            if dep_name == "path" {
+                if let Some(name) = &current_dep {
+                    if let Some(path_val) = extract_path_value(rhs) {
+                        deps.push((name.clone(), normalize_path(&base.join(path_val))));
+                    }
+                }
+            }
+        }
+    }
+    deps
+}
+
+fn extract_path_value(s: &str) -> Option<&str> {
+    // Match: "some/path" or { path = "some/path", ... }
+    let search = if s.contains("path") { s } else { return None; };
+    // Find path = "..." anywhere in the value
+    let after_path = search.split("path").nth(1)?;
+    let after_eq = after_path.split('=').nth(1)?.trim();
+    let inner = after_eq.trim_start_matches('{').trim();
+    let start = inner.find('"')? + 1;
+    let end = inner[start..].find('"')?;
+    Some(&inner[start..start + end])
+}
+
 fn new_project(args: &[OsString]) -> Result<(), String> {
     let Some(path) = args.first() else {
         return Err("cargo rocm-oxide new requires a path".to_string());
@@ -618,7 +749,10 @@ fn new_project(args: &[OsString]) -> Result<(), String> {
     let source_root = source_workspace_root().map_err(|_| {
         "cargo rocm-oxide new must be run from within (or adjacent to) the \
          ROCm-Oxide source workspace.\n\
-         hint: cd into the cloned ROCm-Oxide repository, then re-run this command."
+         hint: clone the workspace first, then cd into it and re-run:\n\
+           git clone https://github.com/JackSkellet/ROCm-Oxide.git\n\
+           cd ROCm-Oxide\n\
+           cargo rocm-oxide new <path>"
             .to_string()
     })?;
     // Canonicalize once so components compare correctly on all platforms.
@@ -646,6 +780,17 @@ fn new_project(args: &[OsString]) -> Result<(), String> {
     let runtime_path_str = runtime_path.display().to_string();
     let device_api_path_str = device_api_path.display().to_string();
     let kernel_macro_path_str = kernel_macro_path.display().to_string();
+
+    // Surface portability constraint before writing any files so every user
+    // who runs `new` sees it at least once.
+    println!(
+        "note: this project is a local scaffold tied to the ROCm-Oxide workspace at\n      \
+         {} via relative path dependencies.\n      \
+         Moving only the generated project will break the build.\n      \
+         See docs/scaffold-required-files.md for options.",
+        source_root.display()
+    );
+    println!();
 
     fs::create_dir_all(path.join("src"))
         .map_err(|err| format!("failed to create {}: {err}", path.display()))?;
