@@ -31,7 +31,7 @@
 //! | + / =         | Add 4 096 particles                      |
 //! | -             | Remove 4 096 particles                   |
 //! | G             | Cycle gravity strength (1× / 4× / 16×)  |
-//! | D             | Cycle damping (0.999 / 0.995 / 0.980)   |
+//! | D             | Cycle damping (1.0 / 0.999 / 0.995 / 0.980)   |
 //! | ESC / Q       | Exit                                     |
 
 #![allow(clippy::too_many_arguments)]
@@ -62,23 +62,23 @@ type AppResult<T> = std::result::Result<T, Box<dyn std::error::Error>>;
 
 const DEFAULT_PARTICLES: usize = 32_768;
 const MIN_PARTICLES: usize = 4_096;
-const MAX_PARTICLES: usize = 131_072;
+const MAX_PARTICLES: usize = 931_072;
 const PARTICLE_STEP: usize = 4_096;
 const BLOCK_SIZE: u32 = 256;
 
-const MAX_ATTRACTORS: usize = 8;
+const MAX_ATTRACTORS: usize = 16;
 const ATTRACTOR_STRENGTH: f32 = 6_000.0;
 const REPULSOR_STRENGTH: f32 = -3_000.0;
-const SOFT_RADIUS: f32 = 40.0;
-const MAX_EXPECTED_SPEED: f32 = 800.0;
+const SOFT_RADIUS: f32 = 70.0;
+const MAX_EXPECTED_SPEED: f32 = 600.0;
 
 const GRAVITY_SCALES: [f32; 3] = [1.0, 4.0, 16.0];
-const DAMPINGS: [f32; 3] = [0.999, 0.995, 0.980];
+const DAMPINGS: [f32; 4] = [0.9999, 0.999, 0.995, 0.980];
 
 const FRAMES_IN_FLIGHT: usize = 2;
 const WINDOW_TITLE: &str = "ROCm-Oxide · Gravity Storm";
-const WINDOW_W: u32 = 1280;
-const WINDOW_H: u32 = 720;
+const WINDOW_W: u32 = 1920;
+const WINDOW_H: u32 = 1080;
 
 // ─── Particle layout ─────────────────────────────────────────────────────────
 //
@@ -763,7 +763,7 @@ impl GravityStorm {
                         Keycode::Space => self.scatter_all_random(),
                         Keycode::R => self.reset_ring(),
 
-                        Keycode::Equals | Keycode::KpPlus => {
+                        Keycode::Equals | Keycode::KpPlus | Keycode::RCTRL => {
                             if self.n_particles + PARTICLE_STEP <= MAX_PARTICLES {
                                 let old = self.n_particles;
                                 self.n_particles += PARTICLE_STEP;
