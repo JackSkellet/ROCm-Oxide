@@ -2,6 +2,8 @@
 
 **Rust-first GPU development on AMD/ROCm.**
 
+<img width="1925" height="1113" alt="image" src="https://github.com/user-attachments/assets/a1b877e9-af51-44e4-bd73-de1c0be8cd25" />
+
 ROCm-Oxide is an experimental SDK preview for writing, building, launching,
 testing, and profiling AMD GPU workloads from Rust.
 
