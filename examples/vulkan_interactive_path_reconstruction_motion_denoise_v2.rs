@@ -323,8 +323,8 @@ extern "C" __global__ void trace_sample(
     unsigned int y=i/p.width;
     unsigned int rng=wang_hash(i^(p.sample_index*747796405u)^0x9e3779b9u);
 
-    float jx=rand01(&rng)-0.5f;
-    float jy=rand01(&rng)-0.5f;
+    float jx = p.moving_preview != 0u ? 0.0f : rand01(&rng)-0.5f;
+    float jy = p.moving_preview != 0u ? 0.0f : rand01(&rng)-0.5f;
 
     float aspect=(float)p.width/(float)p.height;
     float fov=60.0f*0.017453292519943295f;
@@ -786,7 +786,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     forward,
                     right,
                     up,
-                    aperture,
+                    aperture: effective_aperture,
                     focus_dist,
                     s0,
                     s1,
