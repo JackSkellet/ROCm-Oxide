@@ -123,9 +123,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     for (i, ((&got, &a_i), &b_i)) in out.iter().zip(&a).zip(&b).enumerate() {
         let expected = a_i + b_i;
         if (got - expected).abs() > f32::EPSILON {
-            return Err(
-                format!("mismatch at index {i}: got {got}, expected {expected}").into(),
-            );
+            return Err(format!("mismatch at index {i}: got {got}, expected {expected}").into());
         }
     }
 

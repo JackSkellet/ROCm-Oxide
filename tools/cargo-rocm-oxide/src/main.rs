@@ -825,7 +825,16 @@ portability roadmap.
 - `/opt/rocm/bin` on `PATH` (`llc`, `clang`, `llvm-readelf`)
 - Rust nightly with `rust-src` (pinned by `rust-toolchain.toml` in this project)
 
-Run `cargo rocm-oxide doctor` from the ROCm-Oxide workspace to verify all tools.
+Before building, verify all tools are present by running doctor from the
+ROCm-Oxide source workspace:
+
+```sh
+cd {runtime_path_str}
+cargo rocm-oxide doctor
+```
+
+Fix any FAIL items before running `cargo run` in this project. Copy the doctor
+output between the dashed markers when filing a bug report.
 "#,
             runtime_path_str = runtime_path_str
         ),
@@ -924,7 +933,44 @@ fn build_tool_command() -> Command {
         return command;
     }
 
-    Command::new("rocm-oxide-build")
+    // source_manifest not found — workspace may have moved or the relative path
+    // is wrong. Try rocm-oxide-build on PATH as a last resort.
+    if which_on_path("rocm-oxide-build") {
+        return Command::new("rocm-oxide-build");
+    }
+
+    // Nothing found: emit an actionable error at build time.
+    panic!(
+        "\n\
+         \n\
+         rocm-oxide-build not found.\n\
+         \n\
+         This scaffold was generated with RUNTIME_PATH = {:?}\n\
+         but that path does not contain tools/rocm-oxide-build/Cargo.toml.\n\
+         \n\
+         Fix options:\n\
+           1. Keep the ROCm-Oxide workspace at {:?} (relative to this project).\n\
+           2. Set ROCM_OXIDE_BUILD=/path/to/pre-built/rocm-oxide-build in your\n\
+              environment or .cargo/config.toml [env] section.\n\
+           3. Install rocm-oxide-build onto PATH via:\n\
+                cargo install --path <rocm-oxide-workspace>/tools/rocm-oxide-build\n\
+         \n\
+         See README.md in this project for details.\n",
+        RUNTIME_PATH,
+        RUNTIME_PATH,
+    )
+}
+
+fn which_on_path(name: &str) -> bool {
+    if let Some(path_var) = env::var_os("PATH") {
+        for dir in env::split_paths(&path_var) {
+            let candidate = dir.join(name);
+            if candidate.is_file() {
+                return true;
+            }
+        }
+    }
+    false
 }
 
 fn copy_artifact(from: &Path, to: &Path, label: &str) {

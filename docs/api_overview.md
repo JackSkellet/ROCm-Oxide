@@ -215,8 +215,10 @@ normal workflows. It implements the full Rust → GPU pipeline:
 
 `rocm-oxide-build` emits a `DeviceKernels` struct with one method per
 `#[kernel]` function. The method signature matches the kernel exactly but
-accepts host-side types (`&DeviceBuffer<T>` instead of `DeviceSlice<T>`,
-`&mut DeviceBuffer<T>` instead of `DeviceSliceMut<T>`).
+accepts host-side types: both `DeviceSlice<T>` and `DeviceSliceMut<T>` map to
+`&DeviceBuffer<T>` (shared reference). Mutability is handled internally by
+calling `.as_mut_ptr()` or `.as_ptr()` depending on the kernel parameter kind.
+Runtime overlap and length checks are applied before launch.
 
 Include the bindings in `src/main.rs` (or `src/lib.rs`):
 
@@ -228,7 +230,9 @@ Then load and use:
 
 ```rust
 let kernels = DeviceKernels::load_embedded(&device)?;
-kernels.fill_indices(LaunchConfig::for_num_elems(n), &mut out, n)?;
+unsafe {
+    kernels.fill_indices(LaunchConfig::for_num_elems(n), &out, n)?;
+}
 ```
 
 `load_embedded` reads the HSACO from the bytes embedded by `build.rs` at

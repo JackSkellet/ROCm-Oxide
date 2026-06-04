@@ -31,7 +31,7 @@
 //! | + / =         | Add 4 096 particles                      |
 //! | -             | Remove 4 096 particles                   |
 //! | G             | Cycle gravity strength (1× / 4× / 16×)  |
-//! | D             | Cycle damping (0.999 / 0.995 / 0.980)   |
+//! | D             | Cycle damping (1.0 / 0.999 / 0.995 / 0.980)   |
 //! | ESC / Q       | Exit                                     |
 
 #![allow(clippy::too_many_arguments)]
@@ -42,12 +42,11 @@ use std::time::Instant;
 
 use ash::vk::Handle as _;
 use ash::{ext, khr, vk};
+use rocm_oxide::Device;
 use rocm_oxide::hip::{
-    DeviceBuffer, DevicePod, Function as HipFunction, Module as HipModule, PinnedHostBuffer,
-    Stream,
+    DeviceBuffer, DevicePod, Function as HipFunction, Module as HipModule, PinnedHostBuffer, Stream,
 };
 use rocm_oxide::hiprtc;
-use rocm_oxide::Device;
 
 // ─── HIP raw symbols ────────────────────────────────────────────────────────
 
@@ -63,23 +62,23 @@ type AppResult<T> = std::result::Result<T, Box<dyn std::error::Error>>;
 
 const DEFAULT_PARTICLES: usize = 32_768;
 const MIN_PARTICLES: usize = 4_096;
-const MAX_PARTICLES: usize = 131_072;
+const MAX_PARTICLES: usize = 931_072;
 const PARTICLE_STEP: usize = 4_096;
 const BLOCK_SIZE: u32 = 256;
 
-const MAX_ATTRACTORS: usize = 8;
+const MAX_ATTRACTORS: usize = 16;
 const ATTRACTOR_STRENGTH: f32 = 6_000.0;
 const REPULSOR_STRENGTH: f32 = -3_000.0;
-const SOFT_RADIUS: f32 = 40.0;
-const MAX_EXPECTED_SPEED: f32 = 800.0;
+const SOFT_RADIUS: f32 = 70.0;
+const MAX_EXPECTED_SPEED: f32 = 600.0;
 
 const GRAVITY_SCALES: [f32; 3] = [1.0, 4.0, 16.0];
-const DAMPINGS: [f32; 3] = [0.999, 0.995, 0.980];
+const DAMPINGS: [f32; 4] = [0.9999, 0.999, 0.995, 0.980];
 
 const FRAMES_IN_FLIGHT: usize = 2;
 const WINDOW_TITLE: &str = "ROCm-Oxide · Gravity Storm";
-const WINDOW_W: u32 = 1280;
-const WINDOW_H: u32 = 720;
+const WINDOW_W: u32 = 1920;
+const WINDOW_H: u32 = 1080;
 
 // ─── Particle layout ─────────────────────────────────────────────────────────
 //
@@ -263,7 +262,9 @@ fn find_memory_type(
 ) -> Option<u32> {
     (0..props.memory_type_count).find(|&i| {
         (type_bits & (1 << i)) != 0
-            && props.memory_types[i as usize].property_flags.contains(required)
+            && props.memory_types[i as usize]
+                .property_flags
+                .contains(required)
     })
 }
 
@@ -276,14 +277,21 @@ fn spv_bytes_to_words(bytes: &[u8]) -> &[u32] {
 fn scatter_random(particles: &mut [Particle], width: f32, height: f32) {
     // Deterministic LCG — no external crates needed.
     for (i, p) in particles.iter_mut().enumerate() {
-        let mut s =
-            (i as u64).wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407);
+        let mut s = (i as u64)
+            .wrapping_mul(6364136223846793005)
+            .wrapping_add(1442695040888963407);
         let r1 = (s >> 33) as f32 / (u32::MAX as f32);
-        s = s.wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407);
+        s = s
+            .wrapping_mul(6364136223846793005)
+            .wrapping_add(1442695040888963407);
         let r2 = (s >> 33) as f32 / (u32::MAX as f32);
-        s = s.wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407);
+        s = s
+            .wrapping_mul(6364136223846793005)
+            .wrapping_add(1442695040888963407);
         let r3 = (s >> 33) as f32 / (u32::MAX as f32);
-        s = s.wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407);
+        s = s
+            .wrapping_mul(6364136223846793005)
+            .wrapping_add(1442695040888963407);
         let r4 = (s >> 33) as f32 / (u32::MAX as f32);
         *p = Particle {
             x: 80.0 + r1 * (width - 160.0),
@@ -399,7 +407,10 @@ impl GravityStorm {
             .vulkan()
             .resizable()
             .build()?;
-        let extent = vk::Extent2D { width: WINDOW_W, height: WINDOW_H };
+        let extent = vk::Extent2D {
+            width: WINDOW_W,
+            height: WINDOW_H,
+        };
 
         // ── Vulkan entry ──────────────────────────────────────────────────
         let entry = unsafe { ash::Entry::load()? };
@@ -437,9 +448,7 @@ impl GravityStorm {
             .enumerate()
             .find(|(_, p)| {
                 p.queue_flags.contains(
-                    vk::QueueFlags::GRAPHICS
-                        | vk::QueueFlags::COMPUTE
-                        | vk::QueueFlags::TRANSFER,
+                    vk::QueueFlags::GRAPHICS | vk::QueueFlags::COMPUTE | vk::QueueFlags::TRANSFER,
                 )
             })
             .map(|(i, _)| i as u32)
@@ -485,7 +494,7 @@ impl GravityStorm {
                 sdl2::sys::SDL_Vulkan_CreateSurface(
                     window.raw(),
                     instance.handle().as_raw() as usize, // VkInstance = usize in sdl2-sys
-                    &mut raw as *mut u64,               // VkSurfaceKHR = u64 in sdl2-sys
+                    &mut raw as *mut u64,                // VkSurfaceKHR = u64 in sdl2-sys
                 ) as i32
             };
             assert_ne!(ok, 0, "SDL_Vulkan_CreateSurface failed");
@@ -493,8 +502,14 @@ impl GravityStorm {
         };
 
         // ── Swapchain ─────────────────────────────────────────────────────
-        let (swapchain, sw_images, sw_views, sw_format) =
-            build_swapchain(&phys_dev, &device, &surface_ext, &swapchain_ext, surface, extent)?;
+        let (swapchain, sw_images, sw_views, sw_format) = build_swapchain(
+            &phys_dev,
+            &device,
+            &surface_ext,
+            &swapchain_ext,
+            surface,
+            extent,
+        )?;
 
         // ── Command pool ──────────────────────────────────────────────────
         let pool_ci = vk::CommandPoolCreateInfo::default()
@@ -512,18 +527,15 @@ impl GravityStorm {
         // ── Per-frame sync ────────────────────────────────────────────────
         let sem_ci = vk::SemaphoreCreateInfo::default();
         let fence_ci = vk::FenceCreateInfo::default().flags(vk::FenceCreateFlags::SIGNALED);
-        let image_avail = [
-            unsafe { device.create_semaphore(&sem_ci, None)? },
-            unsafe { device.create_semaphore(&sem_ci, None)? },
-        ];
-        let render_done = [
-            unsafe { device.create_semaphore(&sem_ci, None)? },
-            unsafe { device.create_semaphore(&sem_ci, None)? },
-        ];
-        let in_flight = [
-            unsafe { device.create_fence(&fence_ci, None)? },
-            unsafe { device.create_fence(&fence_ci, None)? },
-        ];
+        let image_avail = [unsafe { device.create_semaphore(&sem_ci, None)? }, unsafe {
+            device.create_semaphore(&sem_ci, None)?
+        }];
+        let render_done = [unsafe { device.create_semaphore(&sem_ci, None)? }, unsafe {
+            device.create_semaphore(&sem_ci, None)?
+        }];
+        let in_flight = [unsafe { device.create_fence(&fence_ci, None)? }, unsafe {
+            device.create_fence(&fence_ci, None)?
+        }];
 
         // ── Descriptor set layout ─────────────────────────────────────────
         let binding = vk::DescriptorSetLayoutBinding::default()
@@ -614,7 +626,11 @@ impl GravityStorm {
                 host_ptr,
                 &mut props,
             );
-            assert_eq!(res, vk::Result::SUCCESS, "vkGetMemoryHostPointerPropertiesEXT failed");
+            assert_eq!(
+                res,
+                vk::Result::SUCCESS,
+                "vkGetMemoryHostPointerPropertiesEXT failed"
+            );
             props.memory_type_bits
         };
         let mem_type = find_memory_type(
@@ -653,8 +669,8 @@ impl GravityStorm {
         let hip_stream = Stream::new()?;
         let arch = Device::first()?.arch().to_owned();
         eprintln!("[gravity_storm] Compiling HIPRTC kernel for {arch}…");
-        let code_obj = hiprtc::compile_code_object(KERNEL_SRC, &arch)
-            .expect("HIPRTC compilation failed");
+        let code_obj =
+            hiprtc::compile_code_object(KERNEL_SRC, &arch).expect("HIPRTC compilation failed");
         let hip_module = HipModule::from_code_object(&code_obj)?;
         let hip_kernel = hip_module.function(c"update_particles")?;
         let attractor_buf = DeviceBuffer::<Attractor>::new(MAX_ATTRACTORS)?;
@@ -740,12 +756,14 @@ impl GravityStorm {
                 match event {
                     Event::Quit { .. } => break 'main,
 
-                    Event::KeyDown { keycode: Some(kc), .. } => match kc {
+                    Event::KeyDown {
+                        keycode: Some(kc), ..
+                    } => match kc {
                         Keycode::Escape | Keycode::Q => break 'main,
                         Keycode::Space => self.scatter_all_random(),
                         Keycode::R => self.reset_ring(),
 
-                        Keycode::Equals | Keycode::KpPlus => {
+                        Keycode::Equals | Keycode::KpPlus | Keycode::RCTRL => {
                             if self.n_particles + PARTICLE_STEP <= MAX_PARTICLES {
                                 let old = self.n_particles;
                                 self.n_particles += PARTICLE_STEP;
@@ -783,7 +801,9 @@ impl GravityStorm {
                         _ => {}
                     },
 
-                    Event::MouseButtonDown { mouse_btn, x, y, .. } => match mouse_btn {
+                    Event::MouseButtonDown {
+                        mouse_btn, x, y, ..
+                    } => match mouse_btn {
                         MouseButton::Left if self.attractors.len() < MAX_ATTRACTORS => {
                             self.attractors.push(Attractor {
                                 x: x as f32,
@@ -809,7 +829,10 @@ impl GravityStorm {
                         ..
                     } => {
                         unsafe { self.device.device_wait_idle().unwrap() };
-                        self.extent = vk::Extent2D { width: w as u32, height: h as u32 };
+                        self.extent = vk::Extent2D {
+                            width: w as u32,
+                            height: h as u32,
+                        };
                         self.rebuild_swapchain()?;
                     }
 
@@ -883,12 +906,18 @@ impl GravityStorm {
         let mut att_padded = self.attractors.clone();
         att_padded.resize(
             MAX_ATTRACTORS,
-            Attractor { x: 0.0, y: 0.0, strength: 0.0, radius: 1.0 },
+            Attractor {
+                x: 0.0,
+                y: 0.0,
+                strength: 0.0,
+                radius: 1.0,
+            },
         );
         // Safety: att_padded lives for the duration of copy_from_host_async;
         //         we synchronize (hipDeviceSynchronize) before this stack frame returns.
         unsafe {
-            self.attractor_buf.copy_from_host_async(&self.hip_stream, &att_padded)?;
+            self.attractor_buf
+                .copy_from_host_async(&self.hip_stream, &att_padded)?;
         }
 
         let particles_dev = self.particle_host.device_ptr()?;
@@ -907,19 +936,19 @@ impl GravityStorm {
         let mut p_maxsp = MAX_EXPECTED_SPEED;
 
         let mut params: [*mut c_void; 10] = [
-            &mut p_part  as *mut _ as *mut c_void,
-            &mut p_attr  as *mut _ as *mut c_void,
-            &mut p_n     as *mut _ as *mut c_void,
-            &mut p_natt  as *mut _ as *mut c_void,
-            &mut p_dt    as *mut _ as *mut c_void,
-            &mut p_damp  as *mut _ as *mut c_void,
-            &mut p_bx    as *mut _ as *mut c_void,
-            &mut p_by    as *mut _ as *mut c_void,
+            &mut p_part as *mut _ as *mut c_void,
+            &mut p_attr as *mut _ as *mut c_void,
+            &mut p_n as *mut _ as *mut c_void,
+            &mut p_natt as *mut _ as *mut c_void,
+            &mut p_dt as *mut _ as *mut c_void,
+            &mut p_damp as *mut _ as *mut c_void,
+            &mut p_bx as *mut _ as *mut c_void,
+            &mut p_by as *mut _ as *mut c_void,
             &mut p_gscale as *mut _ as *mut c_void,
-            &mut p_maxsp  as *mut _ as *mut c_void,
+            &mut p_maxsp as *mut _ as *mut c_void,
         ];
 
-        let grid_x = (self.n_particles as u32 + BLOCK_SIZE - 1) / BLOCK_SIZE;
+        let grid_x = (self.n_particles as u32).div_ceil(BLOCK_SIZE);
         unsafe {
             self.hip_kernel.launch_on_stream(
                 (grid_x, 1, 1),
@@ -961,7 +990,8 @@ impl GravityStorm {
         let sw_view = self.sw_views[img_idx as usize];
 
         unsafe {
-            self.device.reset_command_buffer(cmd, vk::CommandBufferResetFlags::empty())?;
+            self.device
+                .reset_command_buffer(cmd, vk::CommandBufferResetFlags::empty())?;
             self.device.begin_command_buffer(
                 cmd,
                 &vk::CommandBufferBeginInfo::default()
@@ -1011,7 +1041,9 @@ impl GravityStorm {
 
             // ── Dynamic rendering ────────────────────────────────────────
             let clear = vk::ClearValue {
-                color: vk::ClearColorValue { float32: [0.00, 0.00, 0.02, 1.0] },
+                color: vk::ClearColorValue {
+                    float32: [0.00, 0.00, 0.02, 1.0],
+                },
             };
             let color_att = vk::RenderingAttachmentInfo::default()
                 .image_view(sw_view)
@@ -1031,7 +1063,8 @@ impl GravityStorm {
                     .color_attachments(std::slice::from_ref(&color_att)),
             );
 
-            self.device.cmd_bind_pipeline(cmd, vk::PipelineBindPoint::GRAPHICS, self.pipeline);
+            self.device
+                .cmd_bind_pipeline(cmd, vk::PipelineBindPoint::GRAPHICS, self.pipeline);
             self.device.cmd_bind_descriptor_sets(
                 cmd,
                 vk::PipelineBindPoint::GRAPHICS,
@@ -1167,7 +1200,8 @@ impl Drop for GravityStorm {
             self.device.destroy_pipeline(self.pipeline, None);
             self.device.destroy_pipeline_layout(self.pipe_layout, None);
             self.device.destroy_descriptor_pool(self.desc_pool, None);
-            self.device.destroy_descriptor_set_layout(self.desc_layout, None);
+            self.device
+                .destroy_descriptor_set_layout(self.desc_layout, None);
             self.device.destroy_buffer(self.particle_buf, None);
             self.device.free_memory(self.particle_mem, None);
             for v in &self.sw_views {
@@ -1199,11 +1233,14 @@ fn build_swapchain(
     swapchain_ext: &khr::swapchain::Device,
     surface: vk::SurfaceKHR,
     extent: vk::Extent2D,
-) -> AppResult<(vk::SwapchainKHR, Vec<vk::Image>, Vec<vk::ImageView>, vk::Format)> {
-    let caps =
-        unsafe { surface_ext.get_physical_device_surface_capabilities(*phys_dev, surface)? };
-    let formats =
-        unsafe { surface_ext.get_physical_device_surface_formats(*phys_dev, surface)? };
+) -> AppResult<(
+    vk::SwapchainKHR,
+    Vec<vk::Image>,
+    Vec<vk::ImageView>,
+    vk::Format,
+)> {
+    let caps = unsafe { surface_ext.get_physical_device_surface_capabilities(*phys_dev, surface)? };
+    let formats = unsafe { surface_ext.get_physical_device_surface_formats(*phys_dev, surface)? };
 
     let fmt = formats
         .iter()
@@ -1220,7 +1257,11 @@ fn build_swapchain(
 
     let image_count = {
         let n = caps.min_image_count + 1;
-        if caps.max_image_count == 0 { n } else { n.min(caps.max_image_count) }
+        if caps.max_image_count == 0 {
+            n
+        } else {
+            n.min(caps.max_image_count)
+        }
     };
 
     let sw_extent = if caps.current_extent.width != u32::MAX {
@@ -1295,8 +1336,9 @@ fn build_pipeline(
     let vi = vk::PipelineVertexInputStateCreateInfo::default();
     let ia = vk::PipelineInputAssemblyStateCreateInfo::default()
         .topology(vk::PrimitiveTopology::POINT_LIST);
-    let vp_state =
-        vk::PipelineViewportStateCreateInfo::default().viewport_count(1).scissor_count(1);
+    let vp_state = vk::PipelineViewportStateCreateInfo::default()
+        .viewport_count(1)
+        .scissor_count(1);
     let raster = vk::PipelineRasterizationStateCreateInfo::default()
         .polygon_mode(vk::PolygonMode::FILL)
         .cull_mode(vk::CullModeFlags::NONE)
@@ -1320,8 +1362,7 @@ fn build_pipeline(
         .attachments(std::slice::from_ref(&blend_att));
 
     let dyn_states = [vk::DynamicState::VIEWPORT, vk::DynamicState::SCISSOR];
-    let dyn_state =
-        vk::PipelineDynamicStateCreateInfo::default().dynamic_states(&dyn_states);
+    let dyn_state = vk::PipelineDynamicStateCreateInfo::default().dynamic_states(&dyn_states);
 
     // Dynamic rendering — no render pass object required.
     let color_fmts = [color_format];
