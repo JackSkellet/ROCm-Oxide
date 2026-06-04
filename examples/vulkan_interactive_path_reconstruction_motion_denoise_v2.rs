@@ -96,6 +96,7 @@ struct RenderParams {
     unsigned int height;
     unsigned int sample_index;
     unsigned int material_preset;
+    unsigned int moving_preview;
     V3 cam;
     V3 forward;
     V3 right;
@@ -322,8 +323,8 @@ extern "C" __global__ void trace_sample(
     unsigned int y=i/p.width;
     unsigned int rng=wang_hash(i^(p.sample_index*747796405u)^0x9e3779b9u);
 
-    float jx=rand01(&rng)-0.5f;
-    float jy=rand01(&rng)-0.5f;
+    float jx = p.moving_preview != 0u ? 0.0f : rand01(&rng)-0.5f;
+    float jy = p.moving_preview != 0u ? 0.0f : rand01(&rng)-0.5f;
 
     float aspect=(float)p.width/(float)p.height;
     float fov=42.0f*0.017453292519943295f;
@@ -426,9 +427,7 @@ extern "C" __global__ void reconstruct_frame(
 
     color=tonemap(color,exposure);
 
-    unsigned int rng=wang_hash(i^(frame_index*9781u));
-    float grain=((float)(rng&255u)/255.0f-0.5f)*0.012f;
-    color=clamp3(add(color,v3(grain,grain,grain)),0.0f,1.0f);
+    color=clamp3(color,0.0f,1.0f);
 
     float samples=fmaxf(1.0f,accum[i*4u+3u]);
     if(x<8){
@@ -503,6 +502,7 @@ struct RenderParams {
     height: u32,
     sample_index: u32,
     material_preset: u32,
+    moving_preview: u32,
     cam: Vec3,
     forward: Vec3,
     right: Vec3,
@@ -567,7 +567,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             scale: Scale::X1,
         },
     )?;
-    window.set_target_fps(60);
+    window.set_target_fps(144);
 
     let max_frames = requested_frames("ROCM_OXIDE_INTERACTIVE_PATH_RECON_FRAMES");
     let mut last_tick = Instant::now();
@@ -732,7 +732,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         // Exposure controls. Focus/aperture stay stable so the numbered keys
         // can be used for object manipulation with the current shared presenter key set.
         if window.is_key_down(Key::Key9) {
-            exposure = (exposure - exposure_rate).max(0.25);
+            exposure = (exposure - exposure_rate).max(0.1);
         }
         if window.is_key_down(Key::Key0) {
             exposure = (exposure + exposure_rate).min(3.0);
@@ -771,6 +771,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
         let (forward, right, up) = camera_basis(yaw, pitch);
         let effective_reconstruction = reconstruction || view_changed || still_frames < 32;
+        let moving_preview = view_changed || still_frames < 8;
+        let effective_aperture = if moving_preview { 0.0 } else { aperture };
 
         unsafe {
             for _ in 0..samples_this_frame {
@@ -779,11 +781,12 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     height: HEIGHT as u32,
                     sample_index,
                     material_preset,
+                    moving_preview: moving_preview as u32,
                     cam,
                     forward,
                     right,
                     up,
-                    aperture,
+                    aperture: effective_aperture,
                     focus_dist,
                     s0,
                     s1,
