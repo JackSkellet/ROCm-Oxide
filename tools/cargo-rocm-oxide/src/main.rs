@@ -56,6 +56,7 @@ fn print_help() {
     cargo rocm-oxide new <path>
     cargo rocm-oxide new <path> --local ROCM_OXIDE_WORKSPACE
     cargo rocm-oxide new <path> --path ROCM_OXIDE_WORKSPACE
+    cargo rocm-oxide new <path> --git REPOSITORY [--branch NAME|--tag NAME|--rev SHA]
     cargo rocm-oxide new <path> --standalone
     cargo rocm-oxide check-consumer
 
@@ -63,7 +64,10 @@ Notes:
     new              Creates a LOCAL SCAFFOLD tied to a ROCm-Oxide source workspace
                      via relative paths. By default, run it from within the workspace.
                      Use --local ROCM_OXIDE_WORKSPACE, or alias --path, when
-                     generating from another directory. --standalone is reserved
+                     generating from another directory. Use --git for a scaffold
+                     whose Rust dependencies come from a git repository; it still
+                     requires rocm-oxide-build through ROCM_OXIDE_BUILD or PATH.
+                     --standalone is reserved
                      until crates.io/release artifacts exist.
     check-consumer   Validates a generated scaffold project. Run from inside the
                      consumer project directory. Checks path dependencies, build.rs,
@@ -230,7 +234,9 @@ fn inspect(args: &[OsString]) -> Result<(), String> {
             Path::new("device-spike"),
             std::ffi::OsStr::new("rocm_oxide_device_spike"),
         )
-            .ok_or_else(|| "no generated metadata found; run `cargo rocm-oxide build` first".to_string())?
+        .ok_or_else(|| {
+            "no generated metadata found; run `cargo rocm-oxide build` first".to_string()
+        })?
     };
     run_build_tool_in(&root, ["--inspect-metadata"], &[metadata.into_os_string()])
 }
@@ -414,8 +420,8 @@ impl ProfileArgs {
                     index += 1;
                     name = args
                         .get(index)
-                            .cloned()
-                            .ok_or_else(|| "--name requires a profile name".to_string())?;
+                        .cloned()
+                        .ok_or_else(|| "--name requires a profile name".to_string())?;
                 }
                 Some("--pmc") => {
                     index += 1;
@@ -423,10 +429,12 @@ impl ProfileArgs {
                         pmc_counters.clear();
                         has_explicit_pmc = true;
                     }
-                    let counters = args
-                        .get(index)
-                        .and_then(|arg| arg.to_str())
-                        .ok_or_else(|| "--pmc requires a comma-separated counter list".to_string())?;
+                    let counters =
+                        args.get(index)
+                            .and_then(|arg| arg.to_str())
+                            .ok_or_else(|| {
+                                "--pmc requires a comma-separated counter list".to_string()
+                            })?;
                     let mut parsed = counters
                         .split(',')
                         .map(str::trim)
@@ -604,7 +612,11 @@ fn display_command(args: &[OsString]) -> String {
         .join(" ")
 }
 
-fn find_latest_metadata(root: &Path, device_crate: &Path, output_stem: &std::ffi::OsStr) -> Option<PathBuf> {
+fn find_latest_metadata(
+    root: &Path,
+    device_crate: &Path,
+    output_stem: &std::ffi::OsStr,
+) -> Option<PathBuf> {
     let mut file_name = output_stem.to_os_string();
     file_name.push(".metadata.json");
     let path = root
@@ -624,14 +636,30 @@ fn check_consumer() -> Result<(), String> {
     let mut all_pass = true;
 
     // Check root Cargo.toml path dependencies resolve
-    let manifest_content = fs::read_to_string(&manifest)
-        .map_err(|err| format!("failed to read Cargo.toml: {err}"))?;
-    for (dep, resolved) in extract_path_deps(&manifest_content, &root) {
+    let manifest_content =
+        fs::read_to_string(&manifest).map_err(|err| format!("failed to read Cargo.toml: {err}"))?;
+    let root_path_deps = extract_path_deps(&manifest_content, &root);
+    if root_path_deps.is_empty() && contains_git_dependency(&manifest_content, "rocm-oxide") {
+        println!("[pass] rocm-oxide git dependency configured");
+        if env::var_os("ROCM_OXIDE_BUILD").is_some()
+            || find_program_on_path("rocm-oxide-build").is_some()
+        {
+            println!("[pass] rocm-oxide-build available through ROCM_OXIDE_BUILD or PATH");
+        } else {
+            println!(
+                "[warn] git scaffold needs rocm-oxide-build through ROCM_OXIDE_BUILD or PATH before cargo build"
+            );
+        }
+    }
+    for (dep, resolved) in root_path_deps {
         let dep_manifest = resolved.join("Cargo.toml");
         if dep_manifest.is_file() {
             println!("[pass] {dep} path dependency resolves");
         } else {
-            println!("[fail] {dep} path dependency does not resolve — {}", dep_manifest.display());
+            println!(
+                "[fail] {dep} path dependency does not resolve — {}",
+                dep_manifest.display()
+            );
             all_pass = false;
         }
     }
@@ -640,17 +668,29 @@ fn check_consumer() -> Result<(), String> {
     if device_manifest.is_file() {
         let device_content = fs::read_to_string(&device_manifest)
             .map_err(|err| format!("failed to read device-spike/Cargo.toml: {err}"))?;
-        for (dep, resolved) in extract_path_deps(&device_content, &root.join("device-spike")) {
+        let device_path_deps = extract_path_deps(&device_content, &root.join("device-spike"));
+        if device_path_deps.is_empty()
+            && contains_git_dependency(&device_content, "rocm-oxide-device")
+            && contains_git_dependency(&device_content, "rocm-oxide-kernel")
+        {
+            println!("[pass] device-spike git dependencies configured");
+        }
+        for (dep, resolved) in device_path_deps {
             let dep_manifest = resolved.join("Cargo.toml");
             if dep_manifest.is_file() {
                 println!("[pass] device-spike: {dep} path dependency resolves");
             } else {
-                println!("[fail] device-spike: {dep} path dependency does not resolve — {}", dep_manifest.display());
+                println!(
+                    "[fail] device-spike: {dep} path dependency does not resolve — {}",
+                    dep_manifest.display()
+                );
                 all_pass = false;
             }
         }
     } else {
-        println!("[warn] device-spike/Cargo.toml not found — skipping device crate dependency checks");
+        println!(
+            "[warn] device-spike/Cargo.toml not found — skipping device crate dependency checks"
+        );
     }
 
     // Check build.rs exists and emits ROCM_OXIDE_DEVICE_BINDINGS
@@ -660,7 +700,9 @@ fn check_consumer() -> Result<(), String> {
         if build_content.contains("ROCM_OXIDE_DEVICE_BINDINGS") {
             println!("[pass] build.rs present and sets ROCM_OXIDE_DEVICE_BINDINGS");
         } else {
-            println!("[warn] build.rs present but does not appear to set ROCM_OXIDE_DEVICE_BINDINGS");
+            println!(
+                "[warn] build.rs present but does not appear to set ROCM_OXIDE_DEVICE_BINDINGS"
+            );
         }
     } else {
         println!("[fail] build.rs not found — run `cargo rocm-oxide new` to regenerate scaffold");
@@ -677,7 +719,9 @@ fn check_consumer() -> Result<(), String> {
             println!("[warn] rust-toolchain.toml present but does not list rust-src component");
         }
     } else {
-        println!("[fail] rust-toolchain.toml not found — without it cargo may use stable Rust and fail -Z build-std=core");
+        println!(
+            "[fail] rust-toolchain.toml not found — without it cargo may use stable Rust and fail -Z build-std=core"
+        );
         all_pass = false;
     }
 
@@ -686,9 +730,36 @@ fn check_consumer() -> Result<(), String> {
         println!("all checks passed");
     } else {
         println!();
-        println!("one or more checks failed — re-run `cargo rocm-oxide new <path>` to regenerate the scaffold");
+        println!(
+            "one or more checks failed — re-run `cargo rocm-oxide new <path>` to regenerate the scaffold"
+        );
     }
     Ok(())
+}
+
+fn contains_git_dependency(toml: &str, dep_name: &str) -> bool {
+    let inline = format!("{dep_name} = {{");
+    let section = format!("[dependencies.{dep_name}]");
+    let mut in_section = false;
+
+    for line in toml.lines() {
+        let trimmed = line.trim();
+        if trimmed == section {
+            in_section = true;
+            continue;
+        }
+        if trimmed.starts_with('[') {
+            in_section = false;
+        }
+        if trimmed.starts_with(&inline) && trimmed.contains("git =") {
+            return true;
+        }
+        if in_section && trimmed.starts_with("git =") {
+            return true;
+        }
+    }
+
+    false
 }
 
 /// Extract `path = "..."` values from a Cargo.toml string and resolve them
@@ -730,7 +801,11 @@ fn extract_path_deps(toml: &str, base: &Path) -> Vec<(String, PathBuf)> {
 
 fn extract_path_value(s: &str) -> Option<&str> {
     // Match: "some/path" or { path = "some/path", ... }
-    let search = if s.contains("path") { s } else { return None; };
+    let search = if s.contains("path") {
+        s
+    } else {
+        return None;
+    };
     // Find path = "..." anywhere in the value
     let after_path = search.split("path").nth(1)?;
     let after_eq = after_path.split('=').nth(1)?.trim();
@@ -743,13 +818,66 @@ fn extract_path_value(s: &str) -> Option<&str> {
 struct NewProjectArgs {
     path: PathBuf,
     source_workspace: Option<PathBuf>,
+    git: Option<GitDependency>,
     standalone: bool,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct GitDependency {
+    url: String,
+    reference: Option<GitReference>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+enum GitReference {
+    Branch(String),
+    Tag(String),
+    Rev(String),
+}
+
+impl GitDependency {
+    fn dependency_value(&self) -> String {
+        let mut value = format!("{{ git = {:?}", self.url);
+        match &self.reference {
+            Some(GitReference::Branch(branch)) => {
+                value.push_str(&format!(", branch = {branch:?}"));
+            }
+            Some(GitReference::Tag(tag)) => {
+                value.push_str(&format!(", tag = {tag:?}"));
+            }
+            Some(GitReference::Rev(rev)) => {
+                value.push_str(&format!(", rev = {rev:?}"));
+            }
+            None => {}
+        }
+        value.push_str(" }");
+        value
+    }
+
+    fn install_hint(&self) -> String {
+        let mut command = format!("cargo install --git {:?} rocm-oxide-build", self.url);
+        match &self.reference {
+            Some(GitReference::Branch(branch)) => {
+                command.push_str(&format!(" --branch {branch:?}"));
+            }
+            Some(GitReference::Tag(tag)) => {
+                command.push_str(&format!(" --tag {tag:?}"));
+            }
+            Some(GitReference::Rev(rev)) => {
+                command.push_str(&format!(" --rev {rev:?}"));
+            }
+            None => {}
+        }
+        command
+    }
 }
 
 impl NewProjectArgs {
     fn parse(args: &[OsString]) -> Result<Self, String> {
         let mut path = None;
         let mut source_workspace = None;
+        let mut git = None;
+        let mut git_reference = None;
         let mut standalone = false;
         let mut index = 0;
         while index < args.len() {
@@ -761,7 +889,14 @@ impl NewProjectArgs {
                 }
                 Some("--local") | Some("--path") => {
                     if standalone {
-                        return Err("`--local`/`--path` cannot be combined with `--standalone`".to_string());
+                        return Err(
+                            "`--local`/`--path` cannot be combined with `--standalone`".to_string()
+                        );
+                    }
+                    if git.is_some() {
+                        return Err(
+                            "`--local`/`--path` cannot be combined with `--git`".to_string()
+                        );
                     }
                     if source_workspace.is_some() {
                         return Err("only one --local/--path workspace may be provided".to_string());
@@ -774,7 +909,14 @@ impl NewProjectArgs {
                 }
                 Some(value) if value.starts_with("--local=") || value.starts_with("--path=") => {
                     if standalone {
-                        return Err("`--local`/`--path` cannot be combined with `--standalone`".to_string());
+                        return Err(
+                            "`--local`/`--path` cannot be combined with `--standalone`".to_string()
+                        );
+                    }
+                    if git.is_some() {
+                        return Err(
+                            "`--local`/`--path` cannot be combined with `--git`".to_string()
+                        );
                     }
                     if source_workspace.is_some() {
                         return Err("only one --local/--path workspace may be provided".to_string());
@@ -787,9 +929,69 @@ impl NewProjectArgs {
                     }
                     source_workspace = Some(PathBuf::from(value));
                 }
+                Some("--git") => {
+                    if standalone {
+                        return Err("`--git` cannot be combined with `--standalone`".to_string());
+                    }
+                    if source_workspace.is_some() {
+                        return Err(
+                            "`--git` cannot be combined with `--local`/`--path`".to_string()
+                        );
+                    }
+                    if git.is_some() {
+                        return Err("only one --git repository may be provided".to_string());
+                    }
+                    index += 1;
+                    let Some(value) = args.get(index).and_then(|value| value.to_str()) else {
+                        return Err("--git requires a repository URL".to_string());
+                    };
+                    if value.is_empty() {
+                        return Err("--git requires a repository URL".to_string());
+                    }
+                    git = Some(value.to_string());
+                }
+                Some(value) if value.starts_with("--git=") => {
+                    if standalone {
+                        return Err("`--git` cannot be combined with `--standalone`".to_string());
+                    }
+                    if source_workspace.is_some() {
+                        return Err(
+                            "`--git` cannot be combined with `--local`/`--path`".to_string()
+                        );
+                    }
+                    if git.is_some() {
+                        return Err("only one --git repository may be provided".to_string());
+                    }
+                    let value = value.trim_start_matches("--git=");
+                    if value.is_empty() {
+                        return Err("--git requires a repository URL".to_string());
+                    }
+                    git = Some(value.to_string());
+                }
+                Some("--branch") | Some("--tag") | Some("--rev") => {
+                    let kind = arg.to_str().unwrap_or_default();
+                    index += 1;
+                    let Some(value) = args.get(index).and_then(|value| value.to_str()) else {
+                        return Err(format!("{kind} requires a value"));
+                    };
+                    set_git_reference(&mut git_reference, kind, value)?;
+                }
+                Some(value)
+                    if value.starts_with("--branch=")
+                        || value.starts_with("--tag=")
+                        || value.starts_with("--rev=") =>
+                {
+                    let (kind, value) = value
+                        .split_once('=')
+                        .expect("pattern above ensures an equals sign");
+                    set_git_reference(&mut git_reference, kind, value)?;
+                }
                 Some("--standalone") => {
                     if source_workspace.is_some() {
                         return Err("`--standalone` cannot be combined with `--local`/`--path`; standalone mode will use published packages once supported".to_string());
+                    }
+                    if git.is_some() {
+                        return Err("`--standalone` cannot be combined with `--git`".to_string());
                     }
                     standalone = true;
                 }
@@ -798,7 +1000,9 @@ impl NewProjectArgs {
                 }
                 Some(_) => {
                     if path.is_some() {
-                        return Err("cargo rocm-oxide new accepts exactly one project path".to_string());
+                        return Err(
+                            "cargo rocm-oxide new accepts exactly one project path".to_string()
+                        );
                     }
                     path = Some(PathBuf::from(arg));
                 }
@@ -809,12 +1013,39 @@ impl NewProjectArgs {
         let Some(path) = path else {
             return Err("cargo rocm-oxide new requires a path".to_string());
         };
+        if git_reference.is_some() && git.is_none() {
+            return Err("`--branch`, `--tag`, and `--rev` require `--git`".to_string());
+        }
         Ok(Self {
             path,
             source_workspace,
+            git: git.map(|url| GitDependency {
+                url,
+                reference: git_reference,
+            }),
             standalone,
         })
     }
+}
+
+fn set_git_reference(
+    git_reference: &mut Option<GitReference>,
+    kind: &str,
+    value: &str,
+) -> Result<(), String> {
+    if value.is_empty() {
+        return Err(format!("{kind} requires a non-empty value"));
+    }
+    if git_reference.is_some() {
+        return Err("only one of --branch, --tag, or --rev may be provided".to_string());
+    }
+    *git_reference = Some(match kind {
+        "--branch" => GitReference::Branch(value.to_string()),
+        "--tag" => GitReference::Tag(value.to_string()),
+        "--rev" => GitReference::Rev(value.to_string()),
+        _ => return Err(format!("unknown git reference option `{kind}`")),
+    });
+    Ok(())
 }
 
 fn print_new_project_help() {
@@ -823,21 +1054,30 @@ fn print_new_project_help() {
     cargo rocm-oxide new <path>
     cargo rocm-oxide new <path> --local ROCM_OXIDE_WORKSPACE
     cargo rocm-oxide new <path> --path ROCM_OXIDE_WORKSPACE
+    cargo rocm-oxide new <path> --git REPOSITORY [--branch NAME|--tag NAME|--rev SHA]
     cargo rocm-oxide new <path> --standalone
 
 Options:
     --local PATH      Use PATH as the ROCm-Oxide source workspace when generating
                       from outside the workspace.
     --path PATH       Alias for --local.
+    --git URL         Use git dependencies for rocm-oxide, rocm-oxide-device,
+                      and rocm-oxide-kernel. The build tool must be installed
+                      through ROCM_OXIDE_BUILD or PATH.
+    --branch NAME     Git branch to use with --git.
+    --tag NAME        Git tag to use with --git.
+    --rev SHA         Git revision to use with --git.
     --standalone      Reserved for future crates.io/release-artifact scaffolds.
 
-The generated project uses relative path dependencies. It is not publishable to crates.io yet."
+Default mode uses relative path dependencies. --git removes the local dependency
+paths, but is not fully standalone until rocm-oxide-build is distributed as a
+crates.io package or release artifact."
     );
 }
 
 fn explicit_source_workspace_root(path: &Path) -> Result<PathBuf, String> {
-    let cwd = env::current_dir()
-        .map_err(|err| format!("failed to read current directory: {err}"))?;
+    let cwd =
+        env::current_dir().map_err(|err| format!("failed to read current directory: {err}"))?;
     let absolute = if path.is_absolute() {
         path.to_path_buf()
     } else {
@@ -862,6 +1102,97 @@ fn explicit_source_workspace_root(path: &Path) -> Result<PathBuf, String> {
     Ok(root)
 }
 
+struct ScaffoldConfig {
+    mode_label: String,
+    runtime_dependency: String,
+    device_api_dependency: String,
+    kernel_macro_dependency: String,
+    build_tool: BuildToolSource,
+    summary_lines: Vec<String>,
+    readme: String,
+    note: String,
+}
+
+enum BuildToolSource {
+    SourceWorkspace { runtime_path: String },
+    Installed { install_hint: String },
+}
+
+impl ScaffoldConfig {
+    fn local(project_abs: &Path, device_spike_abs: &Path, source_root: &Path) -> Self {
+        // All dependency paths in generated files are relative so that the
+        // project + workspace can be moved together without breaking.
+        let runtime_path = relative_path_from_to(project_abs, source_root);
+        let runtime_path_from_device_spike = relative_path_from_to(device_spike_abs, source_root);
+
+        let device_api_path = runtime_path_from_device_spike.join("crates/rocm-oxide-device");
+        let kernel_macro_path = runtime_path_from_device_spike.join("crates/rocm-oxide-kernel");
+
+        let runtime_path = runtime_path.display().to_string();
+        let device_api_path = device_api_path.display().to_string();
+        let kernel_macro_path = kernel_macro_path.display().to_string();
+
+        let note = format!(
+            "note: this project is a local scaffold tied to the ROCm-Oxide workspace at\n      \
+             {} via relative path dependencies.\n      \
+             Moving only the generated project will break the build.\n      \
+             See docs/project-generation.md for options.",
+            source_root.display()
+        );
+
+        Self {
+            mode_label: "local (relative paths to ROCm-Oxide workspace)".to_string(),
+            runtime_dependency: format!(r#"{{ path = {runtime_path:?} }}"#),
+            device_api_dependency: format!(r#"{{ path = {device_api_path:?} }}"#),
+            kernel_macro_dependency: format!(r#"{{ path = {kernel_macro_path:?} }}"#),
+            build_tool: BuildToolSource::SourceWorkspace {
+                runtime_path: runtime_path.clone(),
+            },
+            summary_lines: vec![format!(
+                "ROCm-Oxide workspace: {runtime_path}  (relative from project root)"
+            )],
+            readme: local_scaffold_readme(&runtime_path),
+            note,
+        }
+    }
+
+    fn git(git: GitDependency) -> Self {
+        let dependency = git.dependency_value();
+        let install_hint = git.install_hint();
+        let note = format!(
+            "note: this project uses ROCm-Oxide git dependencies from {}.\n      \
+             It is not fully standalone: install rocm-oxide-build and keep it on PATH,\n      \
+             or set ROCM_OXIDE_BUILD=/path/to/rocm-oxide-build before building.",
+            git.url
+        );
+
+        Self {
+            mode_label: "git dependencies (installed build tool required)".to_string(),
+            runtime_dependency: dependency.clone(),
+            device_api_dependency: dependency.clone(),
+            kernel_macro_dependency: dependency,
+            build_tool: BuildToolSource::Installed {
+                install_hint: install_hint.clone(),
+            },
+            summary_lines: vec![
+                format!("Git repository: {}", git.url),
+                format!("Build tool install: {install_hint}"),
+            ],
+            readme: git_scaffold_readme(&git, &install_hint),
+            note,
+        }
+    }
+
+    fn print_note(&self) {
+        println!("{}", self.note);
+        println!();
+    }
+
+    fn readme(&self) -> String {
+        self.readme.clone()
+    }
+}
+
 fn new_project(args: &[OsString]) -> Result<(), String> {
     let args = NewProjectArgs::parse(args)?;
     if args.standalone {
@@ -879,63 +1210,46 @@ fn new_project(args: &[OsString]) -> Result<(), String> {
         return Err(format!("target already exists: {}", path.display()));
     }
 
-    let source_root = if let Some(source_workspace) = args.source_workspace {
-        explicit_source_workspace_root(&source_workspace)?
-    } else {
-        // Require the source workspace to be reachable so we can compute correct
-        // relative paths.
-        let root = source_workspace_root().map_err(|_| {
-            "cargo rocm-oxide new could not find a ROCm-Oxide source workspace.\n\
-             hint: run from inside the workspace, or pass it explicitly:\n\
-               cargo rocm-oxide new <path> --local /path/to/ROCm-Oxide\n\
-             hint: clone the workspace first if needed:\n\
-               git clone https://github.com/JackSkellet/ROCm-Oxide.git"
-                .to_string()
-        })?;
-        root.canonicalize().unwrap_or(root)
-    };
-
     // Absolute path of the project that is about to be created. We cannot
     // canonicalize it yet (the directory does not exist), so we normalize
     // lexically instead.
-    let cwd = env::current_dir()
-        .map_err(|err| format!("failed to read current directory: {err}"))?;
+    let cwd =
+        env::current_dir().map_err(|err| format!("failed to read current directory: {err}"))?;
     let project_abs = normalize_path(&cwd.join(&path));
     let device_spike_abs = project_abs.join("device-spike");
 
-    // All dependency paths in generated files are relative so that the
-    // project + workspace can be moved together without breaking.
-    let runtime_path = relative_path_from_to(&project_abs, &source_root);
-    let runtime_path_from_device_spike =
-        relative_path_from_to(&device_spike_abs, &source_root);
+    let scaffold = if let Some(git) = args.git {
+        ScaffoldConfig::git(git)
+    } else {
+        let source_root = if let Some(source_workspace) = args.source_workspace {
+            explicit_source_workspace_root(&source_workspace)?
+        } else {
+            // Require the source workspace to be reachable so we can compute correct
+            // relative paths.
+            let root = source_workspace_root().map_err(|_| {
+                "cargo rocm-oxide new could not find a ROCm-Oxide source workspace.\n\
+                 hint: run from inside the workspace, or pass it explicitly:\n\
+                   cargo rocm-oxide new <path> --local /path/to/ROCm-Oxide\n\
+                 hint: clone the workspace first if needed:\n\
+                   git clone https://github.com/JackSkellet/ROCm-Oxide.git"
+                    .to_string()
+            })?;
+            root.canonicalize().unwrap_or(root)
+        };
 
-    let device_api_path = runtime_path_from_device_spike.join("crates/rocm-oxide-device");
-    let kernel_macro_path = runtime_path_from_device_spike.join("crates/rocm-oxide-kernel");
+        ScaffoldConfig::local(&project_abs, &device_spike_abs, &source_root)
+    };
 
-    let runtime_path_str = runtime_path.display().to_string();
-    let device_api_path_str = device_api_path.display().to_string();
-    let kernel_macro_path_str = kernel_macro_path.display().to_string();
-
-    // Surface portability constraint before writing any files so every user
-    // who runs `new` sees it at least once.
-    println!(
-        "note: this project is a local scaffold tied to the ROCm-Oxide workspace at\n      \
-         {} via relative path dependencies.\n      \
-         Moving only the generated project will break the build.\n      \
-         See docs/project-generation.md for options.",
-        source_root.display()
-    );
-    println!();
+    scaffold.print_note();
 
     fs::create_dir_all(path.join("src"))
         .map_err(|err| format!("failed to create {}: {err}", path.display()))?;
-    fs::create_dir_all(path.join("device-spike/src"))
-        .map_err(|err| {
-            format!(
-                "failed to create {}: {err}",
-                path.join("device-spike").display()
-            )
-        })?;
+    fs::create_dir_all(path.join("device-spike/src")).map_err(|err| {
+        format!(
+            "failed to create {}: {err}",
+            path.join("device-spike").display()
+        )
+    })?;
 
     fs::write(
         path.join("Cargo.toml"),
@@ -946,14 +1260,18 @@ version = "0.1.0"
 edition = "2024"
 
 [dependencies]
-rocm-oxide = {{ path = "{runtime_path_str}" }}
-"#
+rocm-oxide = {runtime_dependency}
+"#,
+            runtime_dependency = scaffold.runtime_dependency,
         ),
     )
     .map_err(|err| format!("failed to write Cargo.toml: {err}"))?;
 
-    fs::write(path.join("build.rs"), consumer_build_script(&runtime_path_str))
-        .map_err(|err| format!("failed to write build.rs: {err}"))?;
+    fs::write(
+        path.join("build.rs"),
+        consumer_build_script(&scaffold.build_tool),
+    )
+    .map_err(|err| format!("failed to write build.rs: {err}"))?;
 
     fs::write(
         path.join("device-spike/Cargo.toml"),
@@ -968,14 +1286,16 @@ publish = false
 crate-type = ["rlib"]
 
 [dependencies]
-rocm-oxide-device = {{ path = "{device_api_path_str}" }}
-rocm-oxide-kernel = {{ path = "{kernel_macro_path_str}" }}
+rocm-oxide-device = {device_api_dependency}
+rocm-oxide-kernel = {kernel_macro_dependency}
 
 [profile.release]
 panic = "abort"
 codegen-units = 1
 lto = false
-"#
+"#,
+            device_api_dependency = scaffold.device_api_dependency,
+            kernel_macro_dependency = scaffold.kernel_macro_dependency,
         ),
     )
     .map_err(|err| format!("failed to write device-spike/Cargo.toml: {err}"))?;
@@ -1043,10 +1363,29 @@ components = ["rust-src", "clippy", "rustfmt"]
     )
     .map_err(|err| format!("failed to write rust-toolchain.toml: {err}"))?;
 
-    fs::write(
-        path.join("README.md"),
-        format!(
-            r#"# rocm-oxide-app — ROCm-Oxide local scaffold
+    fs::write(path.join("README.md"), scaffold.readme())
+        .map_err(|err| format!("failed to write README.md: {err}"))?;
+
+    println!("created {}", path.display());
+    println!();
+    println!("  Scaffold mode: {}", scaffold.mode_label);
+    for line in &scaffold.summary_lines {
+        println!("  {line}");
+    }
+    println!();
+    println!("  Build and run:");
+    println!("    cd {}", path.display());
+    println!("    cargo rocm-oxide check-consumer");
+    println!("    cargo run");
+    println!();
+    println!("  Note: `cargo rocm-oxide verify` must be run from the ROCm-Oxide");
+    println!("  source workspace, not from this project.");
+    Ok(())
+}
+
+fn local_scaffold_readme(runtime_path: &str) -> String {
+    format!(
+        r#"# rocm-oxide-app - ROCm-Oxide local scaffold
 
 > **Local scaffold only.** This project was generated by `cargo rocm-oxide new`
 > and depends on the ROCm-Oxide source workspace via a relative `path` dependency.
@@ -1061,18 +1400,17 @@ cargo run
 
 This will:
 1. Validate the scaffold's relative paths and required build files.
-2. Run `rocm-oxide-build` (from the ROCm-Oxide workspace) to compile the Rust
-   GPU kernel in `device-spike/` for `amdgcn-amd-amdhsa`.
+2. Run `rocm-oxide-build` from the ROCm-Oxide workspace to compile the Rust GPU
+   kernel in `device-spike/` for `amdgcn-amd-amdhsa`.
 3. Produce a `.hsaco` code object and a typed `DeviceKernels` binding.
 4. Compile and run `src/main.rs`, which loads the kernel and verifies it on the GPU.
 
 ## Write your own kernel
 
 1. Open `device-spike/src/lib.rs`.
-2. Add a `#[kernel]` function. Length contracts (for the generated binding's
-   runtime validation) are expressed with `#[kernel_contract(...)]` immediately
-   before the function — see `docs/wiki/kernel-contracts.md` in the ROCm-Oxide
-   workspace.
+2. Add a `#[kernel]` function. Length contracts for generated binding runtime
+   validation are expressed with `#[kernel_contract(...)]` immediately before
+   the function. See `docs/wiki/kernel-contracts.md` in the ROCm-Oxide workspace.
 3. `cargo run` picks up the change automatically.
 
 ## Portability
@@ -1080,19 +1418,19 @@ This will:
 This project was scaffolded with the following relative path to the ROCm-Oxide
 workspace:
 
-    {runtime_path_str}   (relative to this project's root)
+    {runtime_path}   (relative to this project's root)
 
 **What works:**
-- Moving this project and the ROCm-Oxide workspace together (preserving the
-  relative path between them).
+- Moving this project and the ROCm-Oxide workspace together, preserving the
+  relative path between them.
 
 **What breaks:**
 - Moving only the ROCm-Oxide workspace without moving this project.
 - Cloning this project on a machine where ROCm-Oxide is not at the same
   relative path.
-- `cargo publish` — `path` dependencies are rejected by crates.io.
+- `cargo publish` because `path` dependencies are rejected by crates.io.
 
-**Escape hatch — pre-built `rocm-oxide-build`:**
+**Escape hatch - pre-built `rocm-oxide-build`:**
 Set `ROCM_OXIDE_BUILD=/path/to/rocm-oxide-build` to point `build.rs` to a
 pre-compiled build tool binary instead of using the source workspace. The
 `rocm-oxide` runtime dependency in `Cargo.toml` would still need to be updated
@@ -1107,41 +1445,115 @@ portability roadmap.
 - ROCm 7.2 validated at `/opt/rocm` (or set `ROCM_PATH`)
 - `/opt/rocm/bin` on `PATH` for ROCm executables such as `clang`
 - `/opt/rocm/lib/llvm/bin` on `PATH` for LLVM tools such as `llc` and `llvm-readelf`
-- Rust nightly with `rust-src` (selected by `rust-toolchain.toml` in this project)
+- Rust nightly with `rust-src` selected by `rust-toolchain.toml`
 
 Before building, verify all tools are present by running doctor from the
 ROCm-Oxide source workspace:
 
 ```sh
-cd {runtime_path_str}
+cd {runtime_path}
 cargo rocm-oxide doctor
 ```
 
 Fix any FAIL items before running `cargo run` in this project. Copy the doctor
 output between the dashed markers when filing a bug report.
-"#,
-            runtime_path_str = runtime_path_str
-        ),
+"#
     )
-    .map_err(|err| format!("failed to write README.md: {err}"))?;
-
-    println!("created {}", path.display());
-    println!();
-    println!("  Scaffold mode: local (relative paths to ROCm-Oxide workspace)");
-    println!("  ROCm-Oxide workspace: {runtime_path_str}  (relative from project root)");
-    println!();
-    println!("  Build and run:");
-    println!("    cd {}", path.display());
-    println!("    cargo rocm-oxide check-consumer");
-    println!("    cargo run");
-    println!();
-    println!("  Note: `cargo rocm-oxide verify` must be run from the ROCm-Oxide");
-    println!("  source workspace, not from this project.");
-    Ok(())
 }
 
-fn consumer_build_script(runtime_path: &str) -> String {
-    let runtime_path = format!("{runtime_path:?}");
+fn git_scaffold_readme(git: &GitDependency, install_hint: &str) -> String {
+    let dependency = git.dependency_value();
+    format!(
+        r#"# rocm-oxide-app - ROCm-Oxide git scaffold
+
+> **Git scaffold.** This project depends on ROCm-Oxide crates from a git
+> repository. It no longer needs the ROCm-Oxide source workspace at a fixed
+> relative path, but it still needs the `rocm-oxide-build` binary available
+> through `ROCM_OXIDE_BUILD` or `PATH`.
+
+## One-time build tool install
+
+Install the matching build tool from the same git source:
+
+```sh
+{install_hint}
+```
+
+You can also set an explicit binary path:
+
+```sh
+export ROCM_OXIDE_BUILD=/path/to/rocm-oxide-build
+```
+
+## Build and run
+
+```sh
+cargo rocm-oxide check-consumer
+cargo run
+```
+
+This will:
+1. Validate the scaffold files.
+2. Run `rocm-oxide-build` from `ROCM_OXIDE_BUILD` or `PATH`.
+3. Compile the Rust GPU kernel in `device-spike/` for `amdgcn-amd-amdhsa`.
+4. Produce a `.hsaco` code object and a typed `DeviceKernels` binding.
+5. Compile and run `src/main.rs`, which loads the kernel and verifies it on the GPU.
+
+## Dependency source
+
+Generated dependency value:
+
+```toml
+{dependency}
+```
+
+Repository:
+
+```text
+{git_url}
+```
+
+## Portability
+
+**What works:**
+- Cloning this project on another machine without preserving a local
+  ROCm-Oxide checkout path.
+- Pinning with `--rev` or `--tag` so the runtime, device API, and proc macro
+  crates come from the same source revision.
+
+**What still is not standalone:**
+- `rocm-oxide-build` is not consumed as a build-dependency yet.
+- `cargo publish` is still blocked until ROCm-Oxide crates are published to
+  crates.io.
+
+## Write your own kernel
+
+1. Open `device-spike/src/lib.rs`.
+2. Add a `#[kernel]` function.
+3. Use `#[kernel_contract(...)]` for generated binding runtime validation.
+4. `cargo run` picks up the change automatically.
+
+## Prerequisites
+
+- AMD GPU (RDNA 2+, RDNA 3+, RDNA 4+, or CDNA 2/3)
+- ROCm 7.2 validated at `/opt/rocm` (or set `ROCM_PATH`)
+- `/opt/rocm/bin` on `PATH` for ROCm executables such as `clang`
+- `/opt/rocm/lib/llvm/bin` on `PATH` for LLVM tools such as `llc` and `llvm-readelf`
+- Rust nightly with `rust-src` selected by `rust-toolchain.toml`
+"#,
+        git_url = git.url,
+    )
+}
+
+fn consumer_build_script(build_tool: &BuildToolSource) -> String {
+    let (runtime_path, install_hint) = match build_tool {
+        BuildToolSource::SourceWorkspace { runtime_path } => (
+            format!("Some({runtime_path:?})"),
+            "cargo install --path <rocm-oxide-workspace>/tools/rocm-oxide-build".to_string(),
+        ),
+        BuildToolSource::Installed { install_hint } => ("None".to_string(), install_hint.clone()),
+    };
+    let install_hint = format!("{install_hint:?}");
     r#"use std::env;
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -1149,7 +1561,8 @@ use std::process::Command;
 
 const DEVICE_CRATE: &str = "device-spike";
 const OUTPUT_STEM: &str = "rocm_oxide_device_spike";
-const RUNTIME_PATH: &str = __ROCM_OXIDE_RUNTIME_PATH__;
+const RUNTIME_PATH: Option<&str> = __ROCM_OXIDE_RUNTIME_PATH__;
+const BUILD_TOOL_INSTALL_HINT: &str = __ROCM_OXIDE_BUILD_TOOL_INSTALL_HINT__;
 
 fn main() {
     println!("cargo:rerun-if-changed=device-spike/Cargo.toml");
@@ -1205,21 +1618,22 @@ fn build_tool_command() -> Command {
         return Command::new(path);
     }
 
-    let source_manifest = Path::new(RUNTIME_PATH).join("tools/rocm-oxide-build/Cargo.toml");
-    if source_manifest.is_file() {
-        let cargo = env::var_os("CARGO").unwrap_or_else(|| "cargo".into());
-        let mut command = Command::new(cargo);
-        command
-            .arg("run")
-            .arg("--quiet")
-            .arg("--manifest-path")
-            .arg(source_manifest)
-            .arg("--");
-        return command;
+    if let Some(runtime_path) = RUNTIME_PATH {
+        let source_manifest = Path::new(runtime_path).join("tools/rocm-oxide-build/Cargo.toml");
+        if source_manifest.is_file() {
+            let cargo = env::var_os("CARGO").unwrap_or_else(|| "cargo".into());
+            let mut command = Command::new(cargo);
+            command
+                .arg("run")
+                .arg("--quiet")
+                .arg("--manifest-path")
+                .arg(source_manifest)
+                .arg("--");
+            return command;
+        }
     }
 
-    // source_manifest not found — workspace may have moved or the relative path
-    // is wrong. Try rocm-oxide-build on PATH as a last resort.
+    // Try rocm-oxide-build on PATH as a last resort.
     if which_on_path("rocm-oxide-build") {
         return Command::new("rocm-oxide-build");
     }
@@ -1230,19 +1644,21 @@ fn build_tool_command() -> Command {
          \n\
          rocm-oxide-build not found.\n\
          \n\
-         This scaffold was generated with RUNTIME_PATH = {:?}\n\
-         but that path does not contain tools/rocm-oxide-build/Cargo.toml.\n\
+         This scaffold was generated with RUNTIME_PATH = {:?}.\n\
+         Local path scaffolds need that path to contain tools/rocm-oxide-build/Cargo.toml.\n\
+         Git scaffolds need rocm-oxide-build installed separately.\n\
          \n\
          Fix options:\n\
-           1. Keep the ROCm-Oxide workspace at {:?} (relative to this project).\n\
-           2. Set ROCM_OXIDE_BUILD=/path/to/pre-built/rocm-oxide-build in your\n\
+           1. Set ROCM_OXIDE_BUILD=/path/to/pre-built/rocm-oxide-build in your\n\
               environment or .cargo/config.toml [env] section.\n\
-           3. Install rocm-oxide-build onto PATH via:\n\
-                cargo install --path <rocm-oxide-workspace>/tools/rocm-oxide-build\n\
+           2. Install rocm-oxide-build onto PATH via:\n\
+                {}\n\
+           3. For local path scaffolds, keep the ROCm-Oxide workspace at the\n\
+              generated relative path.\n\
          \n\
          See README.md in this project for details.\n",
         RUNTIME_PATH,
-        RUNTIME_PATH,
+        BUILD_TOOL_INSTALL_HINT,
     )
 }
 
@@ -1267,6 +1683,7 @@ fn copy_artifact(from: &Path, to: &Path, label: &str) {
 }
 "#
     .replace("__ROCM_OXIDE_RUNTIME_PATH__", &runtime_path)
+    .replace("__ROCM_OXIDE_BUILD_TOOL_INSTALL_HINT__", &install_hint)
 }
 
 fn run_status(mut command: Command, label: &str) -> Result<(), String> {
@@ -1398,9 +1815,11 @@ mod tests {
 
     #[test]
     fn consumer_build_script_uses_relative_path() {
-        let script = consumer_build_script("../ROCm-Oxide");
+        let script = consumer_build_script(&BuildToolSource::SourceWorkspace {
+            runtime_path: "../ROCm-Oxide".to_string(),
+        });
         assert!(
-            script.contains(r#""../ROCm-Oxide""#),
+            script.contains(r#"Some("../ROCm-Oxide")"#),
             "build.rs should embed the relative runtime path"
         );
     }
@@ -1409,7 +1828,9 @@ mod tests {
     fn consumer_build_script_no_home_paths() {
         // Regression guard: generated build.rs must not bake in absolute home
         // paths when a relative path is passed.
-        let script = consumer_build_script("../ROCm-Oxide");
+        let script = consumer_build_script(&BuildToolSource::SourceWorkspace {
+            runtime_path: "../ROCm-Oxide".to_string(),
+        });
         assert!(
             !script.contains("/home/"),
             "generated build.rs must not contain absolute /home/ paths"
@@ -1417,6 +1838,39 @@ mod tests {
         assert!(
             !script.contains("/root/"),
             "generated build.rs must not contain absolute /root/ paths"
+        );
+    }
+
+    #[test]
+    fn git_dependency_formats_optional_revision() {
+        let dependency = GitDependency {
+            url: "https://github.com/JackSkellet/ROCm-Oxide".to_string(),
+            reference: Some(GitReference::Rev("abc1234".to_string())),
+        };
+        assert_eq!(
+            dependency.dependency_value(),
+            r#"{ git = "https://github.com/JackSkellet/ROCm-Oxide", rev = "abc1234" }"#
+        );
+        assert_eq!(
+            dependency.install_hint(),
+            r#"cargo install --git "https://github.com/JackSkellet/ROCm-Oxide" rocm-oxide-build --rev "abc1234""#
+        );
+    }
+
+    #[test]
+    fn consumer_build_script_git_mode_omits_runtime_path() {
+        let script = consumer_build_script(&BuildToolSource::Installed {
+            install_hint:
+                r#"cargo install --git "https://github.com/JackSkellet/ROCm-Oxide" rocm-oxide-build"#
+                    .to_string(),
+        });
+        assert!(
+            script.contains("const RUNTIME_PATH: Option<&str> = None;"),
+            "git scaffolds should not embed a local source workspace path"
+        );
+        assert!(
+            script.contains("cargo install --git"),
+            "git scaffolds should include the build-tool install hint"
         );
     }
 }

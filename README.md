@@ -162,6 +162,18 @@ workspace explicitly:
 cargo rocm-oxide new my-project --local /path/to/ROCm-Oxide
 ```
 
+To create a project whose crate dependencies come from GitHub instead of local
+`path` dependencies, install the build tool and use `--git`:
+
+```sh
+cargo install --git https://github.com/JackSkellet/ROCm-Oxide rocm-oxide-build
+cargo rocm-oxide new my-project --git https://github.com/JackSkellet/ROCm-Oxide --rev <commit>
+```
+
+This removes the fixed local workspace path from `Cargo.toml`, but it is still
+not full crates.io standalone mode because `rocm-oxide-build` must be available
+through `ROCM_OXIDE_BUILD` or `PATH`.
+
 `--standalone` is reserved until the runtime, device API, proc macro, and build
 tool can be consumed through crates.io or release artifacts.
 

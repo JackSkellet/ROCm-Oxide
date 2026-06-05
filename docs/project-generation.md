@@ -5,16 +5,21 @@ its current limitations are, and the roadmap to standalone project support.
 
 ---
 
-## Current mode: local scaffold
+## Current modes
 
-`cargo rocm-oxide new` creates a **local scaffold**: a project that builds
-against the ROCm-Oxide source workspace via relative `path` dependencies in
-`Cargo.toml` and `build.rs`.
+`cargo rocm-oxide new` supports two preview scaffold modes:
 
-The generated project is not standalone. It is designed for developing GPU code
-alongside the ROCm-Oxide workspace, not for shipping or sharing independently.
+- **Local scaffold**: depends on a ROCm-Oxide source workspace via relative
+  `path` dependencies in `Cargo.toml` and `build.rs`.
+- **Git scaffold**: depends on ROCm-Oxide crates from a git repository and
+  expects `rocm-oxide-build` to be installed through `ROCM_OXIDE_BUILD` or
+  `PATH`.
 
-### What is generated
+Neither mode is fully standalone. Local mode is best for developing alongside a
+source checkout. Git mode is the current bridge for sharing a generated project
+without preserving a fixed local workspace path.
+
+### Local scaffold
 
 Running `cargo rocm-oxide new my-app` from inside the ROCm-Oxide workspace, or
 `cargo rocm-oxide new my-app --local /path/to/ROCm-Oxide` from another
@@ -69,6 +74,49 @@ the source workspace explicit; it does not make the scaffold standalone.
 will become available only after the runtime, device API, proc macro, and build
 tool can be consumed through crates.io or release artifacts.
 
+### Git scaffold
+
+Use `--git` when you want generated `Cargo.toml` files to reference a git
+repository instead of local paths:
+
+```sh
+cargo install --git https://github.com/JackSkellet/ROCm-Oxide rocm-oxide-build
+cargo rocm-oxide new my-app --git https://github.com/JackSkellet/ROCm-Oxide --rev <commit>
+cd my-app
+cargo rocm-oxide check-consumer
+cargo run
+```
+
+The optional git reference flags are mutually exclusive:
+
+```sh
+cargo rocm-oxide new my-app --git https://github.com/JackSkellet/ROCm-Oxide --branch main
+cargo rocm-oxide new my-app --git https://github.com/JackSkellet/ROCm-Oxide --tag v0.1.0-sdk-preview.1
+cargo rocm-oxide new my-app --git https://github.com/JackSkellet/ROCm-Oxide --rev abc1234
+```
+
+Generated host dependency:
+
+```toml
+rocm-oxide = { git = "https://github.com/JackSkellet/ROCm-Oxide", rev = "abc1234" }
+```
+
+Generated device dependencies:
+
+```toml
+rocm-oxide-device = { git = "https://github.com/JackSkellet/ROCm-Oxide", rev = "abc1234" }
+rocm-oxide-kernel = { git = "https://github.com/JackSkellet/ROCm-Oxide", rev = "abc1234" }
+```
+
+Git mode deliberately does **not** embed a source workspace path in `build.rs`.
+The generated build script checks:
+
+1. `ROCM_OXIDE_BUILD=/path/to/rocm-oxide-build`
+2. `rocm-oxide-build` on `PATH`
+
+If neither exists, the build fails with the exact install command for the same
+git source and revision.
+
 ---
 
 ## Portability matrix
@@ -82,6 +130,8 @@ tool can be consumed through crates.io or release artifacts.
 | Clone project on another machine (same relative layout) | ✓ | Provided ROCm-Oxide is cloned at the same relative path |
 | Clone project on another machine (arbitrary layout) | ✗ | ROCm-Oxide not at expected relative path |
 | `cargo publish` | ✗ | `path` dependencies are rejected by crates.io |
+| Git scaffold cloned elsewhere | ✓ | Crate deps come from git, but `rocm-oxide-build` must be installed |
+| Git scaffold `cargo publish` | ✗ | Git deps and external build-tool requirement are not crates.io-compatible |
 
 ### Safe way to move both
 
@@ -142,22 +192,18 @@ This removes the source-workspace requirement for the build tool. The
 `rocm-oxide` runtime dependency in `Cargo.toml` would still require either the
 workspace or a crates.io version.
 
-### Manual `path` → `git` dependency
+### Git dependencies
 
-While crates.io publication is not yet available, you can use a git dependency
-as a short-term workaround for sharing with other developers who have cloned
-ROCm-Oxide:
+While crates.io publication is not yet available, use the supported `--git`
+mode instead of hand-editing scaffold manifests:
 
-```toml
-# Cargo.toml
-[dependencies]
-rocm-oxide = { git = "https://github.com/JackSkellet/ROCm-Oxide", rev = "abc1234" }
+```sh
+cargo rocm-oxide new my-app --git https://github.com/JackSkellet/ROCm-Oxide --rev abc1234
 ```
 
-This still requires the developer to have the correct ROCm toolchain installed
-and does not solve the `build.rs` `RUNTIME_PATH` issue (which would also need to
-point to the git-cloned source). A full solution requires publishing both the
-runtime crate and the build tool.
+This still requires the correct ROCm toolchain and an installed
+`rocm-oxide-build` binary. A full standalone solution requires publishing both
+the runtime crates and the build tool.
 
 ---
 
@@ -169,7 +215,8 @@ runtime crate and the build tool.
 | `rocm-oxide-device` not on crates.io | Device API crate |
 | `rocm-oxide-kernel` not on crates.io | Proc-macro crate |
 | `rocm-oxide-build` not distributed | Build tool has no release binary or crates.io presence |
-| Generated `build.rs` uses source-workspace to find the build tool | Needs a well-known binary or crates.io `build-dependencies` entry |
+| Generated local `build.rs` uses source-workspace to find the build tool | Needs a well-known binary or crates.io `build-dependencies` entry |
+| Git scaffolds still require `rocm-oxide-build` on PATH or `ROCM_OXIDE_BUILD` | Git deps remove path dependencies, not the build-tool distribution problem |
 | `device-spike` name is not configurable yet | Generated projects use the same internal crate name |
 
 ### Minimum path to crates.io publication
@@ -197,4 +244,5 @@ rocm-oxide-build = "0.1"
 ```
 
 Until then, the local scaffold mode described in this document is the only
-supported workflow.
+fully source-workspace-backed workflow; git scaffold mode is the supported
+bridge for projects that should not preserve local path dependencies.

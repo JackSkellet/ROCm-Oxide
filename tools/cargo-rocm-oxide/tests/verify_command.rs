@@ -195,9 +195,16 @@ fn verify_routes_to_workspace_script_from_nested_directory() {
     );
     let log = fs::read_to_string(log).expect("verify script did not write its log");
     let lines = log.lines().collect::<Vec<_>>();
-    assert_eq!(lines.first(), Some(&workspace.root.to_string_lossy().as_ref()));
+    assert_eq!(
+        lines.first(),
+        Some(&workspace.root.to_string_lossy().as_ref())
+    );
     assert_eq!(lines.get(1), Some(&"--quick"));
-    assert_eq!(lines.len(), 2, "unexpected extra verify arguments: {lines:?}");
+    assert_eq!(
+        lines.len(),
+        2,
+        "unexpected extra verify arguments: {lines:?}"
+    );
 }
 
 #[test]
@@ -233,9 +240,9 @@ fn doctor_forwards_report_flags_to_build_tool() {
 #[test]
 fn pipeline_routes_to_external_build_tool_from_consumer_project() {
     let project = TempProject::new();
-    let metadata = project.root.join(
-        "device/target/amdgcn-amd-amdhsa/release/consumer_device.metadata.json",
-    );
+    let metadata = project
+        .root
+        .join("device/target/amdgcn-amd-amdhsa/release/consumer_device.metadata.json");
     fs::create_dir_all(metadata.parent().expect("metadata should have parent"))
         .expect("failed to create metadata directory");
     fs::write(&metadata, "{}").expect("failed to write fake metadata");
@@ -333,7 +340,10 @@ fn new_project_scaffold_allows_default_pipeline() {
     let temp = temp_root("rocm-oxide-new-project-test");
     let app = temp.join("app");
     fs::create_dir_all(&temp).expect("failed to create temp parent");
-    let output = run_cli(&["rocm-oxide", "new", app.to_str().unwrap()], Path::new(env!("CARGO_MANIFEST_DIR")));
+    let output = run_cli(
+        &["rocm-oxide", "new", app.to_str().unwrap()],
+        Path::new(env!("CARGO_MANIFEST_DIR")),
+    );
     assert!(
         output.status.success(),
         "new command failed: stdout={} stderr={}",
@@ -343,7 +353,8 @@ fn new_project_scaffold_allows_default_pipeline() {
     assert!(app.join("device-spike/Cargo.toml").is_file());
     assert!(app.join("device-spike/src/lib.rs").is_file());
     assert!(app.join("build.rs").is_file());
-    let build_rs = fs::read_to_string(app.join("build.rs")).expect("build script should be readable");
+    let build_rs =
+        fs::read_to_string(app.join("build.rs")).expect("build script should be readable");
     assert!(build_rs.contains("rocm-oxide-build"));
     assert!(build_rs.contains("ROCM_OXIDE_DEVICE_MANIFEST"));
     assert!(build_rs.contains("--output-stem"));
@@ -395,7 +406,10 @@ fn new_project_accepts_explicit_workspace_path() {
             "rocm-oxide",
             "new",
             "--path",
-            workspace.root.to_str().expect("workspace path should be utf-8"),
+            workspace
+                .root
+                .to_str()
+                .expect("workspace path should be utf-8"),
             app.to_str().expect("app path should be utf-8"),
         ])
         .current_dir(&temp)
@@ -439,6 +453,89 @@ fn new_project_accepts_explicit_workspace_path() {
 }
 
 #[test]
+fn new_project_accepts_git_dependency_scaffold() {
+    let temp = temp_root("rocm-oxide-new-git-project-test");
+    let app = temp.join("app");
+    fs::create_dir_all(&temp).expect("failed to create temp parent");
+
+    let output = Command::new(cargo_rocm_oxide())
+        .args([
+            "rocm-oxide",
+            "new",
+            app.to_str().expect("app path should be utf-8"),
+            "--git",
+            "https://github.com/JackSkellet/ROCm-Oxide",
+            "--rev",
+            "abc1234",
+        ])
+        .current_dir(&temp)
+        .output()
+        .expect("failed to run cargo-rocm-oxide new --git");
+    assert!(
+        output.status.success(),
+        "new --git command failed: stdout={} stderr={}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    let manifest = fs::read_to_string(app.join("Cargo.toml")).expect("manifest should be readable");
+    assert!(
+        manifest.contains(
+            r#"rocm-oxide = { git = "https://github.com/JackSkellet/ROCm-Oxide", rev = "abc1234" }"#
+        ),
+        "generated host manifest should use the requested git dependency:\n{manifest}"
+    );
+    assert!(
+        !manifest.contains("path = "),
+        "git scaffold host manifest should not contain path dependencies:\n{manifest}"
+    );
+
+    let device_manifest =
+        fs::read_to_string(app.join("device-spike/Cargo.toml")).expect("device manifest");
+    assert!(
+        device_manifest.contains(
+            r#"rocm-oxide-device = { git = "https://github.com/JackSkellet/ROCm-Oxide", rev = "abc1234" }"#
+        ),
+        "generated device manifest should use git for device API:\n{device_manifest}"
+    );
+    assert!(
+        device_manifest.contains(
+            r#"rocm-oxide-kernel = { git = "https://github.com/JackSkellet/ROCm-Oxide", rev = "abc1234" }"#
+        ),
+        "generated device manifest should use git for kernel macro:\n{device_manifest}"
+    );
+
+    let build_rs = fs::read_to_string(app.join("build.rs")).expect("build.rs should be readable");
+    assert!(
+        build_rs.contains("const RUNTIME_PATH: Option<&str> = None;"),
+        "git scaffold build.rs should not embed a runtime path:\n{build_rs}"
+    );
+    assert!(
+        build_rs.contains("cargo install --git"),
+        "git scaffold build.rs should include an install hint:\n{build_rs}"
+    );
+
+    let output = Command::new(cargo_rocm_oxide())
+        .args(["rocm-oxide", "check-consumer"])
+        .current_dir(&app)
+        .output()
+        .expect("failed to run check-consumer");
+    assert!(
+        output.status.success(),
+        "check-consumer failed: stdout={} stderr={}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(
+        stdout.contains("all checks passed"),
+        "check-consumer did not pass generated --git scaffold:\n{stdout}"
+    );
+
+    let _ = fs::remove_dir_all(temp);
+}
+
+#[test]
 fn new_project_rejects_standalone_until_artifacts_exist() {
     let temp = temp_root("rocm-oxide-new-standalone-project-test");
     let app = temp.join("app");
@@ -464,7 +561,10 @@ fn new_project_rejects_standalone_until_artifacts_exist() {
         stderr.contains("new --standalone` is not supported yet"),
         "standalone error was not actionable:\n{stderr}"
     );
-    assert!(!app.exists(), "standalone failure should not create the project");
+    assert!(
+        !app.exists(),
+        "standalone failure should not create the project"
+    );
 
     let _ = fs::remove_dir_all(temp);
 }

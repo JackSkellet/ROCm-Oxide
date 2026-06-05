@@ -40,6 +40,9 @@ All notable ROCm-Oxide changes should be recorded here before a tagged release.
   `gpu_algorithms` example.
 - Added the experimental `GpuTestContext` and `gpu_test!` macro for GPU-backed
   Rust tests that skip cleanly when no HIP device is visible.
+- Added `cargo rocm-oxide new --git <repo> [--branch|--tag|--rev]` for generated
+  projects that use git dependencies while still requiring `rocm-oxide-build`
+  through `ROCM_OXIDE_BUILD` or `PATH`.
 
 ### SDK onboarding and diagnostics (2026-06)
 
