@@ -1,0 +1,32 @@
+{
+  "ROCm-Oxide 1D kernel": {
+    "scope": "rust",
+    "prefix": "rocm-kernel-1d",
+    "body": [
+      "#[kernel_contract(len(${1:out})=${2:n})]",
+      "#[kernel]",
+      "pub unsafe extern \"C\" fn ${3:kernel_name}(${1:out}: DeviceSliceMut<${4:u32}>, ${2:n}: usize) {",
+      "    for_each_element(${2:n}, |i| {",
+      "        ${1:out}.set(i, ${5:i.as_usize() as ${4:u32}});",
+      "    });",
+      "}"
+    ],
+    "description": "ROCm-Oxide 1D Rust GPU kernel"
+  },
+  "ROCm-Oxide vector add kernel": {
+    "scope": "rust",
+    "prefix": "rocm-vector-add",
+    "body": [
+      "#[kernel_contract(len(out)=n, len(a)=n, len(b)=n)]",
+      "#[kernel]",
+      "pub unsafe extern \"C\" fn ${1:vector_add}(out: DeviceSliceMut<f32>, a: DeviceSlice<f32>, b: DeviceSlice<f32>, n: usize) {",
+      "    for_each_element(n, |i| {",
+      "        if let (Some(lhs), Some(rhs)) = (a.read(i), b.read(i)) {",
+      "            out.set(i, lhs + rhs);",
+      "        }",
+      "    });",
+      "}"
+    ],
+    "description": "ROCm-Oxide vector-add Rust GPU kernel"
+  }
+}

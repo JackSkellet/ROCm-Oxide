@@ -16,6 +16,8 @@ stay short and link here when a topic needs more detail.
   layer.
 - [Project generation](project-generation.md): `cargo rocm-oxide new` scaffold
   layout, path dependencies, and standalone roadmap.
+- [Editor setup](editor-setup.md): rust-analyzer linked projects, VS Code tasks,
+  and device-kernel snippets.
 - [Release process](release.md): repeatable gates for preview tags.
 - [Release profile template](release-profile-template.md): known-good machine
   record format for preview candidates.

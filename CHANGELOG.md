@@ -18,6 +18,9 @@ All notable ROCm-Oxide changes should be recorded here before a tagged release.
   `for_each_element(...)`, `ThreadIndex::as_usize/is_in_bounds`, and bounded
   `DeviceSlice::read` / `DeviceSliceMut::set` helpers for autocomplete-friendly
   one-thread-per-element kernels.
+- Added rust-analyzer/VS Code editor support for the source checkout and
+  generated projects: linked host/device manifests, build/run tasks, extension
+  recommendations, and device-kernel snippets.
 - Updated `scripts/verify.sh` so quick/full release gates use
   `--features device-spike` for root Rust-device examples and
   `--manifest-path demo-projects/.../Cargo.toml` for separated demo crates.

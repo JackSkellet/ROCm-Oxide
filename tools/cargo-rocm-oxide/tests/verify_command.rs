@@ -362,6 +362,35 @@ fn new_project_scaffold_allows_default_pipeline() {
         device_source.contains("out.set(i, i.as_usize() as u32);"),
         "generated starter should use bounded DeviceSliceMut::set:\n{device_source}"
     );
+    assert!(app.join(".vscode/settings.json").is_file());
+    assert!(app.join(".vscode/tasks.json").is_file());
+    assert!(app.join(".vscode/extensions.json").is_file());
+    assert!(app.join(".vscode/rocm-oxide.code-snippets").is_file());
+    let editor_settings =
+        fs::read_to_string(app.join(".vscode/settings.json")).expect("editor settings");
+    assert!(
+        editor_settings.contains("\"device-spike/Cargo.toml\""),
+        "editor settings should link the generated device crate:\n{editor_settings}"
+    );
+    assert!(
+        editor_settings.contains("\"rust-analyzer.checkOnSave\": false"),
+        "editor settings should avoid host-target check-on-save for AMDGPU device code:\n{editor_settings}"
+    );
+    let editor_tasks = fs::read_to_string(app.join(".vscode/tasks.json")).expect("editor tasks");
+    assert!(
+        editor_tasks.contains("ROCm-Oxide: check scaffold"),
+        "editor tasks should include scaffold validation:\n{editor_tasks}"
+    );
+    assert!(
+        editor_tasks.contains("cargo build") && editor_tasks.contains("cargo run"),
+        "editor tasks should include build and run commands:\n{editor_tasks}"
+    );
+    let snippets =
+        fs::read_to_string(app.join(".vscode/rocm-oxide.code-snippets")).expect("snippets");
+    assert!(
+        snippets.contains("rocm-kernel-1d") && snippets.contains("rocm-vector-add"),
+        "editor snippets should include ROCm-Oxide kernel shortcuts:\n{snippets}"
+    );
     assert!(app.join("build.rs").is_file());
     let build_rs =
         fs::read_to_string(app.join("build.rs")).expect("build script should be readable");

@@ -1,0 +1,15 @@
+{
+  "rust-analyzer.linkedProjects": [
+    "Cargo.toml",
+    "device-spike/Cargo.toml",
+    "crates/rocm-oxide-device/Cargo.toml",
+    "crates/rocm-oxide-kernel/Cargo.toml",
+    "tools/rocm-oxide-build/Cargo.toml",
+    "tools/cargo-rocm-oxide/Cargo.toml"
+  ],
+  "rust-analyzer.cargo.allTargets": false,
+  "rust-analyzer.cargo.buildScripts.enable": false,
+  "rust-analyzer.cargo.targetDir": true,
+  "rust-analyzer.checkOnSave": false,
+  "rust-analyzer.completion.fullFunctionSignatures.enable": true
+}

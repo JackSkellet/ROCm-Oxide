@@ -31,6 +31,11 @@ my-app/
   build.rs                — invokes rocm-oxide-build; RUNTIME_PATH is relative
   rust-toolchain.toml     — selects nightly + rust-src (required for device build)
   README.md               — scaffold-specific usage and portability notes
+  .vscode/
+    settings.json         — rust-analyzer linked host + device projects
+    tasks.json            — scaffold check, doctor, build, and run tasks
+    extensions.json       — rust-analyzer recommendation
+    rocm-oxide.code-snippets
   src/
     main.rs               — sample host program using generated DeviceKernels
   device-spike/
@@ -51,6 +56,26 @@ All dependency paths are computed relative at generation time:
 | `device-spike/Cargo.toml` `rocm-oxide-kernel = { path = ... }` | `device-spike/` | `../../ROCm-Oxide/crates/rocm-oxide-kernel` |
 
 No absolute paths are written.
+
+### Editor files
+
+Generated projects include VS Code defaults because the host crate and
+`device-spike/` are intentionally separate Cargo projects. The settings link
+both manifests for rust-analyzer completion and disable automatic check-on-save
+so the editor does not run a host-target `cargo check` against AMDGPU-only
+device intrinsics.
+
+Use the generated tasks for real validation:
+
+| Task | Command |
+|------|---------|
+| `ROCm-Oxide: check scaffold` | `cargo rocm-oxide check-consumer` |
+| `ROCm-Oxide: doctor` | local scaffold: run doctor from the source workspace; git scaffold: `cargo rocm-oxide doctor` |
+| `ROCm-Oxide: build host + device` | `cargo build` |
+| `ROCm-Oxide: run app` | `cargo run` |
+
+Rust snippets are also generated for the common device-kernel forms:
+`rocm-kernel-1d` and `rocm-vector-add`.
 
 ### Explicit local workspace
 

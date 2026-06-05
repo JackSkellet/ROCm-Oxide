@@ -391,6 +391,7 @@ Maintained docs:
 - [docs/troubleshooting.md](docs/troubleshooting.md)
 - [docs/api-stability.md](docs/api-stability.md)
 - [docs/project-generation.md](docs/project-generation.md)
+- [docs/editor-setup.md](docs/editor-setup.md)
 - [docs/release.md](docs/release.md)
 - [docs/visual-demos.md](docs/visual-demos.md)
 

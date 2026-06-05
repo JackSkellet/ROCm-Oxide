@@ -1191,6 +1191,52 @@ impl ScaffoldConfig {
     fn readme(&self) -> String {
         self.readme.clone()
     }
+
+    fn vscode_tasks(&self) -> String {
+        let doctor_command = match &self.build_tool {
+            BuildToolSource::SourceWorkspace { runtime_path } => {
+                format!("cd {runtime_path:?} && cargo rocm-oxide doctor")
+            }
+            BuildToolSource::Installed { .. } => "cargo rocm-oxide doctor".to_string(),
+        };
+        format!(
+            r#"{{
+  "version": "2.0.0",
+  "tasks": [
+    {{
+      "label": "ROCm-Oxide: check scaffold",
+      "type": "shell",
+      "command": "cargo rocm-oxide check-consumer",
+      "problemMatcher": []
+    }},
+    {{
+      "label": "ROCm-Oxide: doctor",
+      "type": "shell",
+      "command": {doctor_command:?},
+      "problemMatcher": []
+    }},
+    {{
+      "label": "ROCm-Oxide: build host + device",
+      "type": "shell",
+      "command": "cargo build",
+      "problemMatcher": "$rustc",
+      "group": "build"
+    }},
+    {{
+      "label": "ROCm-Oxide: run app",
+      "type": "shell",
+      "command": "cargo run",
+      "problemMatcher": "$rustc",
+      "group": {{
+        "kind": "build",
+        "isDefault": true
+      }}
+    }}
+  ]
+}}
+"#
+        )
+    }
 }
 
 fn new_project(args: &[OsString]) -> Result<(), String> {
@@ -1250,6 +1296,8 @@ fn new_project(args: &[OsString]) -> Result<(), String> {
             path.join("device-spike").display()
         )
     })?;
+    fs::create_dir_all(path.join(".vscode"))
+        .map_err(|err| format!("failed to create {}: {err}", path.join(".vscode").display()))?;
 
     fs::write(
         path.join("Cargo.toml"),
@@ -1364,6 +1412,17 @@ components = ["rust-src", "clippy", "rustfmt"]
 
     fs::write(path.join("README.md"), scaffold.readme())
         .map_err(|err| format!("failed to write README.md: {err}"))?;
+    fs::write(path.join(".vscode/settings.json"), vscode_settings())
+        .map_err(|err| format!("failed to write .vscode/settings.json: {err}"))?;
+    fs::write(path.join(".vscode/tasks.json"), scaffold.vscode_tasks())
+        .map_err(|err| format!("failed to write .vscode/tasks.json: {err}"))?;
+    fs::write(path.join(".vscode/extensions.json"), vscode_extensions())
+        .map_err(|err| format!("failed to write .vscode/extensions.json: {err}"))?;
+    fs::write(
+        path.join(".vscode/rocm-oxide.code-snippets"),
+        vscode_snippets(),
+    )
+    .map_err(|err| format!("failed to write .vscode/rocm-oxide.code-snippets: {err}"))?;
 
     println!("created {}", path.display());
     println!();
@@ -1380,6 +1439,66 @@ components = ["rust-src", "clippy", "rustfmt"]
     println!("  Note: `cargo rocm-oxide verify` must be run from the ROCm-Oxide");
     println!("  source workspace, not from this project.");
     Ok(())
+}
+
+fn vscode_settings() -> &'static str {
+    r#"{
+  "rust-analyzer.linkedProjects": [
+    "Cargo.toml",
+    "device-spike/Cargo.toml"
+  ],
+  "rust-analyzer.cargo.allTargets": false,
+  "rust-analyzer.cargo.buildScripts.enable": false,
+  "rust-analyzer.cargo.targetDir": true,
+  "rust-analyzer.checkOnSave": false,
+  "rust-analyzer.completion.fullFunctionSignatures.enable": true
+}
+"#
+}
+
+fn vscode_extensions() -> &'static str {
+    r#"{
+  "recommendations": [
+    "rust-lang.rust-analyzer"
+  ]
+}
+"#
+}
+
+fn vscode_snippets() -> &'static str {
+    r##"{
+  "ROCm-Oxide 1D kernel": {
+    "scope": "rust",
+    "prefix": "rocm-kernel-1d",
+    "body": [
+      "#[kernel_contract(len(${1:out})=${2:n})]",
+      "#[kernel]",
+      "pub unsafe extern \"C\" fn ${3:kernel_name}(${1:out}: DeviceSliceMut<${4:u32}>, ${2:n}: usize) {",
+      "    for_each_element(${2:n}, |i| {",
+      "        ${1:out}.set(i, ${5:i.as_usize() as ${4:u32}});",
+      "    });",
+      "}"
+    ],
+    "description": "ROCm-Oxide 1D Rust GPU kernel"
+  },
+  "ROCm-Oxide vector add kernel": {
+    "scope": "rust",
+    "prefix": "rocm-vector-add",
+    "body": [
+      "#[kernel_contract(len(out)=n, len(a)=n, len(b)=n)]",
+      "#[kernel]",
+      "pub unsafe extern \"C\" fn ${1:vector_add}(out: DeviceSliceMut<f32>, a: DeviceSlice<f32>, b: DeviceSlice<f32>, n: usize) {",
+      "    for_each_element(n, |i| {",
+      "        if let (Some(lhs), Some(rhs)) = (a.read(i), b.read(i)) {",
+      "            out.set(i, lhs + rhs);",
+      "        }",
+      "    });",
+      "}"
+    ],
+    "description": "ROCm-Oxide vector-add Rust GPU kernel"
+  }
+}
+"##
 }
 
 fn local_scaffold_readme(runtime_path: &str) -> String {
@@ -1403,6 +1522,20 @@ This will:
    kernel in `device-spike/` for `amdgcn-amd-amdhsa`.
 3. Produce a `.hsaco` code object and a typed `DeviceKernels` binding.
 4. Compile and run `src/main.rs`, which loads the kernel and verifies it on the GPU.
+
+## Editor support
+
+Open this project root in VS Code to get the generated `.vscode/` defaults:
+
+- rust-analyzer indexes both `Cargo.toml` and `device-spike/Cargo.toml`.
+- Check-on-save is disabled because plain host-target `cargo check` cannot
+  compile AMDGPU-only device intrinsics.
+- Tasks are provided for scaffold checks, doctor, build, and run.
+- Rust snippets `rocm-kernel-1d` and `rocm-vector-add` are available in
+  `device-spike/src/lib.rs`.
+
+For other editors, configure rust-analyzer `linkedProjects` with both
+manifests and use `cargo run` for real validation.
 
 ## Write your own kernel
 
@@ -1497,6 +1630,20 @@ This will:
 3. Compile the Rust GPU kernel in `device-spike/` for `amdgcn-amd-amdhsa`.
 4. Produce a `.hsaco` code object and a typed `DeviceKernels` binding.
 5. Compile and run `src/main.rs`, which loads the kernel and verifies it on the GPU.
+
+## Editor support
+
+Open this project root in VS Code to get the generated `.vscode/` defaults:
+
+- rust-analyzer indexes both `Cargo.toml` and `device-spike/Cargo.toml`.
+- Check-on-save is disabled because plain host-target `cargo check` cannot
+  compile AMDGPU-only device intrinsics.
+- Tasks are provided for scaffold checks, doctor, build, and run.
+- Rust snippets `rocm-kernel-1d` and `rocm-vector-add` are available in
+  `device-spike/src/lib.rs`.
+
+For other editors, configure rust-analyzer `linkedProjects` with both
+manifests and use `cargo run` for real validation.
 
 ## Dependency source
 

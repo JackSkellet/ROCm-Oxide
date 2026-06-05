@@ -23,7 +23,7 @@ diagnostics, validation, and examples.
 | Shrink root dependencies | Done | Root `Cargo.toml` no longer carries visual/demo-only dependency sets. |
 | Docs during move | Done | `README.md`, `docs/index.md`, `examples/README.md`, `docs/visual-demos.md`, and project-generation docs point at the new layout. |
 | Condense documentation | Done for repo docs | Maintained docs are short and linked from `docs/index.md`; long-form notes are retained under `docs/wiki/` as wiki source. |
-| Improve abstractions | Second pass started | Device preludes, `#[kernel_contract]`, generated launch builders, `rocm_oxide::gpu`, and `gpu_test!` are available. The device API now also has autocomplete-friendly `element_index()`, `for_each_element(...)`, bounded slice `read/set` helpers, and generated starter kernels that use them. |
+| Improve abstractions | Second pass in progress | Device preludes, `#[kernel_contract]`, generated launch builders, `rocm_oxide::gpu`, and `gpu_test!` are available. The device API now also has autocomplete-friendly `element_index()`, `for_each_element(...)`, bounded slice `read/set` helpers, generated starter kernels that use them, and rust-analyzer/VS Code defaults for source and generated projects. |
 | Release readiness | gfx1201 full gate passed; gfx1100 still required before tag | Doctor JSON/GitHub modes, first-user-path gate, full local `gfx1201` gate, artifact audit, and known-good release profile docs are in place. The release checklist still requires the `gfx1100` quick/full gate before tagging. |
 
 ## Phase 1: Clean The Root
@@ -139,6 +139,8 @@ Likely abstraction work:
 - small algorithm helpers such as fill, map, reduce, scan, and sort
 - second-pass device ergonomics: `element_index()`, `for_each_element(...)`,
   and bounded `DeviceSlice::read` / `DeviceSliceMut::set` helpers
+- editor support for device kernels: rust-analyzer linked projects, runnable
+  build tasks, and snippets
 
 ## Release Ordering
 

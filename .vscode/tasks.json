@@ -1,0 +1,35 @@
+{
+  "version": "2.0.0",
+  "tasks": [
+    {
+      "label": "ROCm-Oxide: doctor",
+      "type": "shell",
+      "command": "cargo rocm-oxide doctor",
+      "problemMatcher": []
+    },
+    {
+      "label": "ROCm-Oxide: build device code",
+      "type": "shell",
+      "command": "cargo run --manifest-path tools/cargo-rocm-oxide/Cargo.toml -- rocm-oxide build",
+      "problemMatcher": "$rustc",
+      "group": "build"
+    },
+    {
+      "label": "ROCm-Oxide: hello Rust GPU",
+      "type": "shell",
+      "command": "cargo run --features device-spike --example hello_gpu_rust",
+      "problemMatcher": "$rustc",
+      "group": {
+        "kind": "test",
+        "isDefault": true
+      }
+    },
+    {
+      "label": "ROCm-Oxide: offline verification",
+      "type": "shell",
+      "command": "scripts/verify.sh --offline",
+      "problemMatcher": "$rustc",
+      "group": "test"
+    }
+  ]
+}
