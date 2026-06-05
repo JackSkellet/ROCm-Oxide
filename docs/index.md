@@ -16,6 +16,8 @@ stay short and link here when a topic needs more detail.
 - [Release process](release.md): repeatable gates for preview tags.
 - [Release profile template](release-profile-template.md): known-good machine
   record format for preview candidates.
+- [Known-good release profiles](release-profiles/): retained validation records
+  for release-gating machines.
 - [Visual demos](visual-demos.md): separated visual/capture/artifact demo
   launch table.
 

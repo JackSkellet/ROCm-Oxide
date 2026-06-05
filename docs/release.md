@@ -50,12 +50,17 @@ For each validation machine, keep:
 - failed or skipped gate notes
 
 Use [`docs/release-profile-template.md`](release-profile-template.md) for each
-known-good machine record. Store the completed profiles with the release notes
-and generated artifacts.
+known-good machine record. Store completed profiles under
+[`docs/release-profiles/`](release-profiles/) and with the release notes and
+generated artifacts.
 
 The current known-good release-gating profiles are `gfx1100` and `gfx1201`.
 Other AMD GPUs may work, but they should not block preview tags unless they are
 explicitly promoted to release-gating status.
+
+Current retained profile:
+
+- [`2026-06-05-jack-gfx1201.md`](release-profiles/2026-06-05-jack-gfx1201.md)
 
 ## Wiki Source
 
