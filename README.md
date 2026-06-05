@@ -227,13 +227,10 @@ Host code loads the generated kernel bindings and launches the kernel:
 let kernels = generated::DeviceKernels::load_embedded(&device)?;
 
 unsafe {
-    kernels.vector_add(
-        LaunchConfig::for_num_elems(n),
-        &out,
-        &a,
-        &b,
-        n,
-    )?;
+    kernels
+        .vector_add_launcher()
+        .grid_for(n)
+        .launch(&out, &a, &b, n)?;
 }
 ```
 

@@ -32,6 +32,9 @@ All notable ROCm-Oxide changes should be recorded here before a tagged release.
   machinery. The older `// rocm-oxide:` comment form remains supported.
 - Added `cargo rocm-oxide doctor --json` and `--github` report modes for
   automation and issue-ready diagnostics.
+- Added generated `{kernel}_launcher()` helpers with `.grid_for(...)`,
+  `.config(...)`, `.on_stream(...)`, `.launch(...)`, and `.operation(...)`
+  methods, while keeping existing typed launch methods intact.
 
 ### SDK onboarding and diagnostics (2026-06)
 

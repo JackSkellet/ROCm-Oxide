@@ -1014,7 +1014,7 @@ fn main() -> Result<()> {
     let n = 256usize;
     let out = DeviceBuffer::<u32>::new(n)?;
     unsafe {
-        kernels.fill_indices(LaunchConfig::for_num_elems(n), &out, n)?;
+        kernels.fill_indices_launcher().grid_for(n).launch(&out, n)?;
     }
     rocm_oxide::hip::synchronize()?;
 

@@ -5386,7 +5386,15 @@ fn write_bindings(
         out.push('\n');
     }
 
-    out.push_str("}\n");
+    out.push_str("}\n\n");
+    for kernel in kernels.values() {
+        out.push_str(&generate_kernel_launcher_binding(
+            kernel,
+            device_structs,
+            code_object_metadata.kernels.get(&kernel.name),
+        )?);
+        out.push('\n');
+    }
     fs::write(path, out).map_err(|err| format!("failed to write {}: {err}", path.display()))
 }
 
@@ -5484,6 +5492,28 @@ fn to_snake_case(name: &str) -> String {
         }
     }
     out.trim_matches('_').to_string()
+}
+
+fn to_pascal_case(name: &str) -> String {
+    let mut out = String::new();
+    let mut uppercase_next = true;
+    for ch in name.chars() {
+        if ch == '_' || !ch.is_ascii_alphanumeric() {
+            uppercase_next = true;
+            continue;
+        }
+        if uppercase_next {
+            out.push(ch.to_ascii_uppercase());
+            uppercase_next = false;
+        } else {
+            out.push(ch);
+        }
+    }
+    if out.is_empty() {
+        "Kernel".to_string()
+    } else {
+        out
+    }
 }
 
 fn generate_kernel_binding(
@@ -5609,6 +5639,12 @@ fn generate_kernel_binding(
     let mut out = String::new();
     let field_name = kernel_field_name(&kernel.name);
     let method_name = kernel_method_name(&kernel.name);
+    let launcher_name = kernel_launcher_type_name(&kernel.name);
+    out.push_str(&format!(
+        "    pub fn {method_name}_launcher(&self) -> {launcher_name}<'_> {{\n"
+    ));
+    out.push_str(&format!("        {launcher_name}::new(self)\n"));
+    out.push_str("    }\n\n");
     out.push_str(&format!(
         "    pub unsafe fn {}(&self, {}) -> rocm_oxide::Result<()> {{\n",
         method_name,
@@ -5779,6 +5815,166 @@ fn generate_kernel_binding(
     Ok(out)
 }
 
+fn generate_kernel_launcher_binding(
+    kernel: &KernelDecl,
+    device_structs: &BTreeMap<String, DeviceStruct>,
+    metadata: Option<&KernelObjectMetadata>,
+) -> Result<String, String> {
+    let method_name = kernel_method_name(&kernel.name);
+    let launcher_name = kernel_launcher_type_name(&kernel.name);
+    let mut params = Vec::new();
+    let mut operation_params = Vec::new();
+    let mut call_args = Vec::new();
+    let mut operation_supported = true;
+
+    for arg in &kernel.args {
+        call_args.push(arg.name.clone());
+        match &arg.kind {
+            ArgKind::MutPtr(inner) | ArgKind::MutSlice(inner) => {
+                params.push(format!(
+                    "{}: &rocm_oxide::DeviceBuffer<{}>",
+                    arg.name, inner
+                ));
+                operation_params.push(format!(
+                    "{}: std::sync::Arc<rocm_oxide::DeviceBuffer<{}>>",
+                    arg.name, inner
+                ));
+            }
+            ArgKind::ConstPtr(inner) | ArgKind::ConstSlice(inner) => {
+                params.push(format!(
+                    "{}: &rocm_oxide::DeviceBuffer<{}>",
+                    arg.name, inner
+                ));
+                operation_params.push(format!(
+                    "{}: std::sync::Arc<rocm_oxide::DeviceBuffer<{}>>",
+                    arg.name, inner
+                ));
+            }
+            ArgKind::Scalar => {
+                if let Some(device_struct) = device_structs.get(type_leaf_name(&arg.ty)) {
+                    if scalar_arg_is_indirect_global_buffer(metadata, &arg.name) {
+                        params.push(format!(
+                            "{}: &rocm_oxide::DeviceBuffer<{}>",
+                            arg.name, device_struct.name
+                        ));
+                        operation_params.push(format!(
+                            "{}: std::sync::Arc<rocm_oxide::DeviceBuffer<{}>>",
+                            arg.name, device_struct.name
+                        ));
+                    } else {
+                        if device_struct
+                            .fields
+                            .iter()
+                            .any(|field| is_raw_pointer_type(&field.ty))
+                        {
+                            operation_supported = false;
+                        }
+                        params.push(format!("{}: {}", arg.name, arg.ty));
+                        operation_params.push(format!("{}: {}", arg.name, arg.ty));
+                    }
+                } else if primitive_abi_size(&arg.ty).is_some() {
+                    params.push(format!("{}: {}", arg.name, arg.ty));
+                    operation_params.push(format!("{}: {}", arg.name, arg.ty));
+                } else {
+                    return Err(format!(
+                        "{}: unsupported by-value kernel argument `{}` with type `{}`; use a primitive scalar, a layout-proven device struct, or pass the payload through a DeviceSlice",
+                        kernel.span, arg.name, arg.ty
+                    ));
+                }
+            }
+        }
+    }
+
+    let mut out = String::new();
+    out.push_str("#[allow(dead_code)]\n");
+    out.push_str(&format!("pub struct {launcher_name}<'a> {{\n"));
+    out.push_str("    kernels: &'a DeviceKernels,\n");
+    out.push_str("    config: Option<rocm_oxide::LaunchConfig>,\n");
+    out.push_str("    stream: Option<&'a rocm_oxide::Stream>,\n");
+    out.push_str("}\n\n");
+    out.push_str("#[allow(dead_code)]\n");
+    out.push_str(&format!("impl<'a> {launcher_name}<'a> {{\n"));
+    out.push_str("    fn new(kernels: &'a DeviceKernels) -> Self {\n");
+    out.push_str("        Self { kernels, config: None, stream: None }\n");
+    out.push_str("    }\n\n");
+    out.push_str("    pub fn config(mut self, config: rocm_oxide::LaunchConfig) -> Self {\n");
+    out.push_str("        self.config = Some(config);\n");
+    out.push_str("        self\n");
+    out.push_str("    }\n\n");
+    out.push_str("    pub fn grid_for(self, num_elems: usize) -> Self {\n");
+    out.push_str(
+        "        self.try_grid_for(num_elems).expect(\"invalid one-dimensional launch configuration\")\n",
+    );
+    out.push_str("    }\n\n");
+    out.push_str("    pub fn try_grid_for(mut self, num_elems: usize) -> rocm_oxide::Result<Self> {\n");
+    out.push_str("        self.config = Some(rocm_oxide::LaunchConfig::try_for_num_elems(num_elems)?);\n");
+    out.push_str("        Ok(self)\n");
+    out.push_str("    }\n\n");
+    out.push_str("    pub fn grid_for_with_block_size(self, num_elems: usize, block_x: u32) -> Self {\n");
+    out.push_str(
+        "        self.try_grid_for_with_block_size(num_elems, block_x).expect(\"invalid one-dimensional launch configuration\")\n",
+    );
+    out.push_str("    }\n\n");
+    out.push_str("    pub fn try_grid_for_with_block_size(mut self, num_elems: usize, block_x: u32) -> rocm_oxide::Result<Self> {\n");
+    out.push_str("        self.config = Some(rocm_oxide::LaunchConfig::try_for_num_elems_with_block_size(num_elems, block_x)?);\n");
+    out.push_str("        Ok(self)\n");
+    out.push_str("    }\n\n");
+    out.push_str("    pub fn on_stream(mut self, stream: &'a rocm_oxide::Stream) -> Self {\n");
+    out.push_str("        self.stream = Some(stream);\n");
+    out.push_str("        self\n");
+    out.push_str("    }\n\n");
+    out.push_str("    fn require_config(&self) -> rocm_oxide::Result<rocm_oxide::LaunchConfig> {\n");
+    out.push_str("        self.config.ok_or_else(|| rocm_oxide::Error::InvalidLaunch(\n");
+    out.push_str(&format!(
+        "            \"generated launcher `{method_name}` has no launch config; call `.grid_for(...)`, `.try_grid_for(...)`, or `.config(...)` before `.launch(...)`\".to_string()\n"
+    ));
+    out.push_str("        ))\n");
+    out.push_str("    }\n\n");
+    out.push_str(&format!(
+        "    pub unsafe fn launch(self{}) -> rocm_oxide::Result<()> {{\n",
+        generated_self_params(&params)
+    ));
+    out.push_str("        let config = self.require_config()?;\n");
+    out.push_str("        match self.stream {\n");
+    out.push_str("            Some(stream) => unsafe {\n");
+    out.push_str(&format!(
+        "                self.kernels.{method_name}_on_stream(stream, config{}{})\n",
+        if call_args.is_empty() { "" } else { ", " },
+        call_args.join(", ")
+    ));
+    out.push_str("            },\n");
+    out.push_str("            None => unsafe {\n");
+    out.push_str(&format!(
+        "                self.kernels.{method_name}(config{}{})\n",
+        if call_args.is_empty() { "" } else { ", " },
+        call_args.join(", ")
+    ));
+    out.push_str("            },\n");
+    out.push_str("        }\n");
+    out.push_str("    }\n\n");
+    if operation_supported {
+        out.push_str(&format!(
+            "    pub unsafe fn operation(self{}) -> rocm_oxide::Result<impl rocm_oxide::DeviceOperation<Output = rocm_oxide::KernelLaunchCompletion> + 'static> {{\n",
+            generated_self_params(&operation_params)
+        ));
+        out.push_str("        let config = self.require_config()?;\n");
+        out.push_str("        unsafe {\n");
+        out.push_str(&format!(
+            "            self.kernels.{method_name}_operation(config{}{})\n",
+            if call_args.is_empty() { "" } else { ", " },
+            call_args.join(", ")
+        ));
+        out.push_str("        }\n");
+        out.push_str("    }\n");
+    } else {
+        out.push_str(&format!(
+            "    // operation is intentionally omitted because `{method_name}_operation` is not generated.\n"
+        ));
+    }
+    out.push_str("}\n");
+    Ok(out)
+}
+
 fn scalar_arg_is_indirect_global_buffer(
     metadata: Option<&KernelObjectMetadata>,
     arg_name: &str,
@@ -5798,6 +5994,18 @@ fn kernel_field_name(name: &str) -> String {
 
 fn kernel_method_name(name: &str) -> String {
     to_snake_case(name)
+}
+
+fn kernel_launcher_type_name(name: &str) -> String {
+    format!("{}Launcher", to_pascal_case(name))
+}
+
+fn generated_self_params(params: &[String]) -> String {
+    if params.is_empty() {
+        String::new()
+    } else {
+        format!(", {}", params.join(", "))
+    }
 }
 
 fn generate_kernel_param_setup(launch_args: &[String], indent: &str) -> String {
@@ -6858,6 +7066,7 @@ pub unsafe extern "C" fn vector_add(
         assert!(binding.contains("validate_buffer_len(\"a\", a.len(), n)?"));
         assert!(binding.contains("out.as_mut_ptr()"));
         assert!(binding.contains("a.as_ptr()"));
+        assert!(binding.contains("pub fn vector_add_launcher(&self) -> VectorAddLauncher<'_>"));
         assert!(binding.contains("pub unsafe fn vector_add_operation"));
         assert!(binding.contains("pub unsafe fn vector_add_graph_node"));
         assert!(binding.contains("graph: &rocm_oxide::hip::Graph"));
@@ -6871,6 +7080,17 @@ pub unsafe extern "C" fn vector_add(
         assert!(binding.contains("__completion.keep_alive(kernel);"));
         assert!(binding.contains("__completion.keep_alive(out);"));
         assert!(binding.contains("__completion.keep_alive(a);"));
+
+        let launcher = super::generate_kernel_launcher_binding(&kernels[0], &BTreeMap::new(), None)
+            .expect("launcher binding should generate");
+        assert!(launcher.contains("pub struct VectorAddLauncher<'a>"));
+        assert!(launcher.contains("pub fn grid_for(self, num_elems: usize) -> Self"));
+        assert!(launcher.contains("pub fn try_grid_for(mut self, num_elems: usize) -> rocm_oxide::Result<Self>"));
+        assert!(launcher.contains("pub fn on_stream(mut self, stream: &'a rocm_oxide::Stream) -> Self"));
+        assert!(launcher.contains("pub unsafe fn launch(self, out: &rocm_oxide::DeviceBuffer<f32>, a: &rocm_oxide::DeviceBuffer<f32>, n: usize)"));
+        assert!(launcher.contains("self.kernels.vector_add(config, out, a, n)"));
+        assert!(launcher.contains("pub unsafe fn operation(self, out: std::sync::Arc<rocm_oxide::DeviceBuffer<f32>>, a: std::sync::Arc<rocm_oxide::DeviceBuffer<f32>>, n: usize)"));
+        assert!(launcher.contains("self.kernels.vector_add_operation(config, out, a, n)"));
     }
 
     #[test]

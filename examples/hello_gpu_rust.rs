@@ -98,7 +98,8 @@ fn main() -> Result<()> {
     let d_out = DeviceBuffer::<f32>::new(n)?;
 
     // ── Step 4: launch the kernel ─────────────────────────────────────────────
-    // The generated `vector_add` method:
+    // The generated launcher:
+    //   - picks a 1-D launch config with `.grid_for(n)`
     //   - takes typed `&DeviceBuffer<f32>` instead of raw pointers
     //   - validates buffer lengths match and buffers don't alias
     //   - builds the HIP argument array and calls hipLaunchKernel
@@ -106,8 +107,7 @@ fn main() -> Result<()> {
     // SAFETY: we hold d_a, d_b, d_out alive past this call and they don't
     //         alias each other (validated by the generated binding).
     unsafe {
-        kernels.vector_add(
-            LaunchConfig::for_num_elems(n),
+        kernels.vector_add_launcher().grid_for(n).launch(
             &d_out, // out: DeviceSliceMut<f32>
             &d_a,   // a:   DeviceSlice<f32>
             &d_b,   // b:   DeviceSlice<f32>

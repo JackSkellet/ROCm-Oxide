@@ -39,7 +39,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let math_input = DeviceBuffer::from_slice(&[4.0f32, 0.0, 1.0, -1.0])?;
     let math_out = DeviceBuffer::<f32>::new(30)?;
     unsafe {
-        kernels.math_intrinsics(LaunchConfig::for_num_elems(1), &math_out, &math_input)?;
+        kernels
+            .math_intrinsics_launcher()
+            .grid_for(1)
+            .launch(&math_out, &math_input)?;
     }
     rocm_oxide::hip::synchronize()?;
     let math = math_out.copy_to_vec()?;
@@ -336,7 +339,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     let debug_out = DeviceBuffer::<u32>::new(6)?;
     unsafe {
-        kernels.debug_helpers_probe(LaunchConfig::for_num_elems(1), &debug_out)?;
+        kernels
+            .debug_helpers_probe_launcher()
+            .grid_for(1)
+            .launch(&debug_out)?;
     }
     rocm_oxide::hip::synchronize()?;
     let debug = debug_out.copy_to_vec()?;

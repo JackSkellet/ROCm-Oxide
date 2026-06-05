@@ -213,12 +213,13 @@ normal workflows. It implements the full Rust → GPU pipeline:
 
 ## Generated typed bindings
 
-`rocm-oxide-build` emits a `DeviceKernels` struct with one method per
-`#[kernel]` function. The method signature matches the kernel exactly but
-accepts host-side types: both `DeviceSlice<T>` and `DeviceSliceMut<T>` map to
-`&DeviceBuffer<T>` (shared reference). Mutability is handled internally by
-calling `.as_mut_ptr()` or `.as_ptr()` depending on the kernel parameter kind.
-Runtime overlap and length checks are applied before launch.
+`rocm-oxide-build` emits a `DeviceKernels` struct with one validated method and
+one fluent launcher per `#[kernel]` function. The validated method signature
+matches the kernel exactly but accepts host-side types: both `DeviceSlice<T>`
+and `DeviceSliceMut<T>` map to `&DeviceBuffer<T>` (shared reference).
+Mutability is handled internally by calling `.as_mut_ptr()` or `.as_ptr()`
+depending on the kernel parameter kind. Runtime overlap and length checks are
+applied before launch.
 
 Include the bindings in `src/main.rs` (or `src/lib.rs`):
 
@@ -231,7 +232,7 @@ Then load and use:
 ```rust
 let kernels = DeviceKernels::load_embedded(&device)?;
 unsafe {
-    kernels.fill_indices(LaunchConfig::for_num_elems(n), &out, n)?;
+    kernels.fill_indices_launcher().grid_for(n).launch(&out, n)?;
 }
 ```
 

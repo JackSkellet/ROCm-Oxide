@@ -120,7 +120,7 @@ pub unsafe extern "C" fn vector_add(
 
 ## The generated typed binding
 
-`rocm-oxide-build` generates this method from the kernel signature:
+`rocm-oxide-build` generates this validated method from the kernel signature:
 
 ```rust
 pub unsafe fn vector_add(
@@ -138,6 +138,20 @@ Compared to using `launch!` with raw pointers, the generated method:
 - Validates that `out`, `a`, `b` do not overlap in device memory.
 - Expands each `DeviceSlice` into the `(ptr, len)` pair the ABI expects.
 
+It also generates a small launcher wrapper:
+
+```rust
+unsafe {
+    kernels
+        .vector_add_launcher()
+        .grid_for(n)
+        .launch(&d_out, &d_a, &d_b)?;
+}
+```
+
+The launcher delegates to the same validated method after building the
+`LaunchConfig`.
+
 ---
 
 ## The host code (examples/hello_gpu_rust.rs)
@@ -151,9 +165,12 @@ let d_a = DeviceBuffer::from_slice(&a)?;    // host → device copy
 let d_b = DeviceBuffer::from_slice(&b)?;
 let d_out = DeviceBuffer::<f32>::new(n)?;   // uninitialized output
 
-// Launch via the generated typed method.
+// Launch via the generated typed launcher.
 unsafe {
-    kernels.vector_add(LaunchConfig::for_num_elems(n), &d_out, &d_a, &d_b)?;
+    kernels
+        .vector_add_launcher()
+        .grid_for(n)
+        .launch(&d_out, &d_a, &d_b)?;
 }
 
 // Synchronize and read back.
@@ -161,7 +178,7 @@ rocm_oxide::hip::synchronize()?;
 let out = d_out.copy_to_vec()?;
 ```
 
-`LaunchConfig::for_num_elems(n)` computes a 1-D grid with 256 threads per block
+`.grid_for(n)` computes a 1-D grid with 256 threads per block
 (the default). The grid has enough blocks to cover all `n` elements.
 
 ---
