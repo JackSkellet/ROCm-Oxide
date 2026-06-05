@@ -59,7 +59,6 @@ Browse separated demos in `demo-projects/`:
 - `demo-projects/gravity-storm/`
 - `demo-projects/stress-gui/`
 - `demo-projects/raytrace-world/`
-- `demo-projects/raytrace-world-gpuarray/`
 - `demo-projects/rainbow-geometry/`
 - `demo-projects/possibilities-window/`
 - `demo-projects/compiler-feature-lab/`
