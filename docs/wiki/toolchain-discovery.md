@@ -12,6 +12,12 @@ path. It reports the complete toolchain surface needed by the build:
 - whether `core` can be built for `amdgcn-amd-amdhsa` with nightly
   `-Z build-std=core`.
 
+The default output is human-readable. `rocm-oxide-build --doctor --json` emits
+the same context, PASS/WARN/FAIL counts, diagnostics, and fixes as JSON.
+`rocm-oxide-build --doctor --github` emits only the copy-pasteable issue report
+block. The cargo wrapper forwards the same modes through `cargo rocm-oxide
+doctor --json` and `cargo rocm-oxide doctor --github`.
+
 ROCm tool lookup order is explicit:
 
 1. tool-specific overrides such as `ROCM_OXIDE_LLC`,

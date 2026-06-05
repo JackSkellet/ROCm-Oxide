@@ -75,7 +75,9 @@ cargo rocm-oxide doctor
 The doctor checks for `cargo`, `rustc` (nightly channel), the `amdgcn-amd-amdhsa`
 target, `rust-src`, `/dev/kfd` access, ROCm tools (`llc`, `clang`, `llvm-readelf`),
 `rocminfo`, GPU architecture, and a full `core` build probe. Each check prints
-`[PASS]`, `[WARN]`, or `[FAIL]`. Fix every `[FAIL]` before continuing.
+`[PASS]`, `[WARN]`, or `[FAIL]`. Fix every `[FAIL]` before continuing. Use
+`cargo rocm-oxide doctor --json` for automation or
+`cargo rocm-oxide doctor --github` when filing an issue.
 
 ---
 

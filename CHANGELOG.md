@@ -30,6 +30,8 @@ All notable ROCm-Oxide changes should be recorded here before a tagged release.
 - Added first-class `#[kernel_contract(...)]` syntax for Rust-device kernels,
   mapped onto the existing generated host validation and metadata contract
   machinery. The older `// rocm-oxide:` comment form remains supported.
+- Added `cargo rocm-oxide doctor --json` and `--github` report modes for
+  automation and issue-ready diagnostics.
 
 ### SDK onboarding and diagnostics (2026-06)
 

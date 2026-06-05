@@ -24,7 +24,7 @@ fn run() -> Result<(), String> {
     args.remove(0);
 
     match command.as_str() {
-        "doctor" => run_build_tool(["--doctor"], &[]),
+        "doctor" => run_build_tool(["--doctor"], &args),
         "build" => run_build_tool(std::iter::empty::<&str>(), &args),
         "run" => cargo_run(&args),
         "debug" => cargo_debug(&args),
@@ -45,7 +45,7 @@ fn run() -> Result<(), String> {
 fn print_help() {
     println!(
         "Usage:
-    cargo rocm-oxide doctor
+    cargo rocm-oxide doctor [--json|--github]
     cargo rocm-oxide build [-- --arch <gfx arch>]
     cargo rocm-oxide run [cargo-run-args]
     cargo rocm-oxide debug [cargo-run-args]

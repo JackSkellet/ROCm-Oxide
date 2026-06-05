@@ -201,6 +201,36 @@ fn verify_routes_to_workspace_script_from_nested_directory() {
 }
 
 #[test]
+fn doctor_forwards_report_flags_to_build_tool() {
+    let project = TempProject::new();
+    let fake_build = project.root.join("fake-rocm-oxide-build");
+    let log = project.root.join("build.log");
+    write_executable(
+        &fake_build,
+        "#!/usr/bin/env bash\nprintf 'cwd=%s\\n' \"$PWD\" > \"$ROCM_OXIDE_BUILD_LOG\"\nprintf 'args=' >> \"$ROCM_OXIDE_BUILD_LOG\"\nprintf '[%s]' \"$@\" >> \"$ROCM_OXIDE_BUILD_LOG\"\nprintf '\\n' >> \"$ROCM_OXIDE_BUILD_LOG\"\n",
+    );
+
+    let output = Command::new(cargo_rocm_oxide())
+        .args(["rocm-oxide", "doctor", "--json"])
+        .current_dir(project.nested_workdir())
+        .env("ROCM_OXIDE_BUILD", &fake_build)
+        .env("ROCM_OXIDE_BUILD_LOG", &log)
+        .output()
+        .expect("failed to run cargo-rocm-oxide doctor");
+    assert!(
+        output.status.success(),
+        "doctor command failed: stdout={} stderr={}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let log = fs::read_to_string(log).expect("fake build tool did not write log");
+    assert_eq!(
+        log,
+        format!("cwd={}\nargs=[--doctor][--json]\n", project.root.display())
+    );
+}
+
+#[test]
 fn pipeline_routes_to_external_build_tool_from_consumer_project() {
     let project = TempProject::new();
     let metadata = project.root.join(

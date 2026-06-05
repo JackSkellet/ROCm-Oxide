@@ -191,7 +191,9 @@ cargo rocm-oxide doctor
 
 The doctor command checks the ROCm tools, GPU visibility, `/dev/kfd`,
 Rust toolchain, `rust-src`, workspace/scaffold context, and detected GPU target.
-It prints PASS/WARN/FAIL results plus a copy-pasteable GitHub issue block.
+It prints PASS/WARN/FAIL results plus a copy-pasteable GitHub issue block. Use
+`cargo rocm-oxide doctor --json` for machine-readable output or
+`cargo rocm-oxide doctor --github` for only the issue-ready report block.
 
 Full troubleshooting guide:
 
@@ -292,6 +294,8 @@ Common uses:
 | Command | Purpose |
 |---|---|
 | `cargo rocm-oxide doctor` | Check ROCm, Rust, GPU, and workspace setup |
+| `cargo rocm-oxide doctor --json` | Emit the same doctor report as JSON |
+| `cargo rocm-oxide doctor --github` | Emit only the issue-ready doctor report block |
 | `cargo rocm-oxide build` | Build device artifacts |
 | `cargo rocm-oxide check-consumer` | Validate a generated scaffold project |
 | `cargo rocm-oxide verify --quick` | Run the source-workspace quick verification gate |
@@ -471,7 +475,8 @@ Before filing a bug, please run:
 cargo rocm-oxide doctor
 ```
 
-and include the copy-pasteable diagnostic block in the issue.
+and include the copy-pasteable diagnostic block in the issue. `cargo rocm-oxide
+doctor --github` prints only that block.
 
 Issue templates are provided for:
 

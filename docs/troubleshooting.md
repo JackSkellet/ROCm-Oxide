@@ -3,6 +3,8 @@
 Run `cargo rocm-oxide doctor` first. It checks every prerequisite, prints
 PASS / WARN / FAIL for each item, and suggests a fix for every FAIL. Copy the
 block between the dashed markers into a GitHub issue when asking for help.
+`cargo rocm-oxide doctor --json` emits the same checks as JSON, and
+`cargo rocm-oxide doctor --github` prints only the issue-ready report block.
 
 ---
 
@@ -250,9 +252,8 @@ generated scaffold. For the most useful output, run doctor from either:
 
 ## Reporting a bug
 
-1. Run `cargo rocm-oxide doctor` from your ROCm-Oxide workspace.
-2. Copy everything between the `--- paste into GitHub issues ---` and
-   `--- end doctor report ---` lines.
+1. Run `cargo rocm-oxide doctor --github` from your ROCm-Oxide workspace.
+2. Copy the complete report block.
 3. Paste it into your issue along with the error message you saw.
 
 The block includes system info, environment variables, and the status of every

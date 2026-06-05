@@ -1,7 +1,7 @@
 use sha2::{Digest, Sha256};
 use std::collections::{BTreeMap, BTreeSet};
 use std::env;
-use std::ffi::OsStr;
+use std::ffi::{OsStr, OsString};
 use std::fs;
 use std::io::Read;
 use std::panic::{self, AssertUnwindSafe};
@@ -22,7 +22,7 @@ fn main() {
 fn run() -> Result<(), String> {
     let args = Args::parse()?;
     if args.doctor {
-        return doctor();
+        return doctor(args.doctor_output);
     }
     if let Some(path) = &args.inspect_metadata {
         return inspect_metadata(path);
@@ -229,21 +229,43 @@ struct Args {
     arch: Option<String>,
     output_stem: String,
     doctor: bool,
+    doctor_output: DoctorOutput,
     inspect_metadata: Option<PathBuf>,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum DoctorOutput {
+    Text,
+    Json,
+    Github,
 }
 
 impl Args {
     fn parse() -> Result<Self, String> {
+        Self::parse_from(env::args_os().skip(1))
+    }
+
+    fn parse_from<I>(args: I) -> Result<Self, String>
+    where
+        I: IntoIterator<Item = OsString>,
+    {
         let mut device_crate = PathBuf::from("device-spike");
         let mut arch = env::var("ROCM_OXIDE_ARCH").ok().filter(|s| !s.is_empty());
         let mut output_stem = "rocm_oxide_device_spike".to_string();
         let mut doctor = false;
+        let mut doctor_output = DoctorOutput::Text;
         let mut inspect_metadata = None;
 
-        let mut iter = env::args().skip(1);
+        let mut iter = args.into_iter();
         while let Some(arg) = iter.next() {
+            let arg = arg
+                .to_str()
+                .ok_or_else(|| "arguments must be valid UTF-8".to_string())?
+                .to_string();
             match arg.as_str() {
                 "--doctor" => doctor = true,
+                "--json" => set_doctor_output(&mut doctor_output, DoctorOutput::Json)?,
+                "--github" => set_doctor_output(&mut doctor_output, DoctorOutput::Github)?,
                 "--inspect-metadata" => {
                     inspect_metadata = Some(iter.next().map(PathBuf::from).ok_or_else(|| {
                         "--inspect-metadata requires a metadata path".to_string()
@@ -256,15 +278,22 @@ impl Args {
                         .ok_or_else(|| "--crate requires a path".to_string())?;
                 }
                 "--arch" => {
+                    let value = iter
+                        .next()
+                        .ok_or_else(|| "--arch requires a gfx target".to_string())?;
                     arch = Some(
-                        iter.next()
-                            .ok_or_else(|| "--arch requires a gfx target".to_string())?,
+                        value
+                            .into_string()
+                            .map_err(|_| "--arch requires valid UTF-8".to_string())?,
                     );
                 }
                 "--output-stem" => {
-                    output_stem = iter
+                    let value = iter
                         .next()
                         .ok_or_else(|| "--output-stem requires a filename stem".to_string())?;
+                    output_stem = value
+                        .into_string()
+                        .map_err(|_| "--output-stem requires valid UTF-8".to_string())?;
                 }
                 "--help" | "-h" => {
                     print_help();
@@ -273,20 +302,32 @@ impl Args {
                 _ => return Err(format!("unknown argument: {arg}")),
             }
         }
+        if !doctor && doctor_output != DoctorOutput::Text {
+            return Err("--json and --github are only valid with --doctor".to_string());
+        }
 
         Ok(Self {
             device_crate,
             arch,
             output_stem,
             doctor,
+            doctor_output,
             inspect_metadata,
         })
     }
 }
 
+fn set_doctor_output(current: &mut DoctorOutput, next: DoctorOutput) -> Result<(), String> {
+    if *current != DoctorOutput::Text && *current != next {
+        return Err("--json and --github are mutually exclusive".to_string());
+    }
+    *current = next;
+    Ok(())
+}
+
 fn print_help() {
     println!(
-        "Usage: rocm-oxide-build [--crate device-spike] [--arch <gfx arch>] [--output-stem name]\n       rocm-oxide-build --doctor\n       rocm-oxide-build --inspect-metadata path/to/metadata.json"
+        "Usage: rocm-oxide-build [--crate device-spike] [--arch <gfx arch>] [--output-stem name]\n       rocm-oxide-build --doctor [--json|--github]\n       rocm-oxide-build --inspect-metadata path/to/metadata.json"
     );
 }
 
@@ -318,6 +359,11 @@ struct Diag {
     fix: Option<String>,
 }
 
+struct DoctorReport {
+    context_lines: Vec<String>,
+    diags: Vec<Diag>,
+}
+
 impl Diag {
     fn pass(label: impl Into<String>, detail: impl Into<String>) -> Self {
         Self { level: DiagLevel::Pass, label: label.into(), detail: detail.into(), fix: None }
@@ -336,6 +382,39 @@ impl Diag {
             label: label.into(),
             detail: detail.into(),
             fix: Some(fix.into()),
+        }
+    }
+}
+
+impl DoctorReport {
+    fn pass_count(&self) -> usize {
+        self.diags
+            .iter()
+            .filter(|diag| diag.level == DiagLevel::Pass)
+            .count()
+    }
+
+    fn warn_count(&self) -> usize {
+        self.diags
+            .iter()
+            .filter(|diag| diag.level == DiagLevel::Warn)
+            .count()
+    }
+
+    fn fail_count(&self) -> usize {
+        self.diags
+            .iter()
+            .filter(|diag| diag.level == DiagLevel::Fail)
+            .count()
+    }
+
+    fn status(&self) -> &'static str {
+        if self.fail_count() > 0 {
+            "fail"
+        } else if self.warn_count() > 0 {
+            "warn"
+        } else {
+            "pass"
         }
     }
 }
@@ -584,7 +663,7 @@ fn check_rocm_agents_diag(tool: &ToolPath, arch: &str) -> Diag {
 }
 
 fn probe_core_build_for_doctor(arch: &str) -> Result<String, String> {
-    report_core_build_probe(arch).map(|()| {
+    core_build_probe(arch, false).map(|()| {
         format!("`core` builds for {TARGET} with nightly build-std")
     })
 }
@@ -623,29 +702,84 @@ fn print_fix_suggestions(diags: &[Diag]) {
 }
 
 fn print_github_issue_block(context_lines: &[String], diags: &[Diag]) {
-    println!("--- paste into GitHub issues ---");
+    print!("{}", format_github_issue_block(context_lines, diags));
+}
+
+fn format_github_issue_block(context_lines: &[String], diags: &[Diag]) -> String {
+    let mut out = String::new();
+    out.push_str("--- paste into GitHub issues ---\n");
     for line in context_lines {
-        println!("{line}");
+        out.push_str(line);
+        out.push('\n');
     }
-    println!();
+    out.push('\n');
     for diag in diags {
-        println!("[{}] {}: {}", diag.level.tag(), diag.label, diag.detail);
+        out.push_str(&format!(
+            "[{}] {}: {}\n",
+            diag.level.tag(),
+            diag.label,
+            diag.detail
+        ));
     }
-    println!("--- end doctor report ---");
+    out.push_str("--- end doctor report ---\n");
+    out
+}
+
+fn format_doctor_json_report(report: &DoctorReport) -> String {
+    let mut out = String::new();
+    out.push_str("{\n");
+    out.push_str("  \"tool\": \"rocm-oxide doctor\",\n");
+    out.push_str(&format!("  \"status\": \"{}\",\n", report.status()));
+    out.push_str(&format!("  \"pass_count\": {},\n", report.pass_count()));
+    out.push_str(&format!("  \"warn_count\": {},\n", report.warn_count()));
+    out.push_str(&format!("  \"fail_count\": {},\n", report.fail_count()));
+    out.push_str("  \"context\": [\n");
+    for (index, line) in report.context_lines.iter().enumerate() {
+        out.push_str("    \"");
+        out.push_str(&json_escape(line));
+        out.push('"');
+        if index + 1 != report.context_lines.len() {
+            out.push(',');
+        }
+        out.push('\n');
+    }
+    out.push_str("  ],\n");
+    out.push_str("  \"diagnostics\": [\n");
+    for (index, diag) in report.diags.iter().enumerate() {
+        out.push_str("    {\n");
+        out.push_str(&format!(
+            "      \"level\": \"{}\",\n",
+            json_escape(diag.level.tag())
+        ));
+        out.push_str(&format!(
+            "      \"label\": \"{}\",\n",
+            json_escape(&diag.label)
+        ));
+        out.push_str(&format!(
+            "      \"detail\": \"{}\",\n",
+            json_escape(&diag.detail)
+        ));
+        match &diag.fix {
+            Some(fix) => out.push_str(&format!("      \"fix\": \"{}\"\n", json_escape(fix))),
+            None => out.push_str("      \"fix\": null\n"),
+        }
+        out.push_str("    }");
+        if index + 1 != report.diags.len() {
+            out.push(',');
+        }
+        out.push('\n');
+    }
+    out.push_str("  ]\n");
+    out.push_str("}\n");
+    out
 }
 
 // ---------------------------------------------------------------------------
 // Doctor entry point
 // ---------------------------------------------------------------------------
 
-fn doctor() -> Result<(), String> {
+fn collect_doctor_report() -> DoctorReport {
     let context_lines = doctor_context_lines();
-
-    println!("ROCm-Oxide doctor");
-    println!("=================");
-    for line in &context_lines {
-        println!("{line}");
-    }
 
     let mut diags: Vec<Diag> = Vec::new();
     let rocm_path_fix = "add /opt/rocm/bin to PATH, or set ROCM_PATH=/path/to/rocm";
@@ -836,31 +970,63 @@ fn doctor() -> Result<(), String> {
         }
     }
 
-    // --- Output ---
-    print_diag_table(&diags);
-    print_fix_suggestions(&diags);
-    print_github_issue_block(&context_lines, &diags);
+    DoctorReport {
+        context_lines,
+        diags,
+    }
+}
 
-    let pass_count = diags.iter().filter(|d| d.level == DiagLevel::Pass).count();
-    let warn_count = diags.iter().filter(|d| d.level == DiagLevel::Warn).count();
-    let fail_count = diags.iter().filter(|d| d.level == DiagLevel::Fail).count();
+fn doctor(output: DoctorOutput) -> Result<(), String> {
+    let report = collect_doctor_report();
+    match output {
+        DoctorOutput::Text => {
+            println!("ROCm-Oxide doctor");
+            println!("=================");
+            for line in &report.context_lines {
+                println!("{line}");
+            }
+            print_diag_table(&report.diags);
+            print_fix_suggestions(&report.diags);
+            print_github_issue_block(&report.context_lines, &report.diags);
+        }
+        DoctorOutput::Json => {
+            print!("{}", format_doctor_json_report(&report));
+        }
+        DoctorOutput::Github => {
+            print_github_issue_block(&report.context_lines, &report.diags);
+        }
+    }
 
-    println!();
+    let pass_count = report.pass_count();
+    let warn_count = report.warn_count();
+    let fail_count = report.fail_count();
+
+    if output != DoctorOutput::Json {
+        println!();
+    }
     if fail_count > 0 {
-        println!(
-            "doctor: {pass_count} passed, {warn_count} warned, {fail_count} FAILED"
-        );
-        Err(format!(
-            "{fail_count} check(s) failed; see fix suggestions above\n\
-             Copy the output between the '--- paste into GitHub issues ---' markers when filing a bug report."
-        ))
+        if output != DoctorOutput::Json {
+            println!("doctor: {pass_count} passed, {warn_count} warned, {fail_count} FAILED");
+        }
+        if output == DoctorOutput::Json {
+            Err(format!("{fail_count} doctor check(s) failed"))
+        } else {
+            Err(format!(
+                "{fail_count} check(s) failed; see fix suggestions above\n\
+                 Copy the output between the '--- paste into GitHub issues ---' markers when filing a bug report."
+            ))
+        }
     } else if warn_count > 0 {
-        println!(
-            "doctor: {pass_count} passed, {warn_count} warned — prerequisites met with caveats"
-        );
+        if output != DoctorOutput::Json {
+            println!(
+                "doctor: {pass_count} passed, {warn_count} warned — prerequisites met with caveats"
+            );
+        }
         Ok(())
     } else {
-        println!("doctor: all {pass_count} checks passed");
+        if output != DoctorOutput::Json {
+            println!("doctor: all {pass_count} checks passed");
+        }
         Ok(())
     }
 }
@@ -1349,7 +1515,7 @@ fn rust_src_core_path() -> Result<PathBuf, String> {
     Ok(PathBuf::from(sysroot).join("lib/rustlib/src/rust/library/core/src/lib.rs"))
 }
 
-fn report_core_build_probe(arch: &str) -> Result<(), String> {
+fn core_build_probe(arch: &str, announce_success: bool) -> Result<(), String> {
     let probe_dir = create_core_probe_crate()?;
     let target_dir = probe_dir.join("target");
     let mut command = cargo_command();
@@ -1371,7 +1537,9 @@ fn report_core_build_probe(arch: &str) -> Result<(), String> {
         .map_err(with_core_build_hint);
     let _ = fs::remove_dir_all(&probe_dir);
     result?;
-    println!("ok: `core` builds for {TARGET} with nightly build-std");
+    if announce_success {
+        println!("ok: `core` builds for {TARGET} with nightly build-std");
+    }
     Ok(())
 }
 
@@ -5835,10 +6003,21 @@ impl LenExpr {
 }
 
 fn json_escape(value: &str) -> String {
-    value
-        .replace('\\', "\\\\")
-        .replace('"', "\\\"")
-        .replace('\n', "\\n")
+    let mut out = String::new();
+    for ch in value.chars() {
+        match ch {
+            '\\' => out.push_str("\\\\"),
+            '"' => out.push_str("\\\""),
+            '\n' => out.push_str("\\n"),
+            '\r' => out.push_str("\\r"),
+            '\t' => out.push_str("\\t"),
+            '\u{08}' => out.push_str("\\b"),
+            '\u{0c}' => out.push_str("\\f"),
+            ch if ch.is_control() => out.push_str(&format!("\\u{:04x}", ch as u32)),
+            ch => out.push(ch),
+        }
+    }
+    out
 }
 
 fn run_command(command: &mut Command, label: &str) -> Result<(), String> {
@@ -5994,6 +6173,74 @@ pub unsafe extern "C" fn helper() {}
         assert!(message.contains("[ROCM_PATH] /rocm/lib/llvm/bin/llc"));
         assert!(message.contains("[PATH] llc"));
         assert!(message.contains("ROCM_OXIDE_LLC=/path/to/llc"));
+    }
+
+    #[test]
+    fn doctor_args_accept_json_and_github_modes() {
+        let args = super::Args::parse_from([
+            std::ffi::OsString::from("--doctor"),
+            std::ffi::OsString::from("--json"),
+        ])
+        .expect("doctor --json should parse");
+        assert!(args.doctor);
+        assert_eq!(args.doctor_output, super::DoctorOutput::Json);
+
+        let args = super::Args::parse_from([
+            std::ffi::OsString::from("--doctor"),
+            std::ffi::OsString::from("--github"),
+        ])
+        .expect("doctor --github should parse");
+        assert_eq!(args.doctor_output, super::DoctorOutput::Github);
+
+        let err = super::Args::parse_from([std::ffi::OsString::from("--json")])
+            .expect_err("json should only be valid with doctor");
+        assert!(err.contains("only valid with --doctor"));
+
+        let err = super::Args::parse_from([
+            std::ffi::OsString::from("--doctor"),
+            std::ffi::OsString::from("--json"),
+            std::ffi::OsString::from("--github"),
+        ])
+        .expect_err("json and github modes should be exclusive");
+        assert!(err.contains("mutually exclusive"));
+    }
+
+    #[test]
+    fn formats_doctor_json_report() {
+        let report = super::DoctorReport {
+            context_lines: vec![
+                "context: source workspace".to_string(),
+                "env: ROCM_PATH=/opt/rocm".to_string(),
+            ],
+            diags: vec![
+                super::Diag::pass("cargo", "cargo 1.98.0-nightly"),
+                super::Diag::warn("optional \"tool\"", "missing\nline", "install it"),
+            ],
+        };
+
+        let json = super::format_doctor_json_report(&report);
+        assert!(json.contains("\"status\": \"warn\""));
+        assert!(json.contains("\"pass_count\": 1"));
+        assert!(json.contains("\"warn_count\": 1"));
+        assert!(json.contains("\"fail_count\": 0"));
+        assert!(json.contains("\"label\": \"optional \\\"tool\\\"\""));
+        assert!(json.contains("\"detail\": \"missing\\nline\""));
+        assert!(json.contains("\"fix\": \"install it\""));
+    }
+
+    #[test]
+    fn formats_github_issue_block() {
+        let context = vec!["context: source workspace".to_string()];
+        let diags = vec![super::Diag::fail(
+            "ROCm llc",
+            "not found",
+            "set ROCM_OXIDE_LLC",
+        )];
+
+        let block = super::format_github_issue_block(&context, &diags);
+        assert!(block.starts_with("--- paste into GitHub issues ---\n"));
+        assert!(block.contains("context: source workspace\n\n[FAIL] ROCm llc: not found\n"));
+        assert!(block.ends_with("--- end doctor report ---\n"));
     }
 
     #[test]
