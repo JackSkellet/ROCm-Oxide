@@ -38,6 +38,8 @@ All notable ROCm-Oxide changes should be recorded here before a tagged release.
 - Added the experimental `rocm_oxide::gpu` algorithms layer with reduce, scan,
   u32 sort/select/map helpers, byte fills, docs, and a root
   `gpu_algorithms` example.
+- Added the experimental `GpuTestContext` and `gpu_test!` macro for GPU-backed
+  Rust tests that skip cleanly when no HIP device is visible.
 
 ### SDK onboarding and diagnostics (2026-06)
 

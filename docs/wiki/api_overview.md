@@ -252,6 +252,7 @@ compile time — no file path needed at runtime.
 | `operation` | `ExecutionContext`, `StreamPool`, `DeviceOperation` (trait), `CapturedGraph` |
 | `hiprtc` | `SpecializationCache`, HIPRTC/COMGR compilation (internal) |
 | `profiling` | ROC-Tracer integration (internal) |
+| `testing` | `GpuTestContext`, `gpu_test!` |
 
 ### `Device`
 
@@ -310,6 +311,24 @@ gpu::sort(&mut sortable)?;
 `i32`, and `f32`. Sorting, select, unique, count, and map-add helpers currently
 target `u32`. Use `RocPrim` and `RocThrust` directly when you need explicit
 stream or temporary-storage control.
+
+### GPU Tests
+
+Use `gpu_test!` when a regular Rust test should run on machines with a visible
+HIP device and skip cleanly on host-only machines:
+
+```rust,ignore
+rocm_oxide::gpu_test!(device_buffer_round_trip, |gpu| {
+    eprintln!("running on {}", gpu.arch());
+    let buffer = rocm_oxide::DeviceBuffer::from_slice(&[1u32, 2, 3])?;
+    assert_eq!(buffer.copy_to_vec()?, [1, 2, 3]);
+    Ok(())
+});
+```
+
+The macro passes a `GpuTestContext` with the opened `Device`, ordinal,
+architecture, and launch limits. It treats `Error::NoDevice` as a skip and
+returns all other setup failures as test errors.
 
 ### `ManagedBuffer<T>`
 

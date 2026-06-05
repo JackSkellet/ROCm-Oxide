@@ -20,6 +20,8 @@ pub mod parity;
 /// Experimental rocTX profiling marker/range helpers.
 pub mod profiling;
 mod runtime;
+/// Experimental helpers for GPU-backed Rust tests.
+pub mod testing;
 
 pub use hip::{
     DeviceBuffer, DevicePod, DeviceVirtualMemory, Event, Global, Graph, GraphExec,
@@ -71,8 +73,9 @@ pub mod prelude {
     pub use crate::{
         Device, DeviceBuffer, DevicePod, DeviceSlice, DeviceSliceMut, Dim3, Error, Event, Global,
         Kernel, KernelMetadata, KernelResource, LaunchConfig, ManagedBuffer, Module,
-        PinnedHostBuffer, Result, RocTx, RocTxScopedRange, Stream, gpu, launch, validate_block_x,
-        validate_buffer_len, validate_device_buffers_disjoint, validate_launch_config,
+        PinnedHostBuffer, Result, RocTx, RocTxScopedRange, Stream, gpu, launch,
+        testing::GpuTestContext, validate_block_x, validate_buffer_len,
+        validate_device_buffers_disjoint, validate_launch_config,
     };
 }
 

@@ -41,6 +41,8 @@ ROCm feature exploration, but their exact shape is not stable yet:
 - `operation`: lazy stream/graph operation composition;
 - `profiling`: rocTX marker/range support;
 - `parity`: CUDA-to-ROCm planning structs and feature reports.
+- `testing`: GPU-backed Rust test helpers, including `GpuTestContext` and the
+  exported `gpu_test!` macro.
 
 Experimental APIs must still maintain memory-safety contracts and deterministic
 diagnostics, but they can be renamed or reshaped before a stable release.
