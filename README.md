@@ -18,8 +18,8 @@ It currently provides:
 - Device buffers, streams, events, and graph helpers
 - `cargo rocm-oxide` diagnostics, build, verification, pipeline, and profiling tools
 
-> **Status:** Experimental SDK preview  
-> **Branch:** `sdk-preview-0`  
+> **Status:** Experimental SDK preview
+> **Branch:** `main`
 > **Validated profiles:** `gfx1100`, `gfx1201`
 
 ROCm-Oxide is not production-stable yet. See
@@ -159,10 +159,13 @@ Move both together and the build stays intact. See
 
 Required:
 
-- ROCm 6.0+
+- ROCm 7.2 for release-gating validation
 - Rust installed with `rustup`
 - ROCm-supported AMD GPU
 - access to `/dev/kfd`
+
+ROCm 6.x and earlier 7.x releases may work for some host/runtime paths, but the
+current preview release gates are validated on ROCm 7.2.
 
 For Rust-authored device kernels:
 

@@ -78,13 +78,14 @@ These examples must build and run cleanly before tagging:
 | `vector_add` | HIP C++ via HIPRTC |
 | `pinned_stream_vector_add` | Pinned host memory + stream ordering |
 | `module_global` | Device global read/write |
-| `spectral_lattice -- --frames 3` | Headless visual smoke (PNG artifact) |
-| `compiler_feature_lab -- --frames 1` | Feature probe GUI headless path |
+| `cargo run --manifest-path demo-projects/spectral-lattice/Cargo.toml -- --frames 3` | Headless visual smoke (PNG artifact) |
+| `cargo run --manifest-path demo-projects/compiler-feature-lab/Cargo.toml -- --frames 1` | Feature probe GUI headless path |
 
 ### Tier 3 — Run manually, not blocking
 
-All other examples in `examples/`. Visual demos may require a display or
-accept `--frames N` for headless runs.
+All other root SDK examples in `examples/` and separated demo crates in
+`demo-projects/`. Visual demos may require a display or accept `--frames N` for
+headless runs.
 
 ---
 
@@ -102,9 +103,10 @@ These docs must exist, be accurate, and link correctly:
 | `docs/troubleshooting.md` | ✓ | Error-by-error guide |
 | `docs/project-generation.md` | ✓ | Scaffold docs |
 | `docs/api-stability.md` | ✓ | Stable vs experimental surface |
+| `docs/release-profile-template.md` | ✓ | Known-good machine record format |
 | `docs/wiki/stability-policy.md` | ✓ | Experimental SDK commitment |
 | `docs/wiki/supported-rocm-gpu-matrix.md` | ✓ | GPU/ROCm matrix |
-| `docs/release-gates.md` | ✓ | CI and promotion rules |
+| `docs/wiki/release-gates.md` | ✓ | CI and promotion rules |
 | `docs/wiki/release_checklist.md` | ✓ | This document |
 | `CHANGELOG.md` | ✓ | Unreleased section current |
 | `CONTRIBUTING.md` | ✓ | Issue templates, dev setup |
@@ -154,8 +156,9 @@ scripts/verify.sh --full
 
 Must pass on **both** `gfx1100` and `gfx1201`.
 
-Covers: all quick targets plus `spectral_lattice`, `performance_probe`, and the
-complete example battery. Produces `release_manifest.json`.
+Covers: all quick targets plus the separated `spectral-lattice`,
+`compiler-feature-lab`, `upscale-artifacts`, and `bvh-raytrace-benchmark` demo
+crates. Produces `release_manifest.json`.
 
 ---
 

@@ -45,15 +45,18 @@ and verified on `gfx1100` and `gfx1201`.
 
 ### 1.3 Examples and tests
 
+Root SDK examples stay in `examples/`; larger visual/capture/artifact demos are
+separated crates under `demo-projects/`.
+
 | Name | Kind | Notes |
 |---|---|---|
 | `vector_add` | HIP source | Compiles C++ HIP inline via HIPRTC |
 | `rust_device_add_one` | Rust device | Loads embedded HSACO, raw `launch!` |
 | `rust_device_vector_add` | Rust device | Generated HSACO, raw `launch!` |
 | `rust_device_generated_bindings` | Rust device | Uses `DeviceKernels` generated struct for typed launch |
-| `spectral_lattice` | Visual / headless | Multi-path render/compute, GUI controls, PNG export |
-| `matrix_lens` | Visual | Vulkan lens demo, GBM dma-buf, wlroots capture |
-| `compiler_feature_lab` | Feature probe GUI | Compiler/runtime/device feature slices |
+| `demo-projects/spectral-lattice` | Visual / headless | Multi-path render/compute, GUI controls, PNG export |
+| `demo-projects/matrix-lens` | Visual | Vulkan lens demo, GBM dma-buf, wlroots capture |
+| `demo-projects/compiler-feature-lab` | Feature probe GUI | Compiler/runtime/device feature slices |
 | `performance_probe` | Benchmark | Timing/resource JSON output |
 | `validation_profile` | Verification artifact | ROCm version, device caps, library availability |
 | `pinned_stream_vector_add` | Runtime | Pinned host memory + stream ordering |

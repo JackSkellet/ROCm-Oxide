@@ -312,7 +312,7 @@ Builds the HIP argument pointer array and calls `Kernel::launch_raw`. Supports
 
 ## Examples
 
-The `examples/` directory contains end-to-end programs:
+The root `examples/` directory contains SDK and diagnostic programs:
 
 | Example | Demonstrates |
 |---------|-------------|
@@ -325,10 +325,6 @@ The `examples/` directory contains end-to-end programs:
 | `pinned_stream_vector_add.rs` | Pinned host memory + streams |
 | `performance_probe.rs` | Occupancy, bandwidth, latency profiling |
 | `validation_profile.rs` | Verifying kernel correctness |
-| `gravity_storm.rs` | N-body simulation, compute-heavy |
-| `bvh_raytrace_benchmark.rs` | BVH ray tracing on GPU |
-| `matrix_lens.rs` | 2-D matrix kernel with shared memory |
-| `spectral_lattice.rs` | FFT-style wavefront pattern |
 
 Run HIPRTC-only examples directly, or enable the source-workspace `device-spike`
 feature for examples that use the repository's generated Rust-device bindings:
@@ -336,6 +332,15 @@ feature for examples that use the repository's generated Rust-device bindings:
 ```sh
 cargo run --example hello_gpu
 cargo run --features device-spike --example rust_device_vector_add
+```
+
+Larger visual, capture, artifact, and benchmark demos live under
+`demo-projects/` as separated crates. Run them with their own manifests, for
+example:
+
+```sh
+cargo run --manifest-path demo-projects/spectral-lattice/Cargo.toml -- --frames 3
+cargo run --manifest-path demo-projects/bvh-raytrace-benchmark/Cargo.toml
 ```
 
 ---

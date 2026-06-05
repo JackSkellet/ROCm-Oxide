@@ -12,7 +12,7 @@ using the ROCm-Oxide SDK.
 | Requirement | Detail |
 |-------------|--------|
 | AMD GPU | RDNA 2 (gfx1030+), RDNA 3 (gfx1100+), RDNA 4 (gfx1201+), or CDNA 2/3 |
-| Driver | AMDGPU 6.7+ (ships with ROCm 6.x) |
+| Driver | AMDGPU driver from the validated ROCm stack |
 
 Run `rocminfo | grep gfx` to confirm your GPU is visible and note the architecture
 string (e.g. `gfx1100`). You need this string when debugging build failures.
@@ -21,13 +21,16 @@ string (e.g. `gfx1100`). You need this string when debugging build failures.
 
 | Tool | Minimum version | Purpose |
 |------|----------------|---------|
-| ROCm | 6.0 (7.x preferred) | HIP runtime, HIPRTC, COMGR |
+| ROCm | 7.2 validated | HIP runtime, HIPRTC, COMGR |
 | Rust nightly | any recent nightly | `core` for `amdgcn-amd-amdhsa` target |
 | `rust-src` component | — | Required by `-Z build-std=core` |
 | `llc` (ROCm) | — | Lower LLVM IR → object file |
 | `clang` (ROCm) | — | Link objects → `.hsaco` code object |
 | `llvm-readelf` (ROCm) | — | Validate generated `.hsaco` |
 | `llvm-objdump` (ROCm) | — | Optional: disassemble kernels |
+
+ROCm 6.x and earlier 7.x releases may work for narrow HIPRTC/runtime paths, but
+the current SDK preview release gates are validated on ROCm 7.2.
 
 ROCm tools are split across two directories:
 

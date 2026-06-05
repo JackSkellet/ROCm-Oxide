@@ -4,6 +4,22 @@ All notable ROCm-Oxide changes should be recorded here before a tagged release.
 
 ## Unreleased
 
+### SDK preview restructure and release gates (2026-06)
+
+- Split large visual, capture, artifact, benchmark, and experimental demos out
+  of root `examples/` into standalone crates under `demo-projects/`.
+- Slimmed the root crate back to SDK/tutorial/diagnostic examples and removed
+  visual-demo dependencies from the root manifest.
+- Moved long-form design and historical docs into `docs/wiki/`, added
+  `docs/index.md`, and kept the maintained docs surface focused on onboarding,
+  troubleshooting, project generation, release process, and API stability.
+- Added conservative host and device preludes for the first abstraction pass.
+- Updated `scripts/verify.sh` so quick/full release gates use
+  `--features device-spike` for root Rust-device examples and
+  `--manifest-path demo-projects/.../Cargo.toml` for separated demo crates.
+- Added `docs/release-profile-template.md` for known-good release machine
+  records.
+
 ### SDK onboarding and diagnostics (2026-06)
 
 - **Doctor rewrite**: `cargo rocm-oxide doctor` now runs as a non-aborting
@@ -23,10 +39,10 @@ All notable ROCm-Oxide changes should be recorded here before a tagged release.
 - **`docs/troubleshooting.md`** (new): Comprehensive error-by-error guide
   covering Rust toolchain failures, `/dev/kfd` issues, ROCm tool discovery,
   `build.rs` panics, scaffold path issues, and bug reporting instructions.
-- **`docs/stability-policy.md`** (new): Explicit experimental-SDK stability
+- **`docs/wiki/stability-policy.md`** (new): Explicit experimental-SDK stability
   commitment covering API tiers, generated-bindings stability, crates.io
   status, and breaking-change definitions.
-- **`docs/release_checklist.md`** (new): First experimental tag gate covering
+- **`docs/wiki/release_checklist.md`** (new): First experimental tag gate covering
   required examples, required docs, required commands, supported platforms,
   supported ROCm versions, supported GPU architectures, known limitations, and
   the pre-release test matrix.
@@ -36,10 +52,10 @@ All notable ROCm-Oxide changes should be recorded here before a tagged release.
   to match new `[PASS]`/`[WARN]`/`[FAIL]` format, fixed `verify --quick`
   context (source workspace only), corrected `llc` path to
   `/opt/rocm/lib/llvm/bin/`.
-- **`docs/api_overview.md`** fixes: Corrected generated-binding type mapping
+- **`docs/wiki/api_overview.md`** fixes: Corrected generated-binding type mapping
   (`DeviceSliceMut<T>` → `&DeviceBuffer<T>`, not `&mut`), fixed example to use
   `&out` inside `unsafe {}`.
-- **`docs/hello_gpu_rust.md`** fixes: Corrected `llc` path in requirements,
+- **`docs/wiki/hello_gpu_rust.md`** fixes: Corrected `llc` path in requirements,
   troubleshooting, and the artifact disassembly command.
 
 ### Earlier (pre-2026-06)

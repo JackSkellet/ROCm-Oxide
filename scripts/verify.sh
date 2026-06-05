@@ -62,6 +62,25 @@ run() {
   fi
 }
 
+run_device_example() {
+  local example="$1"
+  shift
+  run cargo run --features device-spike --example "$example" -- "$@"
+}
+
+run_demo() {
+  local manifest="$1"
+  shift
+  run cargo run --manifest-path "$manifest" -- "$@"
+}
+
+run_demo_bin() {
+  local manifest="$1"
+  local bin="$2"
+  shift 2
+  run cargo run --manifest-path "$manifest" --bin "$bin" -- "$@"
+}
+
 audit_artifacts() {
   local validation_json="$ARTIFACT_DIR/validation_profile.json"
   local performance_json="$ARTIFACT_DIR/performance_probe.json"
@@ -614,28 +633,28 @@ run cargo test -- --test-threads=1
 run cargo run --manifest-path tools/cargo-rocm-oxide/Cargo.toml -- rocm-oxide doctor
 run cargo run --manifest-path tools/cargo-rocm-oxide/Cargo.toml -- rocm-oxide pipeline
 run cargo run --example vector_add
-run cargo run --example rust_device_generated_bindings
-run cargo run --example feature_showcase
+run_device_example rust_device_generated_bindings
+run_device_example feature_showcase
 run scripts/consumer-smoke.sh
 run cargo run --example validation_profile -- --json "$ARTIFACT_DIR/validation_profile.json"
-run cargo run --example performance_probe -- --json "$ARTIFACT_DIR/performance_probe.json"
-run cargo run --example spectral_lattice -- --frames 1 --mode chain --output "$ARTIFACT_DIR/spectral_lattice_chain.png"
+run_device_example performance_probe --json "$ARTIFACT_DIR/performance_probe.json"
+run_demo demo-projects/spectral-lattice/Cargo.toml --frames 1 --mode chain --output "$ARTIFACT_DIR/spectral_lattice_chain.png"
 
 if [[ "$PROFILE" == "full" ]]; then
-  run cargo run --example rust_device_add_one
-  run cargo run --example rust_device_vector_add
-  run cargo run --example compiler_feature_lab -- --frames 1
+  run_device_example rust_device_add_one
+  run_device_example rust_device_vector_add
+  run_demo demo-projects/compiler-feature-lab/Cargo.toml --frames 1
   run cargo run --example pinned_stream_vector_add
   run cargo run --example device_operation_chain
   run cargo run --example module_global
-  run cargo run --example depth_aware_upscale
-  run cargo run --example temporal_upscale
-  run cargo run --example bvh_raytrace_benchmark
-  run cargo run --example spectral_lattice -- --frames 3 --output "$ARTIFACT_DIR/spectral_lattice.png"
+  run_demo_bin demo-projects/upscale-artifacts/Cargo.toml depth_aware_upscale
+  run_demo_bin demo-projects/upscale-artifacts/Cargo.toml temporal_upscale
+  run_demo demo-projects/bvh-raytrace-benchmark/Cargo.toml
+  run_demo demo-projects/spectral-lattice/Cargo.toml --frames 3 --output "$ARTIFACT_DIR/spectral_lattice.png"
   for mode in core lds atomic chain; do
-    run cargo run --example spectral_lattice -- --frames 3 --mode "$mode" --output "$ARTIFACT_DIR/spectral_lattice_${mode}.png"
+    run_demo demo-projects/spectral-lattice/Cargo.toml --frames 3 --mode "$mode" --output "$ARTIFACT_DIR/spectral_lattice_${mode}.png"
   done
-  run cargo run --example spectral_lattice -- --frames 1 --mode chain --resolution 4k --fps-limit 120 --gpu-work 256 --output "$ARTIFACT_DIR/spectral_lattice_4k.png"
+  run_demo demo-projects/spectral-lattice/Cargo.toml --frames 1 --mode chain --resolution 4k --fps-limit 120 --gpu-work 256 --output "$ARTIFACT_DIR/spectral_lattice_4k.png"
   run cargo run
 fi
 
