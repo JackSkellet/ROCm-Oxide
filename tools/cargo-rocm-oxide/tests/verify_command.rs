@@ -352,6 +352,16 @@ fn new_project_scaffold_allows_default_pipeline() {
     );
     assert!(app.join("device-spike/Cargo.toml").is_file());
     assert!(app.join("device-spike/src/lib.rs").is_file());
+    let device_source = fs::read_to_string(app.join("device-spike/src/lib.rs"))
+        .expect("generated device source should be readable");
+    assert!(
+        device_source.contains("for_each_element(n, |i|"),
+        "generated starter should use the ergonomic element helper:\n{device_source}"
+    );
+    assert!(
+        device_source.contains("out.set(i, i.as_usize() as u32);"),
+        "generated starter should use bounded DeviceSliceMut::set:\n{device_source}"
+    );
     assert!(app.join("build.rs").is_file());
     let build_rs =
         fs::read_to_string(app.join("build.rs")).expect("build script should be readable");

@@ -220,18 +220,22 @@ Full troubleshooting guide:
 A Rust-authored GPU kernel looks like this:
 
 ```rust
+use rocm_oxide_device::prelude::*;
+use rocm_oxide_kernel::{kernel, kernel_contract};
+
+#[kernel_contract(len(out)=n, len(a)=n, len(b)=n)]
 #[kernel]
 pub unsafe extern "C" fn vector_add(
-    out: gpu::DeviceSliceMut<f32>,
-    a: gpu::DeviceSlice<f32>,
-    b: gpu::DeviceSlice<f32>,
+    out: DeviceSliceMut<f32>,
+    a: DeviceSlice<f32>,
+    b: DeviceSlice<f32>,
     n: usize,
 ) {
-    let idx = gpu::global_id_x();
-
-    if idx < n {
-        out[idx] = a[idx] + b[idx];
-    }
+    for_each_element(n, |i| {
+        if let (Some(lhs), Some(rhs)) = (a.read(i), b.read(i)) {
+            out.set(i, lhs + rhs);
+        }
+    });
 }
 ```
 

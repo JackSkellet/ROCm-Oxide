@@ -123,12 +123,12 @@ pub unsafe extern "C" fn add_one(
     out: gpu::DeviceSliceMut<f32>,
     input: gpu::DeviceSlice<f32>,
 ) {
-    let i = gpu::global_id_x();
-    if i < out.len() {
+    gpu::for_each_element(out.len(), |i| {
         let delta = unsafe { ADD_ONE_DELTA };
-        let value = unsafe { input.read_unchecked(i) };
-        unsafe { out.write_unchecked(i, value + delta) };
-    }
+        if let Some(value) = input.read(i) {
+            out.set(i, value + delta);
+        }
+    });
 }
 
 #[kernel]
@@ -137,12 +137,11 @@ pub unsafe extern "C" fn vector_add(
     a: gpu::DeviceSlice<f32>,
     b: gpu::DeviceSlice<f32>,
 ) {
-    let i = gpu::global_id_x();
-    if i < out.len() {
-        let lhs = unsafe { a.read_unchecked(i) };
-        let rhs = unsafe { b.read_unchecked(i) };
-        unsafe { out.write_unchecked(i, lhs + rhs) };
-    }
+    gpu::for_each_element(out.len(), |i| {
+        if let (Some(lhs), Some(rhs)) = (a.read(i), b.read(i)) {
+            out.set(i, lhs + rhs);
+        }
+    });
 }
 
 // rocm-oxide: len(out)=n
@@ -153,11 +152,11 @@ pub unsafe extern "C" fn generic_copy<T: Copy>(
     input: gpu::DeviceSlice<T>,
     n: usize,
 ) {
-    let i = gpu::global_id_x();
-    if i < n {
-        let value = unsafe { input.read_unchecked(i) };
-        unsafe { out.write_unchecked(i, value) };
-    }
+    gpu::for_each_element(n, |i| {
+        if let Some(value) = input.read(i) {
+            out.set(i, value);
+        }
+    });
 }
 
 // rocm-oxide: len(partials)=partial_count

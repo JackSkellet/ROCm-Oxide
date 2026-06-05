@@ -27,16 +27,15 @@
 //!
 //! ```rust,ignore
 //! #![no_std]
-//! use rocm_oxide_device as gpu;
-//! use rocm_oxide_kernel::kernel;
+//! use rocm_oxide_device::prelude::*;
+//! use rocm_oxide_kernel::{kernel, kernel_contract};
 //!
-//! // rocm-oxide: len(out)=n
+//! #[kernel_contract(len(out)=n)]
 //! #[kernel]
-//! pub unsafe extern "C" fn fill_indices(out: gpu::DeviceSliceMut<u32>, n: usize) {
-//!     let i = gpu::global_id_x();
-//!     if i < n {
-//!         unsafe { out.write_unchecked(i, i as u32) };
-//!     }
+//! pub unsafe extern "C" fn fill_indices(out: DeviceSliceMut<u32>, n: usize) {
+//!     for_each_element(n, |i| {
+//!         out.set(i, i.as_usize() as u32);
+//!     });
 //! }
 //! ```
 //!
@@ -341,19 +340,19 @@ pub mod math {
 /// # Example
 ///
 /// ```rust,ignore
-/// use rocm_oxide_device::{Vec3f, global_id_x};
+/// use rocm_oxide_device::prelude::*;
 ///
 /// #[kernel]
 /// pub unsafe extern "C" fn normalize_colors(
-///     out: gpu::DeviceSliceMut<Vec3f>,
-///     input: gpu::DeviceSlice<Vec3f>,
+///     out: DeviceSliceMut<Vec3f>,
+///     input: DeviceSlice<Vec3f>,
 ///     n: usize,
 /// ) {
-///     let i = global_id_x();
-///     if i < n {
-///         let color = unsafe { input.read_unchecked(i) };
-///         unsafe { out.write_unchecked(i, color.normalize_or_zero()) };
-///     }
+///     for_each_element(n, |i| {
+///         if let Some(color) = input.read(i) {
+///             out.set(i, color.normalize_or_zero());
+///         }
+///     });
 /// }
 /// ```
 pub mod vector {
@@ -2101,7 +2100,8 @@ pub fn grid_dim_z() -> u32 {
 
 /// Flattened global thread index along the X axis.
 ///
-/// This is the standard 1-D kernel index pattern:
+/// Prefer [`element_index`] or [`for_each_element`] for ordinary 1-D kernels.
+/// Use `global_id_x()` when raw offset math is the clearer fit:
 ///
 /// ```rust,ignore
 /// let i = gpu::global_id_x();
@@ -2974,6 +2974,7 @@ pub struct ThreadIndex {
 }
 
 impl ThreadIndex {
+    /// Return the current thread's linear 1-D global index.
     #[inline(always)]
     pub fn global_x() -> Self {
         Self {
@@ -2981,15 +2982,78 @@ impl ThreadIndex {
         }
     }
 
+    /// Return the raw `usize` value for this index.
+    ///
+    /// `get` is kept for compatibility. New code can use [`as_usize`](Self::as_usize)
+    /// when that reads more clearly in autocomplete lists.
     #[inline(always)]
     pub const fn get(self) -> usize {
         self.index
+    }
+
+    /// Return the raw `usize` value for this index.
+    #[inline(always)]
+    pub const fn as_usize(self) -> usize {
+        self.index
+    }
+
+    /// Return `true` when this thread's index is within `0..len`.
+    #[inline(always)]
+    pub const fn is_in_bounds(self, len: usize) -> bool {
+        self.index < len
+    }
+}
+
+impl From<ThreadIndex> for usize {
+    #[inline(always)]
+    fn from(index: ThreadIndex) -> Self {
+        index.index
     }
 }
 
 #[inline(always)]
 pub fn thread_index_x_witness() -> ThreadIndex {
     ThreadIndex::global_x()
+}
+
+/// Return the current thread's linear 1-D element index.
+///
+/// This is the intellisense-friendly alias for [`ThreadIndex::global_x`]. Use it
+/// when each GPU thread is responsible for one element in a buffer.
+///
+/// ```rust,ignore
+/// let i = element_index();
+/// if i.is_in_bounds(n) {
+///     out.set(i, 1.0);
+/// }
+/// ```
+#[inline(always)]
+pub fn element_index() -> ThreadIndex {
+    ThreadIndex::global_x()
+}
+
+/// Run `f` only for the current thread when its 1-D element index is in bounds.
+///
+/// This replaces the common `let i = global_id_x(); if i < n { ... }` boilerplate
+/// while still compiling to straight-line device code after inlining.
+///
+/// ```rust,ignore
+/// for_each_element(n, |i| {
+///     out.set(i, i.as_usize() as u32);
+/// });
+/// ```
+#[inline(always)]
+pub fn for_each_element<F>(len: usize, f: F) -> bool
+where
+    F: FnOnce(ThreadIndex),
+{
+    let index = element_index();
+    if index.is_in_bounds(len) {
+        f(index);
+        true
+    } else {
+        false
+    }
 }
 
 /// A read-only view of a device buffer passed into a kernel.
@@ -3004,15 +3068,15 @@ pub fn thread_index_x_witness() -> ThreadIndex {
 /// host bindings.
 ///
 /// ```rust,ignore
-/// use rocm_oxide_device::{DeviceSlice, global_id_x};
+/// use rocm_oxide_device::prelude::*;
 ///
 /// #[kernel]
 /// pub unsafe extern "C" fn read_kernel(input: DeviceSlice<f32>, n: usize) {
-///     let i = global_id_x();
-///     if i < n {
-///         let val = unsafe { input.read_unchecked(i) };
-///         // use val ...
-///     }
+///     for_each_element(n, |i| {
+///         if let Some(_val) = input.read(i) {
+///             // use _val ...
+///         }
+///     });
 /// }
 /// ```
 #[repr(C)]
@@ -3064,6 +3128,28 @@ impl<T> DeviceSlice<T> {
     {
         unsafe { ptr::read(self.get_unchecked(index)) }
     }
+
+    /// Read a copy of `T` at `index` when `index < self.len()`.
+    #[inline(always)]
+    pub fn read_at(self, index: usize) -> Option<T>
+    where
+        T: Copy,
+    {
+        if index < self.len {
+            Some(unsafe { self.read_unchecked(index) })
+        } else {
+            None
+        }
+    }
+
+    /// Read a copy of `T` for the current logical thread index when in bounds.
+    #[inline(always)]
+    pub fn read(self, index: ThreadIndex) -> Option<T>
+    where
+        T: Copy,
+    {
+        self.read_at(index.as_usize())
+    }
 }
 
 /// A mutable view of a device buffer passed into a kernel.
@@ -3072,17 +3158,18 @@ impl<T> DeviceSlice<T> {
 /// length). The build tool generates host-side glue that converts a
 /// `&DeviceBuffer<T>` output argument into the correct `(ptr, len)` pair.
 ///
-/// Use `write_unchecked` after a bounds check, or `write_for_thread` with a
-/// [`ThreadIndex`] witness to get bounds-checked writes without a separate `if`:
+/// Prefer [`set`](Self::set) with [`element_index`] or [`for_each_element`] for
+/// ordinary one-thread-per-element kernels. `write_unchecked` remains available
+/// after a caller-provided bounds check.
 ///
 /// ```rust,ignore
-/// use rocm_oxide_device::{DeviceSliceMut, thread_index_x_witness};
+/// use rocm_oxide_device::prelude::*;
 ///
 /// #[kernel]
 /// pub unsafe extern "C" fn write_kernel(out: DeviceSliceMut<f32>) {
-///     // Bounds-safe: write_for_thread only writes when the index is in range
-///     let i = thread_index_x_witness();
-///     out.write_for_thread(i, 42.0);
+///     for_each_element(out.len(), |i| {
+///         out.set(i, 42.0);
+///     });
 /// }
 /// ```
 #[repr(C)]
@@ -3155,15 +3242,44 @@ impl<T> DeviceSliceMut<T> {
         }
     }
 
+    /// Write `value` at `index` when `index < self.len()`.
     #[inline(always)]
-    pub fn write_for_thread(self, index: ThreadIndex, value: T) -> bool {
-        let index = index.get();
+    pub fn set_at(self, index: usize, value: T) -> bool {
         if index < self.len {
             unsafe { self.write_unchecked(index, value) };
             true
         } else {
             false
         }
+    }
+
+    /// Write `value` at the current logical thread index when in bounds.
+    #[inline(always)]
+    pub fn set(self, index: ThreadIndex, value: T) -> bool {
+        self.set_at(index.as_usize(), value)
+    }
+
+    #[inline(always)]
+    pub fn write_for_thread(self, index: ThreadIndex, value: T) -> bool {
+        self.set(index, value)
+    }
+
+    /// Read a copy of `T` at `index` when `index < self.len()`.
+    #[inline(always)]
+    pub fn read_at(self, index: usize) -> Option<T>
+    where
+        T: Copy,
+    {
+        self.as_const().read_at(index)
+    }
+
+    /// Read a copy of `T` for the current logical thread index when in bounds.
+    #[inline(always)]
+    pub fn read(self, index: ThreadIndex) -> Option<T>
+    where
+        T: Copy,
+    {
+        self.as_const().read(index)
     }
 }
 
@@ -3185,7 +3301,17 @@ impl<T> DisjointSliceMut<T> {
 
     #[inline(always)]
     pub fn write_for_thread(self, index: ThreadIndex, value: T) -> bool {
-        self.slice.write_for_thread(index, value)
+        self.slice.set(index, value)
+    }
+
+    #[inline(always)]
+    pub fn set(self, index: ThreadIndex, value: T) -> bool {
+        self.slice.set(index, value)
+    }
+
+    #[inline(always)]
+    pub fn set_at(self, index: usize, value: T) -> bool {
+        self.slice.set_at(index, value)
     }
 
     #[inline(always)]
@@ -3252,10 +3378,11 @@ pub mod prelude {
         WorkgroupAtomicI32, WorkgroupAtomicI64, WorkgroupAtomicU32, WorkgroupAtomicU64,
         WorkgroupBarrierToken, atomic_add_u32, atomic_load_u32, atomic_store_u32, ballot,
         block_dim_x, block_dim_y, block_dim_z, block_idx_x, block_idx_y, block_idx_z, dispatch_id,
-        global_id_x, global_id_y, global_id_z, grid_dim_x, grid_dim_y, grid_dim_z, is_first_lane,
-        lane_id, read_first_lane_u32, read_first_lane_u64, this_thread_block, this_wavefront,
-        thread_idx_x, thread_idx_y, thread_idx_z, thread_index_x_witness, tiled_partition,
-        wave_barrier, wave_id_in_workgroup, wavefront_size, workgroup_barrier,
+        element_index, for_each_element, global_id_x, global_id_y, global_id_z, grid_dim_x,
+        grid_dim_y, grid_dim_z, is_first_lane, lane_id, read_first_lane_u32, read_first_lane_u64,
+        this_thread_block, this_wavefront, thread_idx_x, thread_idx_y, thread_idx_z,
+        thread_index_x_witness, tiled_partition, wave_barrier, wave_id_in_workgroup,
+        wavefront_size, workgroup_barrier,
         workgroup_barrier_token,
     };
     pub use crate::{debug, math};

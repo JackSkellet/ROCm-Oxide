@@ -9,17 +9,16 @@
 //!
 //! ```rust,ignore
 //! #![no_std]
-//! use rocm_oxide_device as gpu;
+//! use rocm_oxide_device::prelude::*;
 //! use rocm_oxide_kernel::{kernel, kernel_contract, device_global, shared};
 //!
 //! // A simple non-generic kernel
 //! #[kernel_contract(len(out)=n)]
 //! #[kernel]
-//! pub unsafe extern "C" fn fill_indices(out: gpu::DeviceSliceMut<u32>, n: usize) {
-//!     let i = gpu::global_id_x();
-//!     if i < n {
-//!         unsafe { out.write_unchecked(i, i as u32) };
-//!     }
+//! pub unsafe extern "C" fn fill_indices(out: DeviceSliceMut<u32>, n: usize) {
+//!     for_each_element(n, |i| {
+//!         out.set(i, i.as_usize() as u32);
+//!     });
 //! }
 //!
 //! // A generic kernel monomorphized at build time
@@ -65,16 +64,16 @@ use syn::{
 /// ```rust,ignore
 /// #[kernel]
 /// pub unsafe extern "C" fn vector_add(
-///     out: gpu::DeviceSliceMut<f32>,
-///     a: gpu::DeviceSlice<f32>,
-///     b: gpu::DeviceSlice<f32>,
+///     out: DeviceSliceMut<f32>,
+///     a: DeviceSlice<f32>,
+///     b: DeviceSlice<f32>,
 ///     n: usize,
 /// ) {
-///     let i = gpu::global_id_x();
-///     if i < n {
-///         let sum = unsafe { *a.get_unchecked(i) + *b.get_unchecked(i) };
-///         unsafe { out.write_unchecked(i, sum) };
-///     }
+///     for_each_element(n, |i| {
+///         if let (Some(lhs), Some(rhs)) = (a.read(i), b.read(i)) {
+///             out.set(i, lhs + rhs);
+///         }
+///     });
 /// }
 /// ```
 ///

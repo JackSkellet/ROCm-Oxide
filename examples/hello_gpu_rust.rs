@@ -40,12 +40,11 @@
 //!     a:   DeviceSlice<f32>,
 //!     b:   DeviceSlice<f32>,
 //! ) {
-//!     let i = global_id_x();
-//!     if i < out.len() {
-//!         let lhs = unsafe { a.read_unchecked(i) };
-//!         let rhs = unsafe { b.read_unchecked(i) };
-//!         unsafe { out.write_unchecked(i, lhs + rhs) };
-//!     }
+//!     for_each_element(out.len(), |i| {
+//!         if let (Some(lhs), Some(rhs)) = (a.read(i), b.read(i)) {
+//!             out.set(i, lhs + rhs);
+//!         }
+//!     });
 //! }
 //! ```
 

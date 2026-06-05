@@ -46,9 +46,9 @@ compiles them to the `.hsaco` code object.
 ```rust
 #[kernel]
 pub unsafe extern "C" fn vector_add(
-    a: gpu::DeviceSlice<f32>,
-    b: gpu::DeviceSlice<f32>,
-    out: gpu::DeviceSliceMut<f32>,
+    a: DeviceSlice<f32>,
+    b: DeviceSlice<f32>,
+    out: DeviceSliceMut<f32>,
     n: usize,
 ) { /* ... */ }
 ```
@@ -90,13 +90,21 @@ every kernel. Use it inside `device-spike/src/lib.rs`.
 | `block_dim_x/y/z()` | `blockDim.x/y/z` | `u32` |
 | `grid_dim_x/y/z()` | `gridDim.x/y/z` | `u32` |
 | `global_id_x/y/z()` | `blockIdx.x * blockDim.x + threadIdx.x` | `usize` |
+| `element_index()` | 1-D global element index wrapper | `ThreadIndex` |
+| `for_each_element(n, \|i\| ...)` | Run only when the 1-D element index is in bounds | `bool` |
 
 The most common pattern for a 1-D kernel:
 
 ```rust
-let i = gpu::global_id_x();
-if i < n { /* process element i */ }
+for_each_element(n, |i| {
+    /* process element i */
+});
 ```
+
+`ThreadIndex` exposes `i.as_usize()` for raw offset math and
+`i.is_in_bounds(len)` for explicit bounds checks. `DeviceSlice<T>::read(i)` and
+`DeviceSliceMut<T>::set(i, value)` accept `ThreadIndex` directly so rust-analyzer
+completion leads from the current element to safe bounded buffer access.
 
 ### Wavefront / lane utilities
 
@@ -180,6 +188,19 @@ Not for production: `trap()`, `breakpoint()`, `sleep(N)`, `dispatch_id()`,
 
 Both are `repr(C)` fat pointers (address + length). The build tool converts
 host `DeviceBuffer<T>` arguments into the correct `(ptr, len)` pairs.
+
+Prefer the bounded helpers in ordinary kernels:
+
+```rust
+for_each_element(n, |i| {
+    if let Some(value) = input.read(i) {
+        out.set(i, value + 1.0);
+    }
+});
+```
+
+For lower-level kernels, `read_unchecked(index)` and `write_unchecked(index,
+value)` remain available after a caller-provided bounds check.
 
 ---
 

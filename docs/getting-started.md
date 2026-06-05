@@ -109,19 +109,19 @@ my-gpu-project/
 
 ```rust
 use rocm_oxide_device::prelude::*;
-use rocm_oxide_kernel::kernel;
+use rocm_oxide_kernel::{kernel, kernel_contract};
 
+#[kernel_contract(len(out)=n)]
 #[kernel]
 pub unsafe extern "C" fn fill_indices(out: DeviceSliceMut<u32>, n: usize) {
-    let i = global_id_x();
-    if i < n {
-        unsafe { out.write_unchecked(i, i as u32) };
-    }
+    for_each_element(n, |i| {
+        out.set(i, i.as_usize() as u32);
+    });
 }
 ```
 
-Every thread writes its own global index into the output buffer. This is the
-simplest possible kernel that demonstrates the full Rust GPU pipeline.
+Every in-bounds thread writes its own global index into the output buffer. This
+is the simplest possible kernel that demonstrates the full Rust GPU pipeline.
 
 **`src/main.rs`** — Loads the compiled kernel and launches it:
 

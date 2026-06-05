@@ -84,21 +84,20 @@ mod generated {
 ## The kernel (device-spike/src/lib.rs)
 
 ```rust
-use rocm_oxide_device as gpu;
+use rocm_oxide_device::prelude::*;
 use rocm_oxide_kernel::kernel;
 
 #[kernel]
 pub unsafe extern "C" fn vector_add(
-    out: gpu::DeviceSliceMut<f32>,
-    a:   gpu::DeviceSlice<f32>,
-    b:   gpu::DeviceSlice<f32>,
+    out: DeviceSliceMut<f32>,
+    a:   DeviceSlice<f32>,
+    b:   DeviceSlice<f32>,
 ) {
-    let i = gpu::global_id_x();
-    if i < out.len() {
-        let lhs = unsafe { a.read_unchecked(i) };
-        let rhs = unsafe { b.read_unchecked(i) };
-        unsafe { out.write_unchecked(i, lhs + rhs) };
-    }
+    for_each_element(out.len(), |i| {
+        if let (Some(lhs), Some(rhs)) = (a.read(i), b.read(i)) {
+            out.set(i, lhs + rhs);
+        }
+    });
 }
 ```
 
@@ -110,11 +109,12 @@ pub unsafe extern "C" fn vector_add(
   for this attribute to know which functions to compile and expose.
 - `pub unsafe extern "C"` — required calling convention for GPU kernels. The
   `extern "C"` keeps the symbol name unmangled so the host can look it up by name.
-- `gpu::DeviceSliceMut<f32>` / `gpu::DeviceSlice<f32>` — `#[repr(C)]` fat
+- `DeviceSliceMut<f32>` / `DeviceSlice<f32>` — `#[repr(C)]` fat
   pointers carrying `(ptr, len)`. They are ABI-safe to pass through the kernel
   argument list and appear on the host side as `&DeviceBuffer<f32>`.
-- `gpu::global_id_x()` — returns `blockIdx.x * blockDim.x + threadIdx.x`.
-  The bounds check `i < out.len()` handles grids that are slightly larger than `n`.
+- `for_each_element(out.len(), |i| { ... })` — runs the closure only for
+  in-bounds 1-D element indices and gives autocomplete-friendly access to
+  `i.as_usize()`, `input.read(i)`, and `out.set(i, value)`.
 
 ---
 

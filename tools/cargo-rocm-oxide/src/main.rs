@@ -1310,10 +1310,9 @@ use rocm_oxide_kernel::{kernel, kernel_contract};
 #[kernel_contract(len(out)=n)]
 #[kernel]
 pub unsafe extern "C" fn fill_indices(out: DeviceSliceMut<u32>, n: usize) {
-    let index = global_id_x();
-    if index < n {
-        unsafe { out.write_unchecked(index, index as u32) };
-    }
+    for_each_element(n, |i| {
+        out.set(i, i.as_usize() as u32);
+    });
 }
 "#,
     )

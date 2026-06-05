@@ -14,6 +14,10 @@ All notable ROCm-Oxide changes should be recorded here before a tagged release.
   `docs/index.md`, and kept the maintained docs surface focused on onboarding,
   troubleshooting, project generation, release process, and API stability.
 - Added conservative host and device preludes for the first abstraction pass.
+- Added a second-pass device ergonomics layer: `element_index()`,
+  `for_each_element(...)`, `ThreadIndex::as_usize/is_in_bounds`, and bounded
+  `DeviceSlice::read` / `DeviceSliceMut::set` helpers for autocomplete-friendly
+  one-thread-per-element kernels.
 - Updated `scripts/verify.sh` so quick/full release gates use
   `--features device-spike` for root Rust-device examples and
   `--manifest-path demo-projects/.../Cargo.toml` for separated demo crates.
