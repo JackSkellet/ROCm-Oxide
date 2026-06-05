@@ -54,12 +54,17 @@ fn print_help() {
     cargo rocm-oxide profile [--trace] [--name NAME] [--pmc COUNTER[,COUNTER...]] [--output-directory DIR] [-- <program> ...]
     cargo rocm-oxide verify [--host-ci|--offline|--quick|--full]
     cargo rocm-oxide new <path>
+    cargo rocm-oxide new <path> --local ROCM_OXIDE_WORKSPACE
+    cargo rocm-oxide new <path> --path ROCM_OXIDE_WORKSPACE
+    cargo rocm-oxide new <path> --standalone
     cargo rocm-oxide check-consumer
 
 Notes:
-    new              Creates a LOCAL SCAFFOLD tied to this ROCm-Oxide workspace via
-                     relative paths. The project is not standalone and cannot be
-                     published to crates.io. Run from within the ROCm-Oxide workspace.
+    new              Creates a LOCAL SCAFFOLD tied to a ROCm-Oxide source workspace
+                     via relative paths. By default, run it from within the workspace.
+                     Use --local ROCM_OXIDE_WORKSPACE, or alias --path, when
+                     generating from another directory. --standalone is reserved
+                     until crates.io/release artifacts exist.
     check-consumer   Validates a generated scaffold project. Run from inside the
                      consumer project directory. Checks path dependencies, build.rs,
                      and rust-toolchain.toml.
@@ -735,30 +740,160 @@ fn extract_path_value(s: &str) -> Option<&str> {
     Some(&inner[start..start + end])
 }
 
-fn new_project(args: &[OsString]) -> Result<(), String> {
-    let Some(path) = args.first() else {
-        return Err("cargo rocm-oxide new requires a path".to_string());
+struct NewProjectArgs {
+    path: PathBuf,
+    source_workspace: Option<PathBuf>,
+    standalone: bool,
+}
+
+impl NewProjectArgs {
+    fn parse(args: &[OsString]) -> Result<Self, String> {
+        let mut path = None;
+        let mut source_workspace = None;
+        let mut standalone = false;
+        let mut index = 0;
+        while index < args.len() {
+            let arg = &args[index];
+            match arg.to_str() {
+                Some("--help") | Some("-h") => {
+                    print_new_project_help();
+                    std::process::exit(0);
+                }
+                Some("--local") | Some("--path") => {
+                    if standalone {
+                        return Err("`--local`/`--path` cannot be combined with `--standalone`".to_string());
+                    }
+                    if source_workspace.is_some() {
+                        return Err("only one --local/--path workspace may be provided".to_string());
+                    }
+                    index += 1;
+                    let Some(value) = args.get(index) else {
+                        return Err("--local requires a ROCm-Oxide workspace path".to_string());
+                    };
+                    source_workspace = Some(PathBuf::from(value));
+                }
+                Some(value) if value.starts_with("--local=") || value.starts_with("--path=") => {
+                    if standalone {
+                        return Err("`--local`/`--path` cannot be combined with `--standalone`".to_string());
+                    }
+                    if source_workspace.is_some() {
+                        return Err("only one --local/--path workspace may be provided".to_string());
+                    }
+                    let value = value
+                        .trim_start_matches("--local=")
+                        .trim_start_matches("--path=");
+                    if value.is_empty() {
+                        return Err("--local requires a ROCm-Oxide workspace path".to_string());
+                    }
+                    source_workspace = Some(PathBuf::from(value));
+                }
+                Some("--standalone") => {
+                    if source_workspace.is_some() {
+                        return Err("`--standalone` cannot be combined with `--local`/`--path`; standalone mode will use published packages once supported".to_string());
+                    }
+                    standalone = true;
+                }
+                Some(other) if other.starts_with('-') => {
+                    return Err(format!("unknown new option `{other}`"));
+                }
+                Some(_) => {
+                    if path.is_some() {
+                        return Err("cargo rocm-oxide new accepts exactly one project path".to_string());
+                    }
+                    path = Some(PathBuf::from(arg));
+                }
+                None => return Err("new arguments must be valid UTF-8".to_string()),
+            }
+            index += 1;
+        }
+        let Some(path) = path else {
+            return Err("cargo rocm-oxide new requires a path".to_string());
+        };
+        Ok(Self {
+            path,
+            source_workspace,
+            standalone,
+        })
+    }
+}
+
+fn print_new_project_help() {
+    println!(
+        "Usage:
+    cargo rocm-oxide new <path>
+    cargo rocm-oxide new <path> --local ROCM_OXIDE_WORKSPACE
+    cargo rocm-oxide new <path> --path ROCM_OXIDE_WORKSPACE
+    cargo rocm-oxide new <path> --standalone
+
+Options:
+    --local PATH      Use PATH as the ROCm-Oxide source workspace when generating
+                      from outside the workspace.
+    --path PATH       Alias for --local.
+    --standalone      Reserved for future crates.io/release-artifact scaffolds.
+
+The generated project uses relative path dependencies. It is not publishable to crates.io yet."
+    );
+}
+
+fn explicit_source_workspace_root(path: &Path) -> Result<PathBuf, String> {
+    let cwd = env::current_dir()
+        .map_err(|err| format!("failed to read current directory: {err}"))?;
+    let absolute = if path.is_absolute() {
+        path.to_path_buf()
+    } else {
+        cwd.join(path)
     };
-    let path = PathBuf::from(path);
+    let normalized = normalize_path(&absolute);
+    let root = normalized.canonicalize().unwrap_or(normalized);
+    let required = [
+        "Cargo.toml",
+        "tools/rocm-oxide-build/Cargo.toml",
+        "crates/rocm-oxide-device/Cargo.toml",
+        "crates/rocm-oxide-kernel/Cargo.toml",
+    ];
+    for relative in required {
+        if !root.join(relative).is_file() {
+            return Err(format!(
+                "--local workspace {} is missing {relative}",
+                root.display()
+            ));
+        }
+    }
+    Ok(root)
+}
+
+fn new_project(args: &[OsString]) -> Result<(), String> {
+    let args = NewProjectArgs::parse(args)?;
+    if args.standalone {
+        return Err(
+            "`cargo rocm-oxide new --standalone` is not supported yet.\n\
+             Standalone scaffolds require published `rocm-oxide`, `rocm-oxide-device`, \
+             `rocm-oxide-kernel`, and `rocm-oxide-build` artifacts.\n\
+             Use `cargo rocm-oxide new <path> --local <ROCm-Oxide workspace>` for now."
+                .to_string(),
+        );
+    }
+
+    let path = args.path;
     if path.exists() {
         return Err(format!("target already exists: {}", path.display()));
     }
 
-    // Require the source workspace to be reachable so we can compute correct
-    // relative paths. Running from outside the workspace is not supported yet.
-    let source_root = source_workspace_root().map_err(|_| {
-        "cargo rocm-oxide new must be run from within (or adjacent to) the \
-         ROCm-Oxide source workspace.\n\
-         hint: clone the workspace first, then cd into it and re-run:\n\
-           git clone https://github.com/JackSkellet/ROCm-Oxide.git\n\
-           cd ROCm-Oxide\n\
-           cargo rocm-oxide new <path>"
-            .to_string()
-    })?;
-    // Canonicalize once so components compare correctly on all platforms.
-    let source_root = source_root
-        .canonicalize()
-        .unwrap_or(source_root);
+    let source_root = if let Some(source_workspace) = args.source_workspace {
+        explicit_source_workspace_root(&source_workspace)?
+    } else {
+        // Require the source workspace to be reachable so we can compute correct
+        // relative paths.
+        let root = source_workspace_root().map_err(|_| {
+            "cargo rocm-oxide new could not find a ROCm-Oxide source workspace.\n\
+             hint: run from inside the workspace, or pass it explicitly:\n\
+               cargo rocm-oxide new <path> --local /path/to/ROCm-Oxide\n\
+             hint: clone the workspace first if needed:\n\
+               git clone https://github.com/JackSkellet/ROCm-Oxide.git"
+                .to_string()
+        })?;
+        root.canonicalize().unwrap_or(root)
+    };
 
     // Absolute path of the project that is about to be created. We cannot
     // canonicalize it yet (the directory does not exist), so we normalize
@@ -787,7 +922,7 @@ fn new_project(args: &[OsString]) -> Result<(), String> {
         "note: this project is a local scaffold tied to the ROCm-Oxide workspace at\n      \
          {} via relative path dependencies.\n      \
          Moving only the generated project will break the build.\n      \
-         See docs/scaffold-required-files.md for options.",
+         See docs/project-generation.md for options.",
         source_root.display()
     );
     println!();
@@ -849,13 +984,13 @@ lto = false
         path.join("device-spike/src/lib.rs"),
         r#"#![no_std]
 
-use rocm_oxide_device as gpu;
+use rocm_oxide_device::prelude::*;
 use rocm_oxide_kernel::kernel;
 
 // rocm-oxide: len(out)=n
 #[kernel]
-pub unsafe extern "C" fn fill_indices(out: gpu::DeviceSliceMut<u32>, n: usize) {
-    let index = gpu::global_id_x();
+pub unsafe extern "C" fn fill_indices(out: DeviceSliceMut<u32>, n: usize) {
+    let index = global_id_x();
     if index < n {
         unsafe { out.write_unchecked(index, index as u32) };
     }
@@ -866,13 +1001,13 @@ pub unsafe extern "C" fn fill_indices(out: gpu::DeviceSliceMut<u32>, n: usize) {
 
     fs::write(
         path.join("src/main.rs"),
-        r#"use rocm_oxide::{Device, DeviceBuffer, LaunchConfig};
+        r#"use rocm_oxide::prelude::*;
 
 mod generated {
     include!(env!("ROCM_OXIDE_DEVICE_BINDINGS"));
 }
 
-fn main() -> Result<(), Box<dyn std::error::Error>> {
+fn main() -> Result<()> {
     let device = Device::first()?;
     let kernels = generated::DeviceKernels::load_embedded(&device)?;
 
@@ -886,7 +1021,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let values = out.copy_to_vec()?;
     for (index, value) in values.iter().copied().enumerate() {
         if value != index as u32 {
-            return Err(format!("mismatch at {index}: got {value}").into());
+            return Err(Error::InvalidLaunch(format!("mismatch at {index}: got {value}")));
         }
     }
 
@@ -936,7 +1071,7 @@ This will:
 1. Open `device-spike/src/lib.rs`.
 2. Add a `#[kernel]` function. Length contracts (for the generated binding's
    runtime validation) are expressed as magic comments immediately before the
-   function — see `docs/kernel-contracts.md` in the ROCm-Oxide workspace.
+   function — see `docs/wiki/kernel-contracts.md` in the ROCm-Oxide workspace.
 3. `cargo run` picks up the change automatically.
 
 ## Portability
@@ -962,13 +1097,13 @@ pre-compiled build tool binary instead of using the source workspace. The
 `rocm-oxide` runtime dependency in `Cargo.toml` would still need to be updated
 to a crates.io version once one is published.
 
-See `docs/project_generation.md` in the ROCm-Oxide workspace for the full
+See `docs/project-generation.md` in the ROCm-Oxide workspace for the full
 portability roadmap.
 
 ## Prerequisites
 
 - AMD GPU (RDNA 2+, RDNA 3+, RDNA 4+, or CDNA 2/3)
-- ROCm 6.0+ at `/opt/rocm` (or set `ROCM_PATH`)
+- ROCm 7.2 validated at `/opt/rocm` (or set `ROCM_PATH`)
 - `/opt/rocm/bin` on `PATH` for ROCm executables such as `clang`
 - `/opt/rocm/lib/llvm/bin` on `PATH` for LLVM tools such as `llc` and `llvm-readelf`
 - Rust nightly with `rust-src` (selected by `rust-toolchain.toml` in this project)

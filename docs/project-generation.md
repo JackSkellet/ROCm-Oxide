@@ -16,8 +16,9 @@ alongside the ROCm-Oxide workspace, not for shipping or sharing independently.
 
 ### What is generated
 
-Running `cargo rocm-oxide new my-app` from inside the ROCm-Oxide workspace
-produces this layout:
+Running `cargo rocm-oxide new my-app` from inside the ROCm-Oxide workspace, or
+`cargo rocm-oxide new my-app --local /path/to/ROCm-Oxide` from another
+directory, produces this layout:
 
 ```
 my-app/
@@ -45,6 +46,28 @@ All dependency paths are computed relative at generation time:
 | `device-spike/Cargo.toml` `rocm-oxide-kernel = { path = ... }` | `device-spike/` | `../../ROCm-Oxide/crates/rocm-oxide-kernel` |
 
 No absolute paths are written.
+
+### Explicit local workspace
+
+Use `--local` when you want to generate a project from a directory that is not
+inside the ROCm-Oxide checkout:
+
+```sh
+cargo rocm-oxide new my-app --local /path/to/ROCm-Oxide
+```
+
+`--path` is an alias for `--local`:
+
+```sh
+cargo rocm-oxide new my-app --path ../ROCm-Oxide
+```
+
+Both forms still generate relative `path` dependencies. The option only makes
+the source workspace explicit; it does not make the scaffold standalone.
+
+`--standalone` is reserved and currently exits with an explanatory error. It
+will become available only after the runtime, device API, proc macro, and build
+tool can be consumed through crates.io or release artifacts.
 
 ---
 
@@ -162,9 +185,8 @@ runtime crate and the build tool.
 
 ## Future: standalone mode
 
-When the above blockers are resolved, `cargo rocm-oxide new` will support a
-`--standalone` flag that generates a fully self-contained project using crates.io
-version dependencies:
+When the above blockers are resolved, `cargo rocm-oxide new --standalone` will
+generate a fully self-contained project using crates.io version dependencies:
 
 ```toml
 [dependencies]

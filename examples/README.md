@@ -20,6 +20,10 @@ local device crate and do not use the source-workspace `device-spike` feature.
 | Device operation chain | `examples/device_operation_chain.rs` | `cargo run --example device_operation_chain` | Higher-level device operation and async composition path. |
 | Feature showcase | `examples/feature_showcase.rs` | `cargo run --features device-spike --example feature_showcase` | Broad SDK capability sample covering runtime, generated kernels, library probes, and profiling hooks. |
 
+`scripts/first-user-path.sh` runs the two hello examples plus the local
+`cargo rocm-oxide doctor` implementation. Keep it passing whenever the README
+first-run commands change.
+
 ## Rust-Device Examples
 
 These examples depend on `device-spike/`, `crates/rocm-oxide-device`, and

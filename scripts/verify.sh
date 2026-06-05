@@ -611,6 +611,7 @@ run_host_ci_checks() {
   run cargo fmt --check
   run bash -n scripts/verify.sh
   run bash -n scripts/consumer-smoke.sh
+  run bash -n scripts/first-user-path.sh
   run cargo package --allow-dirty --no-verify
 }
 
@@ -630,7 +631,7 @@ fi
 
 run python3 --version
 run cargo test -- --test-threads=1
-run cargo run --manifest-path tools/cargo-rocm-oxide/Cargo.toml -- rocm-oxide doctor
+run scripts/first-user-path.sh
 run cargo run --manifest-path tools/cargo-rocm-oxide/Cargo.toml -- rocm-oxide pipeline
 run cargo run --example vector_add
 run_device_example rust_device_generated_bindings

@@ -25,6 +25,7 @@ Run from the ROCm-Oxide repository root:
 ```sh
 git rev-parse HEAD
 cargo rocm-oxide doctor
+scripts/first-user-path.sh
 scripts/verify.sh --quick
 scripts/verify.sh --full
 cargo run --example validation_profile -- --json target/production-readiness/validation_profile.json
@@ -40,6 +41,7 @@ Run `scripts/verify.sh --host-ci` once per release candidate. Run
 |---|---|---|---|
 | Source commit | `git rev-parse HEAD` |  |  |
 | Doctor | `cargo rocm-oxide doctor` |  |  |
+| First-user path | `scripts/first-user-path.sh` |  |  |
 | Host CI | `scripts/verify.sh --host-ci` |  | `target/production-readiness/verify-host-ci.log` |
 | Offline | `scripts/verify.sh --offline` |  | `target/production-readiness/verify-offline.log` |
 | Quick GPU | `scripts/verify.sh --quick` |  | `target/production-readiness/verify-quick.log` |

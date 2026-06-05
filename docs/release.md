@@ -12,9 +12,13 @@ Run these from the repository root:
 cargo check
 cargo check --examples
 cargo check --features device-spike --examples
-cargo rocm-oxide doctor
+scripts/first-user-path.sh
 cargo rocm-oxide verify --quick
 ```
+
+`scripts/first-user-path.sh` is the README drift guard. It runs
+`hello_gpu`, `hello_gpu_rust`, and the local cargo-wrapper doctor command from
+the source workspace.
 
 Run every separated demo manifest:
 

@@ -25,6 +25,26 @@ impl TempWorkspace {
             "rocm-oxide-cli-test-{}-{stamp}",
             std::process::id()
         ));
+        fs::create_dir_all(&root).expect("failed to create fake workspace root");
+        fs::write(
+            root.join("Cargo.toml"),
+            "[package]\nname = \"rocm-oxide\"\nversion = \"0.0.0\"\nedition = \"2024\"\n",
+        )
+        .expect("failed to write fake runtime manifest");
+        fs::create_dir_all(root.join("crates/rocm-oxide-device"))
+            .expect("failed to create fake device crate");
+        fs::write(
+            root.join("crates/rocm-oxide-device/Cargo.toml"),
+            "[package]\nname = \"rocm-oxide-device\"\nversion = \"0.0.0\"\nedition = \"2024\"\n",
+        )
+        .expect("failed to write fake device manifest");
+        fs::create_dir_all(root.join("crates/rocm-oxide-kernel"))
+            .expect("failed to create fake kernel crate");
+        fs::write(
+            root.join("crates/rocm-oxide-kernel/Cargo.toml"),
+            "[package]\nname = \"rocm-oxide-kernel\"\nversion = \"0.0.0\"\nedition = \"2024\"\n",
+        )
+        .expect("failed to write fake kernel manifest");
         fs::create_dir_all(root.join("tools/rocm-oxide-build"))
             .expect("failed to create fake tool manifest directory");
         fs::create_dir_all(root.join("scripts")).expect("failed to create fake scripts directory");
@@ -147,6 +167,10 @@ fn help_lists_pipeline_debug_and_verify_commands() {
     assert!(
         stdout.contains("cargo rocm-oxide debug [cargo-run-args]"),
         "help output did not list debug command:\n{stdout}"
+    );
+    assert!(
+        stdout.contains("cargo rocm-oxide new <path> --local ROCM_OXIDE_WORKSPACE"),
+        "help output did not list new project options:\n{stdout}"
     );
 }
 
@@ -326,5 +350,91 @@ fn new_project_scaffold_allows_default_pipeline() {
             app.display()
         )
     );
+    let _ = fs::remove_dir_all(temp);
+}
+
+#[test]
+fn new_project_accepts_explicit_workspace_path() {
+    let workspace = TempWorkspace::new();
+    let temp = temp_root("rocm-oxide-new-local-project-test");
+    let app = temp.join("app");
+    fs::create_dir_all(&temp).expect("failed to create temp parent");
+
+    let output = Command::new(cargo_rocm_oxide())
+        .args([
+            "rocm-oxide",
+            "new",
+            "--path",
+            workspace.root.to_str().expect("workspace path should be utf-8"),
+            app.to_str().expect("app path should be utf-8"),
+        ])
+        .current_dir(&temp)
+        .output()
+        .expect("failed to run cargo-rocm-oxide new --path");
+    assert!(
+        output.status.success(),
+        "new --path command failed: stdout={} stderr={}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    let manifest = fs::read_to_string(app.join("Cargo.toml")).expect("manifest should be readable");
+    assert!(
+        manifest.contains("rocm-oxide = { path = "),
+        "generated manifest should use a local path dependency:\n{manifest}"
+    );
+    assert!(
+        !manifest.contains(&workspace.root.to_string_lossy().to_string()),
+        "generated manifest should not embed an absolute workspace path:\n{manifest}"
+    );
+
+    let output = Command::new(cargo_rocm_oxide())
+        .args(["rocm-oxide", "check-consumer"])
+        .current_dir(&app)
+        .output()
+        .expect("failed to run check-consumer");
+    assert!(
+        output.status.success(),
+        "check-consumer failed: stdout={} stderr={}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(
+        stdout.contains("all checks passed"),
+        "check-consumer did not pass generated --path scaffold:\n{stdout}"
+    );
+
+    let _ = fs::remove_dir_all(temp);
+}
+
+#[test]
+fn new_project_rejects_standalone_until_artifacts_exist() {
+    let temp = temp_root("rocm-oxide-new-standalone-project-test");
+    let app = temp.join("app");
+    fs::create_dir_all(&temp).expect("failed to create temp parent");
+
+    let output = run_cli(
+        &[
+            "rocm-oxide",
+            "new",
+            app.to_str().expect("app path should be utf-8"),
+            "--standalone",
+        ],
+        Path::new(env!("CARGO_MANIFEST_DIR")),
+    );
+    assert!(
+        !output.status.success(),
+        "standalone command unexpectedly succeeded: stdout={} stderr={}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains("new --standalone` is not supported yet"),
+        "standalone error was not actionable:\n{stderr}"
+    );
+    assert!(!app.exists(), "standalone failure should not create the project");
+
     let _ = fs::remove_dir_all(temp);
 }

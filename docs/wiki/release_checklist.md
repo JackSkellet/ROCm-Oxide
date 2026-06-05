@@ -125,8 +125,8 @@ These must all pass before tagging:
 scripts/verify.sh --host-ci
 ```
 
-Covers: formatting, script syntax, cargo package dry-run, proc-macro tests,
-build-tool unit tests, cargo-wrapper unit tests.
+Covers: formatting, script syntax, first-user script syntax, cargo package
+dry-run, proc-macro tests, build-tool unit tests, cargo-wrapper unit tests.
 
 ### ROCm offline (ROCm tools + libs required, GPU optional)
 
@@ -146,7 +146,7 @@ Must pass on **both** `gfx1100` and `gfx1201`.
 
 Covers: host/runtime unit tests, doctor, pipeline inspection, generated-binding
 GPU smoke, `feature_showcase`, consumer-smoke downstream compilation,
-`validation_profile` JSON output.
+the README first-user path, and `validation_profile` JSON output.
 
 ### Full GPU (live GPU required)
 
@@ -190,6 +190,7 @@ All of the following must be true:
 - [ ] `scripts/verify.sh --offline` passes on the release machine
 - [ ] `scripts/verify.sh --quick` passes on `gfx1100`
 - [ ] `scripts/verify.sh --quick` passes on `gfx1201`
+- [ ] `scripts/first-user-path.sh` passes on both release-gating profiles
 - [ ] `scripts/verify.sh --full` passes on `gfx1100` (or every failure documented with owner + follow-up)
 - [ ] `scripts/verify.sh --full` passes on `gfx1201` (same)
 - [ ] `validation_profile.json` retained for each GPU run

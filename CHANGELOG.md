@@ -17,8 +17,16 @@ All notable ROCm-Oxide changes should be recorded here before a tagged release.
 - Updated `scripts/verify.sh` so quick/full release gates use
   `--features device-spike` for root Rust-device examples and
   `--manifest-path demo-projects/.../Cargo.toml` for separated demo crates.
+- Added `scripts/first-user-path.sh` and wired it into live verification so the
+  README starter commands (`hello_gpu`, `hello_gpu_rust`, and doctor) are
+  release-gated.
 - Added `docs/release-profile-template.md` for known-good release machine
   records.
+- Added `cargo rocm-oxide new <path> --local <workspace>` and `--path` as an
+  alias so local scaffolds can be generated from outside the ROCm-Oxide checkout
+  while still using relative path dependencies.
+- Reserved `cargo rocm-oxide new --standalone` with a clear error until the
+  crates and build tool are publishable through crates.io or release artifacts.
 
 ### SDK onboarding and diagnostics (2026-06)
 

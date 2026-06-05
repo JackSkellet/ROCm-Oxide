@@ -153,6 +153,16 @@ The generated project uses relative `path` links back to this workspace.
 Move both together and the build stays intact. See
 [docs/project-generation.md](docs/project-generation.md) for portability options.
 
+If you run the generator from outside the ROCm-Oxide checkout, point it at the
+workspace explicitly:
+
+```sh
+cargo rocm-oxide new my-project --local /path/to/ROCm-Oxide
+```
+
+`--standalone` is reserved until the runtime, device API, proc macro, and build
+tool can be consumed through crates.io or release artifacts.
+
 ---
 
 ## Requirements
