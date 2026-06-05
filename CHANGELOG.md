@@ -21,6 +21,8 @@ All notable ROCm-Oxide changes should be recorded here before a tagged release.
 - Added rust-analyzer/VS Code editor support for the source checkout and
   generated projects: linked host/device manifests, build/run tasks, extension
   recommendations, and device-kernel snippets.
+- Added `GpuArray<T>` as a method-oriented wrapper around `DeviceBuffer<T>` for
+  discoverable host-side reduce, scan, map-add, fill, sort, and copy workflows.
 - Updated `scripts/verify.sh` so quick/full release gates use
   `--features device-spike` for root Rust-device examples and
   `--manifest-path demo-projects/.../Cargo.toml` for separated demo crates.

@@ -49,7 +49,24 @@ availability independently while the rest of ROCm-Oxide continues to run.
 
 `rocm_oxide::gpu` is the small host-side algorithms layer above the optional
 rocPRIM and rocThrust wrappers. It is intended for users who want common GPU
-operations before writing a custom kernel:
+operations before writing a custom kernel. The easiest path is `GpuArray<T>`,
+which wraps `DeviceBuffer<T>` with method-oriented helpers:
+
+```rust,ignore
+use rocm_oxide::GpuArray;
+
+let input = GpuArray::from_slice(&[1u32, 2, 3, 4])?;
+let sum = input.sum()?;
+
+let scan = input.exclusive_scan(0)?;
+let mapped = input.map_add(8)?;
+
+let mut sortable = GpuArray::from_slice(&[4u32, 1, 3, 2])?;
+sortable.sort()?;
+```
+
+The free-function layer remains available when you already own
+`DeviceBuffer<T>` values:
 
 ```rust,ignore
 use rocm_oxide::{DeviceBuffer, gpu};

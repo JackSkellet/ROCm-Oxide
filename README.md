@@ -16,7 +16,7 @@ It currently provides:
 - HIPRTC runtime compilation
 - COMGR/toolchain integration
 - Device buffers, streams, events, and graph helpers
-- `rocm_oxide::gpu` helpers for small rocPRIM/rocThrust-backed algorithms
+- `GpuArray` / `rocm_oxide::gpu` helpers for small rocPRIM/rocThrust-backed algorithms
 - `gpu_test!` and `GpuTestContext` helpers for GPU-backed Rust tests
 - `cargo rocm-oxide` diagnostics, build, verification, pipeline, and profiling tools
 

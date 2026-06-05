@@ -313,7 +313,23 @@ host with `copy_to_vec()`. Requires `T: Copy` for `from_slice` and
 ### `gpu` Algorithms
 
 The host-side `rocm_oxide::gpu` module provides small rocPRIM/rocThrust-backed
-helpers for useful GPU work without writing a custom kernel:
+helpers for useful GPU work without writing a custom kernel. The most
+discoverable surface is `GpuArray<T>`:
+
+```rust,ignore
+use rocm_oxide::GpuArray;
+
+let input = GpuArray::from_slice(&[1u32, 2, 3, 4])?;
+let sum = input.sum()?;
+
+let scan = input.exclusive_scan(0)?;
+let mapped = input.map_add(8)?;
+
+let mut sortable = GpuArray::from_slice(&[4u32, 1, 3, 2])?;
+sortable.sort()?;
+```
+
+The lower-level free functions work directly with `DeviceBuffer<T>`:
 
 ```rust,ignore
 use rocm_oxide::{DeviceBuffer, gpu};

@@ -7,6 +7,175 @@
 
 use crate::{DeviceBuffer, DevicePod, Result, RocPrim, RocThrust};
 
+/// A small method-oriented wrapper around [`DeviceBuffer`].
+///
+/// `GpuArray<T>` is intended for approachable host-side code and autocomplete:
+/// construct an array, call methods on it, and copy values back when needed.
+/// It does not own a separate runtime or scheduler; methods delegate to the
+/// free functions in this module and the underlying `DeviceBuffer`.
+///
+/// ```rust,ignore
+/// use rocm_oxide::gpu::GpuArray;
+///
+/// let input = GpuArray::from_slice(&[1u32, 2, 3, 4])?;
+/// let sum = input.sum()?;
+/// let mapped = input.map_add(8)?;
+/// let scanned = input.exclusive_scan(0)?;
+///
+/// assert_eq!(sum, 10);
+/// assert_eq!(mapped.to_vec()?, [9, 10, 11, 12]);
+/// assert_eq!(scanned.to_vec()?, [0, 1, 3, 6]);
+/// ```
+pub struct GpuArray<T> {
+    buffer: DeviceBuffer<T>,
+}
+
+impl<T> GpuArray<T> {
+    /// Wrap an existing device buffer.
+    pub fn from_buffer(buffer: DeviceBuffer<T>) -> Self {
+        Self { buffer }
+    }
+
+    /// Return the underlying device buffer.
+    pub fn into_buffer(self) -> DeviceBuffer<T> {
+        self.buffer
+    }
+
+    /// Borrow the underlying device buffer.
+    pub fn as_buffer(&self) -> &DeviceBuffer<T> {
+        &self.buffer
+    }
+
+    /// Mutably borrow the underlying device buffer.
+    pub fn as_mut_buffer(&mut self) -> &mut DeviceBuffer<T> {
+        &mut self.buffer
+    }
+
+    /// Number of elements in the array.
+    pub fn len(&self) -> usize {
+        self.buffer.len()
+    }
+
+    /// Returns `true` when the array has no elements.
+    pub fn is_empty(&self) -> bool {
+        self.buffer.is_empty()
+    }
+
+    /// Fill the array with zero bytes.
+    pub fn fill_zero(&self) -> Result<()> {
+        fill_zero(&self.buffer)
+    }
+
+    /// Fill the array with a byte pattern.
+    pub fn fill_bytes(&self, value: u8) -> Result<()> {
+        fill_bytes(&self.buffer, value)
+    }
+}
+
+impl<T: DevicePod> GpuArray<T> {
+    /// Allocate a zero-filled device array.
+    pub fn zeros(len: usize) -> Result<Self> {
+        let buffer = DeviceBuffer::<T>::new(len)?;
+        buffer.set_zero()?;
+        Ok(Self { buffer })
+    }
+}
+
+impl<T: Copy> GpuArray<T> {
+    /// Allocate a device array and upload `input`.
+    pub fn from_slice(input: &[T]) -> Result<Self> {
+        Ok(Self {
+            buffer: DeviceBuffer::from_slice(input)?,
+        })
+    }
+
+    /// Copy `input` into this existing device array.
+    pub fn copy_from_slice(&self, input: &[T]) -> Result<()> {
+        Ok(self.buffer.copy_from_host(input)?)
+    }
+}
+
+impl<T: Copy + Default> GpuArray<T> {
+    /// Copy this device array back to host memory.
+    pub fn to_vec(&self) -> Result<Vec<T>> {
+        Ok(self.buffer.copy_to_vec()?)
+    }
+}
+
+impl<T: ReduceSum> GpuArray<T> {
+    /// Sum all elements and return the scalar result on the host.
+    pub fn sum(&self) -> Result<T> {
+        reduce_sum(&self.buffer)
+    }
+}
+
+impl<T: PrefixSum> GpuArray<T> {
+    /// Return an array containing the inclusive prefix sum of this array.
+    pub fn inclusive_scan(&self) -> Result<Self> {
+        let output = DeviceBuffer::<T>::new(self.len())?;
+        inclusive_scan(&self.buffer, &output)?;
+        Ok(Self { buffer: output })
+    }
+
+    /// Return an array containing the exclusive prefix sum of this array.
+    pub fn exclusive_scan(&self, initial_value: T) -> Result<Self> {
+        let output = DeviceBuffer::<T>::new(self.len())?;
+        exclusive_scan(&self.buffer, &output, initial_value)?;
+        Ok(Self { buffer: output })
+    }
+}
+
+impl GpuArray<u32> {
+    /// Add `addend` to every element and return the mapped output array.
+    pub fn map_add(&self, addend: u32) -> Result<Self> {
+        let output = DeviceBuffer::<u32>::new(self.len())?;
+        map_add_u32(&self.buffer, &output, addend)?;
+        Ok(Self { buffer: output })
+    }
+
+    /// Sort this array in place.
+    pub fn sort(&mut self) -> Result<()> {
+        sort(&mut self.buffer)
+    }
+
+    /// Return a sorted copy of this array.
+    pub fn sorted(&self) -> Result<Self> {
+        let mut output = DeviceBuffer::<u32>::new(self.len())?;
+        self.buffer.copy_to_device(&output)?;
+        sort(&mut output)?;
+        Ok(Self { buffer: output })
+    }
+
+    /// Count elements equal to `value`.
+    pub fn count_eq(&self, value: u32) -> Result<usize> {
+        count_eq_u32(&self.buffer, value)
+    }
+}
+
+impl<T> AsRef<DeviceBuffer<T>> for GpuArray<T> {
+    fn as_ref(&self) -> &DeviceBuffer<T> {
+        self.as_buffer()
+    }
+}
+
+impl<T> AsMut<DeviceBuffer<T>> for GpuArray<T> {
+    fn as_mut(&mut self) -> &mut DeviceBuffer<T> {
+        self.as_mut_buffer()
+    }
+}
+
+impl<T> From<DeviceBuffer<T>> for GpuArray<T> {
+    fn from(buffer: DeviceBuffer<T>) -> Self {
+        Self::from_buffer(buffer)
+    }
+}
+
+impl<T> From<GpuArray<T>> for DeviceBuffer<T> {
+    fn from(array: GpuArray<T>) -> Self {
+        array.into_buffer()
+    }
+}
+
 /// Element types supported by [`reduce_sum`].
 pub trait ReduceSum: DevicePod + Default + Sized {
     fn reduce_sum(input: &DeviceBuffer<Self>) -> Result<Self>;
@@ -285,6 +454,36 @@ mod tests {
     }
 
     #[test]
+    fn gpu_array_methods_smoke_if_available() {
+        if !RocPrim::is_available() {
+            return;
+        }
+
+        let input = GpuArray::from_slice(&[1u32, 2, 3, 4]).expect("array upload");
+        assert_eq!(input.len(), 4);
+        assert_eq!(input.sum().expect("array reduce"), 10);
+        assert_eq!(
+            input
+                .exclusive_scan(0)
+                .expect("array exclusive scan")
+                .to_vec()
+                .expect("scan download"),
+            [0, 1, 3, 6]
+        );
+        assert_eq!(
+            input
+                .map_add(5)
+                .expect("array map add")
+                .to_vec()
+                .expect("map download"),
+            [6, 7, 8, 9]
+        );
+
+        let zeros = GpuArray::<u32>::zeros(4).expect("zero array");
+        assert_eq!(zeros.to_vec().expect("zero download"), [0, 0, 0, 0]);
+    }
+
+    #[test]
     fn gpu_sort_smoke_if_available() {
         if !RocThrust::is_available() {
             return;
@@ -308,5 +507,10 @@ mod tests {
         sort_by_key_u32(&mut keys, &mut values).expect("sort by key");
         assert_eq!(keys.copy_to_vec().expect("keys download"), [1, 2, 3]);
         assert_eq!(values.copy_to_vec().expect("values download"), [10, 20, 30]);
+
+        let mut array = GpuArray::from_slice(&[2u32, 4, 1, 1]).expect("array sort upload");
+        array.sort().expect("array sort");
+        assert_eq!(array.to_vec().expect("array sort download"), [1, 1, 2, 4]);
+        assert_eq!(array.count_eq(1).expect("array count"), 2);
     }
 }
