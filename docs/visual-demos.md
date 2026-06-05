@@ -14,6 +14,7 @@ windowing, Vulkan, image, capture, or presenter dependencies.
 | `demo-projects/rainbow-geometry/` | Minimal generated Rust kernel drawing a 2D rainbow/geometry frame. | `cd demo-projects/rainbow-geometry && cargo run -- --present vulkan --frames 300` |
 | `demo-projects/stress-gui/` | 2D and 3D ALU/bitwise stress patterns with bounded interactive work controls. | `cd demo-projects/stress-gui && cargo run --bin stress_test_gui -- --present vulkan --frames 300` |
 | `demo-projects/raytrace-world/` | Interactive raytraced world with camera movement, shadows, and reflections. | `cd demo-projects/raytrace-world && cargo run -- --present vulkan --frames 300` |
+| `demo-projects/raytrace-world-gpuarray/` | `raytrace-world` copy using `GpuArray<T>` host buffers for API/line-count comparison. | `cd demo-projects/raytrace-world-gpuarray && cargo run -- --present vulkan --frames 300` |
 | `demo-projects/possibilities-window/` | Combined showcase for generated kernels, runtime contract checks, HIPRTC/module globals, post effects, ray flags, and clickable tabs. | `cd demo-projects/possibilities-window && cargo run -- --present vulkan --frames 300` |
 | `demo-projects/compiler-feature-lab/` | CPU-rasterized dashboard of compiler/runtime/library probe results. | `cd demo-projects/compiler-feature-lab && cargo run -- --present vulkan --frames 1` |
 | `demo-projects/window-effects-lab/` | Captured-window effects pipeline with GPU upscaling/post effects and a left-side control panel. | `cd demo-projects/window-effects-lab && cargo run -- --present vulkan --frames 300 0` |

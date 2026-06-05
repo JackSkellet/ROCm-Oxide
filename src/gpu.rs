@@ -6,6 +6,7 @@
 //! stream control.
 
 use crate::{DeviceBuffer, DevicePod, Result, RocPrim, RocThrust};
+use std::ops::{Deref, DerefMut};
 
 /// A small method-oriented wrapper around [`DeviceBuffer`].
 ///
@@ -160,6 +161,20 @@ impl<T> AsRef<DeviceBuffer<T>> for GpuArray<T> {
 
 impl<T> AsMut<DeviceBuffer<T>> for GpuArray<T> {
     fn as_mut(&mut self) -> &mut DeviceBuffer<T> {
+        self.as_mut_buffer()
+    }
+}
+
+impl<T> Deref for GpuArray<T> {
+    type Target = DeviceBuffer<T>;
+
+    fn deref(&self) -> &Self::Target {
+        self.as_buffer()
+    }
+}
+
+impl<T> DerefMut for GpuArray<T> {
+    fn deref_mut(&mut self) -> &mut Self::Target {
         self.as_mut_buffer()
     }
 }

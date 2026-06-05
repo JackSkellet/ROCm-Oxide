@@ -18,6 +18,7 @@ Rust-first ROCm SDK.
 | `demo-projects/gravity-storm/` | `src/main.rs` | `cd demo-projects/gravity-storm && cargo run` | Vulkan particle app with custom interaction and external-memory presentation details. |
 | `demo-projects/stress-gui/` | `src/bin/*.rs` | `cd demo-projects/stress-gui && cargo run --bin stress_test_gui -- --present vulkan --frames 300` | Bounded 2D and 3D visual stress tools with shared controls and presenter dependencies. |
 | `demo-projects/raytrace-world/` | `src/main.rs` | `cd demo-projects/raytrace-world && cargo run -- --present vulkan --frames 300` | Interactive visual app with camera controls and generated Rust-device kernels. |
+| `demo-projects/raytrace-world-gpuarray/` | `src/main.rs` | `cd demo-projects/raytrace-world-gpuarray && cargo run -- --present vulkan --frames 300` | Copy of `raytrace-world` that uses `GpuArray<T>` host helpers for side-by-side API comparison. |
 | `demo-projects/rainbow-geometry/` | `src/main.rs` | `cd demo-projects/rainbow-geometry && cargo run -- --present vulkan --frames 300` | Minimal generated-kernel visual frame. |
 | `demo-projects/possibilities-window/` | `src/main.rs` | `cd demo-projects/possibilities-window && cargo run -- --present vulkan --frames 300` | Broad visual showcase with tabs, overlays, generated kernels, and contract checks. |
 | `demo-projects/compiler-feature-lab/` | `src/main.rs` | `cd demo-projects/compiler-feature-lab && cargo run -- --present vulkan --frames 1` | Dashboard-style probe runner; useful as a demo or diagnostic app. |
