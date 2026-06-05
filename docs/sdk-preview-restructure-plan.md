@@ -24,7 +24,7 @@ diagnostics, validation, and examples.
 | Docs during move | Done | `README.md`, `docs/index.md`, `examples/README.md`, `docs/visual-demos.md`, and project-generation docs point at the new layout. |
 | Condense documentation | Done for repo docs | Maintained docs are short and linked from `docs/index.md`; long-form notes are retained under `docs/wiki/` as wiki source. |
 | Improve abstractions | First pass done | Device preludes, `#[kernel_contract]`, generated launch builders, `rocm_oxide::gpu`, and `gpu_test!` are now available. |
-| Release readiness | Ready for preview-candidate review | Doctor JSON/GitHub modes, first-user-path gate, offline gate, and known-good release profile docs are in place. Tagging still needs an explicit release decision. |
+| Release readiness | gfx1201 full gate passed; gfx1100 still required before tag | Doctor JSON/GitHub modes, first-user-path gate, full local `gfx1201` gate, artifact audit, and known-good release profile docs are in place. The release checklist still requires the `gfx1100` quick/full gate before tagging. |
 
 ## Phase 1: Clean The Root
 
