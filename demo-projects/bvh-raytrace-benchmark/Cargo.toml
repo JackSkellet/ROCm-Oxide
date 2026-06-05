@@ -1,0 +1,10 @@
+[package]
+name = "rocm-oxide-demo-bvh-raytrace-benchmark"
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.85"
+publish = false
+
+[dependencies]
+rocm-oxide = { path = "../.." }
+image = "0.25"

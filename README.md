@@ -23,7 +23,7 @@ It currently provides:
 > **Validated profiles:** `gfx1100`, `gfx1201`
 
 ROCm-Oxide is not production-stable yet. See
-[docs/stability-policy.md](docs/stability-policy.md).
+[docs/api-stability.md](docs/api-stability.md).
 
 ---
 
@@ -78,7 +78,7 @@ not require the Rust device-kernel build pipeline.
 
 Walkthrough:
 
-- [docs/hello_gpu.md](docs/hello_gpu.md)
+- [docs/wiki/hello_gpu.md](docs/wiki/hello_gpu.md)
 
 ---
 
@@ -115,7 +115,7 @@ and generated consumer projects do not compile this reference kernel code.
 
 Walkthrough:
 
-- [docs/hello_gpu_rust.md](docs/hello_gpu_rust.md)
+- [docs/wiki/hello_gpu_rust.md](docs/wiki/hello_gpu_rust.md)
 
 ---
 
@@ -151,7 +151,7 @@ cargo run
 
 The generated project uses relative `path` links back to this workspace.
 Move both together and the build stays intact. See
-[docs/project_generation.md](docs/project_generation.md) for portability options.
+[docs/project-generation.md](docs/project-generation.md) for portability options.
 
 ---
 
@@ -255,7 +255,7 @@ be cloned and built independently on another machine.
 
 Details:
 
-- [docs/project_generation.md](docs/project_generation.md)
+- [docs/project-generation.md](docs/project-generation.md)
 - [docs/getting-started.md](docs/getting-started.md)
 
 ---
@@ -344,49 +344,26 @@ Validated machine profiles:
 
 See:
 
-- [docs/release_checklist.md](docs/release_checklist.md)
+- [docs/release.md](docs/release.md)
 - [docs/sdk-preview-restructure-plan.md](docs/sdk-preview-restructure-plan.md)
-- [docs/supported-rocm-gpu-matrix.md](docs/supported-rocm-gpu-matrix.md)
 
 ---
 
 ## Documentation
 
-### Start here
+Start with [docs/index.md](docs/index.md).
+
+Maintained docs:
 
 - [docs/getting-started.md](docs/getting-started.md)
-- [docs/api_overview.md](docs/api_overview.md)
-- [docs/hello_gpu.md](docs/hello_gpu.md)
-- [docs/hello_gpu_rust.md](docs/hello_gpu_rust.md)
-
-### Troubleshooting and setup
-
 - [docs/troubleshooting.md](docs/troubleshooting.md)
-- [docs/project_generation.md](docs/project_generation.md)
-- [docs/scaffold-required-files.md](docs/scaffold-required-files.md)
-- [docs/toolchain-discovery.md](docs/toolchain-discovery.md)
-- [docs/supported-rocm-gpu-matrix.md](docs/supported-rocm-gpu-matrix.md)
-
-### Architecture and safety
-
-- [DESIGN.md](DESIGN.md)
-- [docs/sdk_direction.md](docs/sdk_direction.md)
 - [docs/api-stability.md](docs/api-stability.md)
-- [docs/compiler-path.md](docs/compiler-path.md)
-- [docs/code-object-linking.md](docs/code-object-linking.md)
-- [docs/unsafe-audit.md](docs/unsafe-audit.md)
-- [docs/atomic-scopes.md](docs/atomic-scopes.md)
-- [docs/host-memory-coherence.md](docs/host-memory-coherence.md)
-- [docs/stream-ordered-allocation.md](docs/stream-ordered-allocation.md)
-- [docs/rocm-library-interop.md](docs/rocm-library-interop.md)
+- [docs/project-generation.md](docs/project-generation.md)
+- [docs/release.md](docs/release.md)
+- [docs/visual-demos.md](docs/visual-demos.md)
 
-### Release and contribution
-
-- [CHANGELOG.md](CHANGELOG.md)
-- [CONTRIBUTING.md](CONTRIBUTING.md)
-- [docs/stability-policy.md](docs/stability-policy.md)
-- [docs/release_checklist.md](docs/release_checklist.md)
-- [SECURITY.md](SECURITY.md)
+Long-form design notes and historical checklists are kept as wiki source under
+[docs/wiki/](docs/wiki/README.md).
 
 ---
 
@@ -412,22 +389,16 @@ cargo run --features device-spike --example performance_probe -- --json target/p
 Visual and experimental demos:
 
 ```sh
-cargo run --features 'device-spike visual-demos' --example spectral_lattice
-cargo run --features 'device-spike visual-demos' --example spectral_lattice -- --frames 3 --resolution 4k --fps-limit 120
-cargo run --features 'device-spike capture-demos' --example matrix_lens -- --resolution 720p --mode matrix
-cargo run --features 'device-spike visual-demos' --example compiler_feature_lab
-cargo run --features 'device-spike visual-demos' --example stress_test_gui
-cargo run --features 'device-spike visual-demos' --example stress_3d_gui
+cd demo-projects/spectral-lattice && cargo run -- --present vulkan --frames 3 --resolution 4k --fps-limit 120
+cd ../matrix-lens && cargo run -- --resolution 720p --mode matrix
+cd ../compiler-feature-lab && cargo run -- --present vulkan --frames 1
+cd ../stress-gui && cargo run --bin stress_test_gui -- --present vulkan --frames 300
 ```
 
-Separated demo projects are being moved under `demo-projects/` so they can own
-their manifests, README files, and demo-only dependencies. The first moved demo
-is `demo-projects/vulkan-plasma/`.
-
 Examples that use generated Rust-device bindings require
-`device-spike`. Visual demos also require `visual-demos`; capture demos such as
-`matrix_lens` require `capture-demos`. HIPRTC-only examples such as `hello_gpu`
-and `vector_add` do not need demo features.
+`device-spike` when run from the source root. Separated demo projects own their
+manifests, README files, and demo-only dependencies. HIPRTC-only examples such
+as `hello_gpu` and `vector_add` do not need demo features.
 
 For the full visual demo table, see:
 

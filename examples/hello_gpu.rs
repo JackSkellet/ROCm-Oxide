@@ -15,7 +15,7 @@
 //! Run with:
 //!   cargo run --example hello_gpu
 
-use rocm_oxide::{Device, DeviceBuffer, LaunchConfig};
+use rocm_oxide::prelude::*;
 
 /// A simple element-wise linear transform: `out[i] = a[i] + b[i]`.
 ///
@@ -31,7 +31,7 @@ void vector_add(float* out, const float* a, const float* b, unsigned long n) {
 }
 "#;
 
-fn main() -> Result<(), Box<dyn std::error::Error>> {
+fn main() -> Result<()> {
     // ── Step 1: open the first AMD GPU ──────────────────────────────────────
     let device = Device::first()?;
     println!("hello_gpu: device {} ({})", device.ordinal(), device.arch());
@@ -79,7 +79,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     for (i, ((&got, &a_i), &b_i)) in out.iter().zip(&a).zip(&b).enumerate() {
         let expected = a_i + b_i;
         if (got - expected).abs() > f32::EPSILON {
-            return Err(format!("mismatch at index {i}: got {got}, expected {expected}").into());
+            return Err(Error::InvalidLaunch(format!(
+                "mismatch at index {i}: got {got}, expected {expected}"
+            )));
         }
     }
 

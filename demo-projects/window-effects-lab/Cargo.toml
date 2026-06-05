@@ -1,0 +1,15 @@
+[package]
+name = "rocm-oxide-demo-window-effects-lab"
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.85"
+publish = false
+
+[dependencies]
+rocm-oxide = { path = "../.." }
+ash = "0.38"
+font8x8 = "0.3"
+image = "0.25"
+minifb = "0.28"
+sdl2 = "0.38"
+xcap = "0.9"

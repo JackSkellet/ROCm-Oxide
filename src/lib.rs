@@ -56,6 +56,24 @@ pub use runtime::{
     validate_launch_config_for_limits,
 };
 
+/// Common host-side imports for ROCm-Oxide applications.
+///
+/// This prelude is intentionally conservative. It re-exports the stable SDK
+/// path a new host application is most likely to need without pulling in every
+/// low-level HIP or ROCm-library experiment.
+///
+/// ```rust,ignore
+/// use rocm_oxide::prelude::*;
+/// ```
+pub mod prelude {
+    pub use crate::{
+        Device, DeviceBuffer, DevicePod, DeviceSlice, DeviceSliceMut, Dim3, Error, Event, Global,
+        Kernel, KernelMetadata, KernelResource, LaunchConfig, ManagedBuffer, Module,
+        PinnedHostBuffer, Result, RocTx, RocTxScopedRange, Stream, launch, validate_block_x,
+        validate_buffer_len, validate_device_buffers_disjoint, validate_launch_config,
+    };
+}
+
 /// Launch a GPU kernel with a typed argument list.
 ///
 /// # Syntax

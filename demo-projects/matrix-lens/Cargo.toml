@@ -1,0 +1,19 @@
+[package]
+name = "rocm-oxide-demo-matrix-lens"
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.85"
+publish = false
+
+[dependencies]
+rocm-oxide = { path = "../.." }
+ash = "0.38"
+image = "0.25"
+libwayshot-xcap = "0.3"
+pipewire = "0.9"
+rand = "0.9"
+sdl2 = "0.38"
+serde = { version = "1.0", features = ["derive"] }
+wayland-client = "0.31"
+xcap = "0.9"
+zbus = "5.6"

@@ -55,7 +55,7 @@ not part of the root crate's stable API.
 Before promoting an experimental API:
 
 - document every public `unsafe` function with a precise safety contract and
-  keep [Unsafe and FFI audit](unsafe-audit.md) current;
+  keep [Unsafe and FFI audit](wiki/unsafe-audit.md) current;
 - add invalid-input or invalid-order tests for the relevant FFI/lifetime edge;
 - verify the API through `cargo rocm-oxide verify --quick` on a live ROCm
   machine;

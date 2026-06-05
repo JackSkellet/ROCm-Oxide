@@ -82,9 +82,9 @@ docs that must stay accurate are:
 
 - `README.md`
 - `docs/getting-started.md`
-- `docs/project_generation.md`
+- `docs/project-generation.md`
 - `docs/troubleshooting.md`
-- `docs/release_checklist.md`
+- `docs/release.md`
 - the examples/demo catalogue
 
 The README should present one canonical first-user path. Demo docs should point

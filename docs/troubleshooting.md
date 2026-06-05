@@ -93,7 +93,7 @@ ls -la /dev/kfd
 ```
 
 If the module loads but the node is missing, check `dmesg | grep amdgpu` for
-firmware errors. See [docs/supported-rocm-gpu-matrix.md](supported-rocm-gpu-matrix.md).
+firmware errors. See [docs/wiki/supported-rocm-gpu-matrix.md](wiki/supported-rocm-gpu-matrix.md).
 
 ### `[FAIL] /dev/kfd: permission denied`
 
@@ -124,7 +124,7 @@ export ROCM_OXIDE_ARCH=gfx1201   # RX 9070 XT
 ```
 
 Valid gfx targets for supported GPUs are listed in
-[docs/supported-rocm-gpu-matrix.md](supported-rocm-gpu-matrix.md).
+[docs/wiki/supported-rocm-gpu-matrix.md](wiki/supported-rocm-gpu-matrix.md).
 
 ---
 

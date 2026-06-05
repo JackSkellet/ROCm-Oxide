@@ -1207,10 +1207,12 @@ pub mod atomic {
             AtomicScope::Workgroup => {
                 unsafe { WorkgroupAtomicU32::from_ptr(ptr) }.fetch_add(value, ordering)
             }
-            AtomicScope::Device => unsafe { DeviceAtomicU32::from_ptr(ptr) }
-                .fetch_add(value, ordering),
-            AtomicScope::System => unsafe { SystemAtomicU32::from_ptr(ptr) }
-                .fetch_add(value, ordering),
+            AtomicScope::Device => {
+                unsafe { DeviceAtomicU32::from_ptr(ptr) }.fetch_add(value, ordering)
+            }
+            AtomicScope::System => {
+                unsafe { SystemAtomicU32::from_ptr(ptr) }.fetch_add(value, ordering)
+            }
         }
     }
 
@@ -1225,10 +1227,8 @@ pub mod atomic {
             AtomicScope::Workgroup => {
                 unsafe { WorkgroupAtomicU32::from_ptr(ptr) }.store(value, ordering)
             }
-            AtomicScope::Device => unsafe { DeviceAtomicU32::from_ptr(ptr) }
-                .store(value, ordering),
-            AtomicScope::System => unsafe { SystemAtomicU32::from_ptr(ptr) }
-                .store(value, ordering),
+            AtomicScope::Device => unsafe { DeviceAtomicU32::from_ptr(ptr) }.store(value, ordering),
+            AtomicScope::System => unsafe { SystemAtomicU32::from_ptr(ptr) }.store(value, ordering),
         }
     }
 
@@ -1239,12 +1239,11 @@ pub mod atomic {
         ordering: AtomicOrdering,
     ) -> u32 {
         match scope {
-            AtomicScope::Workgroup => unsafe { WorkgroupAtomicU32::from_const_ptr(ptr) }
-                .load(ordering),
-            AtomicScope::Device => unsafe { DeviceAtomicU32::from_const_ptr(ptr) }
-                .load(ordering),
-            AtomicScope::System => unsafe { SystemAtomicU32::from_const_ptr(ptr) }
-                .load(ordering),
+            AtomicScope::Workgroup => {
+                unsafe { WorkgroupAtomicU32::from_const_ptr(ptr) }.load(ordering)
+            }
+            AtomicScope::Device => unsafe { DeviceAtomicU32::from_const_ptr(ptr) }.load(ordering),
+            AtomicScope::System => unsafe { SystemAtomicU32::from_const_ptr(ptr) }.load(ordering),
         }
     }
 
@@ -1259,10 +1258,12 @@ pub mod atomic {
             AtomicScope::Workgroup => {
                 unsafe { WorkgroupAtomicI32::from_ptr(ptr) }.fetch_add(value, ordering)
             }
-            AtomicScope::Device => unsafe { DeviceAtomicI32::from_ptr(ptr) }
-                .fetch_add(value, ordering),
-            AtomicScope::System => unsafe { SystemAtomicI32::from_ptr(ptr) }
-                .fetch_add(value, ordering),
+            AtomicScope::Device => {
+                unsafe { DeviceAtomicI32::from_ptr(ptr) }.fetch_add(value, ordering)
+            }
+            AtomicScope::System => {
+                unsafe { SystemAtomicI32::from_ptr(ptr) }.fetch_add(value, ordering)
+            }
         }
     }
 
@@ -1277,10 +1278,8 @@ pub mod atomic {
             AtomicScope::Workgroup => {
                 unsafe { WorkgroupAtomicI32::from_ptr(ptr) }.store(value, ordering)
             }
-            AtomicScope::Device => unsafe { DeviceAtomicI32::from_ptr(ptr) }
-                .store(value, ordering),
-            AtomicScope::System => unsafe { SystemAtomicI32::from_ptr(ptr) }
-                .store(value, ordering),
+            AtomicScope::Device => unsafe { DeviceAtomicI32::from_ptr(ptr) }.store(value, ordering),
+            AtomicScope::System => unsafe { SystemAtomicI32::from_ptr(ptr) }.store(value, ordering),
         }
     }
 
@@ -1291,12 +1290,11 @@ pub mod atomic {
         ordering: AtomicOrdering,
     ) -> i32 {
         match scope {
-            AtomicScope::Workgroup => unsafe { WorkgroupAtomicI32::from_const_ptr(ptr) }
-                .load(ordering),
-            AtomicScope::Device => unsafe { DeviceAtomicI32::from_const_ptr(ptr) }
-                .load(ordering),
-            AtomicScope::System => unsafe { SystemAtomicI32::from_const_ptr(ptr) }
-                .load(ordering),
+            AtomicScope::Workgroup => {
+                unsafe { WorkgroupAtomicI32::from_const_ptr(ptr) }.load(ordering)
+            }
+            AtomicScope::Device => unsafe { DeviceAtomicI32::from_const_ptr(ptr) }.load(ordering),
+            AtomicScope::System => unsafe { SystemAtomicI32::from_const_ptr(ptr) }.load(ordering),
         }
     }
 
@@ -1311,10 +1309,12 @@ pub mod atomic {
             AtomicScope::Workgroup => {
                 unsafe { WorkgroupAtomicU64::from_ptr(ptr) }.fetch_add(value, ordering)
             }
-            AtomicScope::Device => unsafe { DeviceAtomicU64::from_ptr(ptr) }
-                .fetch_add(value, ordering),
-            AtomicScope::System => unsafe { SystemAtomicU64::from_ptr(ptr) }
-                .fetch_add(value, ordering),
+            AtomicScope::Device => {
+                unsafe { DeviceAtomicU64::from_ptr(ptr) }.fetch_add(value, ordering)
+            }
+            AtomicScope::System => {
+                unsafe { SystemAtomicU64::from_ptr(ptr) }.fetch_add(value, ordering)
+            }
         }
     }
 
@@ -1329,10 +1329,8 @@ pub mod atomic {
             AtomicScope::Workgroup => {
                 unsafe { WorkgroupAtomicU64::from_ptr(ptr) }.store(value, ordering)
             }
-            AtomicScope::Device => unsafe { DeviceAtomicU64::from_ptr(ptr) }
-                .store(value, ordering),
-            AtomicScope::System => unsafe { SystemAtomicU64::from_ptr(ptr) }
-                .store(value, ordering),
+            AtomicScope::Device => unsafe { DeviceAtomicU64::from_ptr(ptr) }.store(value, ordering),
+            AtomicScope::System => unsafe { SystemAtomicU64::from_ptr(ptr) }.store(value, ordering),
         }
     }
 
@@ -1343,12 +1341,11 @@ pub mod atomic {
         ordering: AtomicOrdering,
     ) -> u64 {
         match scope {
-            AtomicScope::Workgroup => unsafe { WorkgroupAtomicU64::from_const_ptr(ptr) }
-                .load(ordering),
-            AtomicScope::Device => unsafe { DeviceAtomicU64::from_const_ptr(ptr) }
-                .load(ordering),
-            AtomicScope::System => unsafe { SystemAtomicU64::from_const_ptr(ptr) }
-                .load(ordering),
+            AtomicScope::Workgroup => {
+                unsafe { WorkgroupAtomicU64::from_const_ptr(ptr) }.load(ordering)
+            }
+            AtomicScope::Device => unsafe { DeviceAtomicU64::from_const_ptr(ptr) }.load(ordering),
+            AtomicScope::System => unsafe { SystemAtomicU64::from_const_ptr(ptr) }.load(ordering),
         }
     }
 
@@ -1363,10 +1360,12 @@ pub mod atomic {
             AtomicScope::Workgroup => {
                 unsafe { WorkgroupAtomicI64::from_ptr(ptr) }.fetch_add(value, ordering)
             }
-            AtomicScope::Device => unsafe { DeviceAtomicI64::from_ptr(ptr) }
-                .fetch_add(value, ordering),
-            AtomicScope::System => unsafe { SystemAtomicI64::from_ptr(ptr) }
-                .fetch_add(value, ordering),
+            AtomicScope::Device => {
+                unsafe { DeviceAtomicI64::from_ptr(ptr) }.fetch_add(value, ordering)
+            }
+            AtomicScope::System => {
+                unsafe { SystemAtomicI64::from_ptr(ptr) }.fetch_add(value, ordering)
+            }
         }
     }
 
@@ -1381,10 +1380,8 @@ pub mod atomic {
             AtomicScope::Workgroup => {
                 unsafe { WorkgroupAtomicI64::from_ptr(ptr) }.store(value, ordering)
             }
-            AtomicScope::Device => unsafe { DeviceAtomicI64::from_ptr(ptr) }
-                .store(value, ordering),
-            AtomicScope::System => unsafe { SystemAtomicI64::from_ptr(ptr) }
-                .store(value, ordering),
+            AtomicScope::Device => unsafe { DeviceAtomicI64::from_ptr(ptr) }.store(value, ordering),
+            AtomicScope::System => unsafe { SystemAtomicI64::from_ptr(ptr) }.store(value, ordering),
         }
     }
 
@@ -1395,12 +1392,11 @@ pub mod atomic {
         ordering: AtomicOrdering,
     ) -> i64 {
         match scope {
-            AtomicScope::Workgroup => unsafe { WorkgroupAtomicI64::from_const_ptr(ptr) }
-                .load(ordering),
-            AtomicScope::Device => unsafe { DeviceAtomicI64::from_const_ptr(ptr) }
-                .load(ordering),
-            AtomicScope::System => unsafe { SystemAtomicI64::from_const_ptr(ptr) }
-                .load(ordering),
+            AtomicScope::Workgroup => {
+                unsafe { WorkgroupAtomicI64::from_const_ptr(ptr) }.load(ordering)
+            }
+            AtomicScope::Device => unsafe { DeviceAtomicI64::from_const_ptr(ptr) }.load(ordering),
+            AtomicScope::System => unsafe { SystemAtomicI64::from_const_ptr(ptr) }.load(ordering),
         }
     }
 
@@ -1415,10 +1411,12 @@ pub mod atomic {
             AtomicScope::Workgroup => {
                 unsafe { WorkgroupAtomicF32::from_ptr(ptr) }.fetch_add(value, ordering)
             }
-            AtomicScope::Device => unsafe { DeviceAtomicF32::from_ptr(ptr) }
-                .fetch_add(value, ordering),
-            AtomicScope::System => unsafe { SystemAtomicF32::from_ptr(ptr) }
-                .fetch_add(value, ordering),
+            AtomicScope::Device => {
+                unsafe { DeviceAtomicF32::from_ptr(ptr) }.fetch_add(value, ordering)
+            }
+            AtomicScope::System => {
+                unsafe { SystemAtomicF32::from_ptr(ptr) }.fetch_add(value, ordering)
+            }
         }
     }
 
@@ -1433,10 +1431,8 @@ pub mod atomic {
             AtomicScope::Workgroup => {
                 unsafe { WorkgroupAtomicF32::from_ptr(ptr) }.store(value, ordering)
             }
-            AtomicScope::Device => unsafe { DeviceAtomicF32::from_ptr(ptr) }
-                .store(value, ordering),
-            AtomicScope::System => unsafe { SystemAtomicF32::from_ptr(ptr) }
-                .store(value, ordering),
+            AtomicScope::Device => unsafe { DeviceAtomicF32::from_ptr(ptr) }.store(value, ordering),
+            AtomicScope::System => unsafe { SystemAtomicF32::from_ptr(ptr) }.store(value, ordering),
         }
     }
 
@@ -1447,12 +1443,11 @@ pub mod atomic {
         ordering: AtomicOrdering,
     ) -> f32 {
         match scope {
-            AtomicScope::Workgroup => unsafe { WorkgroupAtomicF32::from_const_ptr(ptr) }
-                .load(ordering),
-            AtomicScope::Device => unsafe { DeviceAtomicF32::from_const_ptr(ptr) }
-                .load(ordering),
-            AtomicScope::System => unsafe { SystemAtomicF32::from_const_ptr(ptr) }
-                .load(ordering),
+            AtomicScope::Workgroup => {
+                unsafe { WorkgroupAtomicF32::from_const_ptr(ptr) }.load(ordering)
+            }
+            AtomicScope::Device => unsafe { DeviceAtomicF32::from_const_ptr(ptr) }.load(ordering),
+            AtomicScope::System => unsafe { SystemAtomicF32::from_const_ptr(ptr) }.load(ordering),
         }
     }
 
@@ -1467,10 +1462,12 @@ pub mod atomic {
             AtomicScope::Workgroup => {
                 unsafe { WorkgroupAtomicF64::from_ptr(ptr) }.fetch_add(value, ordering)
             }
-            AtomicScope::Device => unsafe { DeviceAtomicF64::from_ptr(ptr) }
-                .fetch_add(value, ordering),
-            AtomicScope::System => unsafe { SystemAtomicF64::from_ptr(ptr) }
-                .fetch_add(value, ordering),
+            AtomicScope::Device => {
+                unsafe { DeviceAtomicF64::from_ptr(ptr) }.fetch_add(value, ordering)
+            }
+            AtomicScope::System => {
+                unsafe { SystemAtomicF64::from_ptr(ptr) }.fetch_add(value, ordering)
+            }
         }
     }
 
@@ -1485,10 +1482,8 @@ pub mod atomic {
             AtomicScope::Workgroup => {
                 unsafe { WorkgroupAtomicF64::from_ptr(ptr) }.store(value, ordering)
             }
-            AtomicScope::Device => unsafe { DeviceAtomicF64::from_ptr(ptr) }
-                .store(value, ordering),
-            AtomicScope::System => unsafe { SystemAtomicF64::from_ptr(ptr) }
-                .store(value, ordering),
+            AtomicScope::Device => unsafe { DeviceAtomicF64::from_ptr(ptr) }.store(value, ordering),
+            AtomicScope::System => unsafe { SystemAtomicF64::from_ptr(ptr) }.store(value, ordering),
         }
     }
 
@@ -1499,12 +1494,11 @@ pub mod atomic {
         ordering: AtomicOrdering,
     ) -> f64 {
         match scope {
-            AtomicScope::Workgroup => unsafe { WorkgroupAtomicF64::from_const_ptr(ptr) }
-                .load(ordering),
-            AtomicScope::Device => unsafe { DeviceAtomicF64::from_const_ptr(ptr) }
-                .load(ordering),
-            AtomicScope::System => unsafe { SystemAtomicF64::from_const_ptr(ptr) }
-                .load(ordering),
+            AtomicScope::Workgroup => {
+                unsafe { WorkgroupAtomicF64::from_const_ptr(ptr) }.load(ordering)
+            }
+            AtomicScope::Device => unsafe { DeviceAtomicF64::from_const_ptr(ptr) }.load(ordering),
+            AtomicScope::System => unsafe { SystemAtomicF64::from_const_ptr(ptr) }.load(ordering),
         }
     }
 }
@@ -1566,15 +1560,14 @@ pub mod cooperative {
         block_reduce_add_f32, block_reduce_add_i32, block_reduce_add_u32, block_reduce_and_u32,
         block_reduce_max_f32, block_reduce_max_i32, block_reduce_max_u32, block_reduce_min_f32,
         block_reduce_min_i32, block_reduce_min_u32, block_reduce_or_u32, block_reduce_xor_u32,
-        block_scan_exclusive_add_f32, block_scan_exclusive_add_i32,
-        block_scan_exclusive_add_u32, block_scan_inclusive_add_f32,
-        block_scan_inclusive_add_i32, block_scan_inclusive_add_u32, inverse_ballot, lane_id,
-        read_first_lane_u32, thread_idx_x, thread_idx_y, thread_idx_z, wave_barrier,
-        wave_id_in_workgroup, wave_match_any_u32, wave_reduce_add_i32, wave_reduce_add_u32,
-        wave_reduce_and_u32, wave_reduce_max_i32, wave_reduce_max_u32, wave_reduce_min_i32,
-        wave_reduce_min_u32, wave_reduce_or_u32, wave_reduce_xor_u32, wave_shuffle_down_u32,
-        wave_shuffle_f32, wave_shuffle_i32, wave_shuffle_u32, wave_shuffle_up_u32,
-        wave_shuffle_xor_u32, wavefront_size, workgroup_barrier,
+        block_scan_exclusive_add_f32, block_scan_exclusive_add_i32, block_scan_exclusive_add_u32,
+        block_scan_inclusive_add_f32, block_scan_inclusive_add_i32, block_scan_inclusive_add_u32,
+        inverse_ballot, lane_id, read_first_lane_u32, thread_idx_x, thread_idx_y, thread_idx_z,
+        wave_barrier, wave_id_in_workgroup, wave_match_any_u32, wave_reduce_add_i32,
+        wave_reduce_add_u32, wave_reduce_and_u32, wave_reduce_max_i32, wave_reduce_max_u32,
+        wave_reduce_min_i32, wave_reduce_min_u32, wave_reduce_or_u32, wave_reduce_xor_u32,
+        wave_shuffle_down_u32, wave_shuffle_f32, wave_shuffle_i32, wave_shuffle_u32,
+        wave_shuffle_up_u32, wave_shuffle_xor_u32, wavefront_size, workgroup_barrier,
     };
 
     #[derive(Clone, Copy)]
@@ -2256,11 +2249,7 @@ pub fn wave_shuffle_f32(value: f32, lane: u32) -> f32 {
 #[inline(always)]
 pub fn wave_shuffle_up_u32(value: u32, delta: u32) -> u32 {
     let lane = lane_id();
-    let target = if lane >= delta {
-        lane - delta
-    } else {
-        lane
-    };
+    let target = if lane >= delta { lane - delta } else { lane };
     wave_shuffle_u32(value, target)
 }
 
@@ -2268,11 +2257,7 @@ pub fn wave_shuffle_up_u32(value: u32, delta: u32) -> u32 {
 pub fn wave_shuffle_down_u32(value: u32, delta: u32) -> u32 {
     let lane = lane_id();
     let next = lane.wrapping_add(delta);
-    let target = if next < wavefront_size() {
-        next
-    } else {
-        lane
-    };
+    let target = if next < wavefront_size() { next } else { lane };
     wave_shuffle_u32(value, target)
 }
 
@@ -2969,12 +2954,7 @@ define_block_scan!(
 #[inline(always)]
 pub unsafe fn atomic_add_u32(ptr: *mut u32, value: u32) -> u32 {
     unsafe {
-        atomic::atomic_add_u32_scoped(
-            ptr,
-            value,
-            AtomicScope::Device,
-            AtomicOrdering::Relaxed,
-        )
+        atomic::atomic_add_u32_scoped(ptr, value, AtomicScope::Device, AtomicOrdering::Relaxed)
     }
 }
 
@@ -3251,6 +3231,34 @@ impl<T> DynamicSharedMem<T> {
     pub unsafe fn offset(byte_offset: usize) -> *mut T {
         unsafe { Self::get().cast::<u8>().add(byte_offset).cast::<T>() }
     }
+}
+
+/// Common device-side imports for ROCm-Oxide kernels.
+///
+/// Use this in device crates when the kernel wants the usual thread-index
+/// helpers, slice ABI types, vector types, barriers, atomics, and cooperative
+/// group handles without a long import list:
+///
+/// ```rust,ignore
+/// use rocm_oxide_device::prelude::*;
+/// ```
+pub mod prelude {
+    pub use crate::{
+        AtomicOrdering, AtomicScope, DeviceAtomicF32, DeviceAtomicF64, DeviceAtomicI32,
+        DeviceAtomicI64, DeviceAtomicU32, DeviceAtomicU64, DeviceSlice, DeviceSliceMut,
+        DisjointSliceMut, DynamicSharedMem, F16x2, StaticTile, SystemAtomicF32, SystemAtomicF64,
+        SystemAtomicI32, SystemAtomicI64, SystemAtomicU32, SystemAtomicU64, ThreadBlock,
+        ThreadIndex, Vec2f, Vec3f, Wavefront, WorkgroupAtomicF32, WorkgroupAtomicF64,
+        WorkgroupAtomicI32, WorkgroupAtomicI64, WorkgroupAtomicU32, WorkgroupAtomicU64,
+        WorkgroupBarrierToken, atomic_add_u32, atomic_load_u32, atomic_store_u32, ballot,
+        block_dim_x, block_dim_y, block_dim_z, block_idx_x, block_idx_y, block_idx_z, dispatch_id,
+        global_id_x, global_id_y, global_id_z, grid_dim_x, grid_dim_y, grid_dim_z, is_first_lane,
+        lane_id, read_first_lane_u32, read_first_lane_u64, this_thread_block, this_wavefront,
+        thread_idx_x, thread_idx_y, thread_idx_z, thread_index_x_witness, tiled_partition,
+        wave_barrier, wave_id_in_workgroup, wavefront_size, workgroup_barrier,
+        workgroup_barrier_token,
+    };
+    pub use crate::{debug, math};
 }
 
 #[repr(C)]
