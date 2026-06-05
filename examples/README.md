@@ -75,10 +75,13 @@ dependencies into the SDK crate.
 | Vulkan path reconstruction | `examples/vulkan_path_reconstruction.rs` | `ROCM_OXIDE_VISUAL_PRESENT=vulkan cargo run --features visual-demos --example vulkan_path_reconstruction -- --frames 300` | HIPRTC path tracing, reconstruction, denoise, and tonemap path. |
 | Interactive path reconstruction | `examples/vulkan_interactive_path_reconstruction_fixed4.rs` | `ROCM_OXIDE_VISUAL_PRESENT=vulkan cargo run --features visual-demos --example vulkan_interactive_path_reconstruction_fixed4 -- --frames 300` | Interactive variant of the path reconstruction demo. |
 | Motion-denoise path reconstruction | `examples/vulkan_interactive_path_reconstruction_motion_denoise_v2.rs` | `ROCM_OXIDE_VISUAL_PRESENT=vulkan cargo run --features visual-demos --example vulkan_interactive_path_reconstruction_motion_denoise_v2 -- --frames 300` | Interactive reconstruction variant with extra samples during motion. |
-| Vulkan plasma | `examples/vulkan_plasma_demo.rs` | `ROCM_OXIDE_VISUAL_PRESENT=vulkan cargo run --features visual-demos --example vulkan_plasma_demo -- --frames 300` | Small Vulkan-presenter smoke test with CPU-generated frames. |
 
 For launch options on the shared visual presenter, see
 `docs/visual-demos.md`.
+
+Separated visual demo projects now live under `demo-projects/`. The first moved
+demo is `demo-projects/vulkan-plasma/`, a small Vulkan-presenter smoke test
+with its own manifest and run command.
 
 ## Capture Demos
 

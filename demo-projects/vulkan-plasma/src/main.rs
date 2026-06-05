@@ -1,25 +1,25 @@
 //! Vulkan plasma demo for ROCm-Oxide.
 //!
-//! Drop this file into:
+//! This separated demo project lives at:
 //!
 //! ```text
-//! examples/vulkan_plasma_demo.rs
+//! demo-projects/vulkan-plasma/
 //! ```
 //!
 //! Run with the Vulkan presenter:
 //!
 //! ```sh
-//! ROCM_OXIDE_VISUAL_PRESENT=vulkan cargo run --features visual-demos --example vulkan_plasma_demo
+//! ROCM_OXIDE_VISUAL_PRESENT=vulkan cargo run
 //! ```
 //!
 //! Optional bounded run:
 //!
 //! ```sh
-//! ROCM_OXIDE_VISUAL_PRESENT=vulkan cargo run --features visual-demos --example vulkan_plasma_demo -- --frames 300
+//! ROCM_OXIDE_VISUAL_PRESENT=vulkan cargo run -- --frames 300
 //! ```
 //!
 //! This demo intentionally does not add a new Vulkan stack. It reuses the
-//! repository's existing `examples/shared/visual_presenter.rs`, which already
+//! local `src/visual_presenter.rs`, copied from the SDK visual examples, which
 //! owns the SDL2 + ash Vulkan swapchain path. The frame itself is generated on
 //! the CPU so this is a small, standalone Vulkan-presentation smoke test.
 //!
@@ -30,12 +30,10 @@
 //! - `A` / `D` change the pattern scale.
 //! - `Up` / `Down` change color cycling.
 
-use std::time::Instant;
-
-#[path = "shared/visual_presenter.rs"]
 mod visual_presenter;
 
-use visual_presenter::{requested_frames, Key, Scale, Window, WindowOptions};
+use std::time::Instant;
+use visual_presenter::{Key, Scale, Window, WindowOptions, requested_frames};
 
 const WIDTH: usize = 1280;
 const HEIGHT: usize = 720;
@@ -66,7 +64,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let mut scale = 1.0f32;
     let mut color_rate = 1.0f32;
 
-    println!("vulkan_plasma_demo: {}x{}", WIDTH, HEIGHT);
+    println!("vulkan-plasma: {}x{}", WIDTH, HEIGHT);
     println!("controls: Esc quit | W/S speed | A/D scale | Up/Down color");
 
     while window.is_open() && !window.is_key_down(Key::Escape) {
@@ -103,14 +101,21 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     }
 
     println!(
-        "vulkan_plasma_demo: rendered {} frame(s), speed={:.2}, scale={:.2}, color_rate={:.2}",
+        "vulkan-plasma: rendered {} frame(s), speed={:.2}, scale={:.2}, color_rate={:.2}",
         rendered_frames, speed, scale, color_rate
     );
 
     Ok(())
 }
 
-fn draw_plasma(frame: &mut [u32], width: usize, height: usize, t: f32, scale: f32, color_rate: f32) {
+fn draw_plasma(
+    frame: &mut [u32],
+    width: usize,
+    height: usize,
+    t: f32,
+    scale: f32,
+    color_rate: f32,
+) {
     let inv_w = 1.0 / width as f32;
     let inv_h = 1.0 / height as f32;
     let aspect = width as f32 / height as f32;

@@ -10,6 +10,14 @@ Demos with CPU UI panels copy only their overlay rectangles from host memory
 after the GPU frame is copied; they no longer read the full frame back to host
 for presentation.
 
+Separated visual demo projects live under `demo-projects/`. The first moved
+project is `demo-projects/vulkan-plasma/`:
+
+```sh
+cd demo-projects/vulkan-plasma
+ROCM_OXIDE_VISUAL_PRESENT=vulkan cargo run -- --frames 300
+```
+
 | Demo | What it shows | Typical launch | Launch options | Presentation/performance path |
 | --- | --- | --- | --- | --- |
 | `spectral_lattice` | Interactive GPU workbench with core, LDS, atomics, post effects, overlay UI, screenshots, and CPU/GL/Vulkan presentation modes. | `cargo run --features 'device-spike visual-demos' --example spectral_lattice -- --present vulkan --resolution 1440p --fps-limit 120` | `--frames N`, `--output PATH`, `--mode Core|LDS|Atomic|Chain|1-4`, `--resolution 540p|720p|1080p|1440p|4k|WIDTHxHEIGHT`, `--fps-limit FPS|uncapped`, `--gpu-work N`, `--present cpu|gl|vulkan`, `--present-scale 1|2|4` | `--present vulkan` uses Vulkan exportable device memory imported by HIP, then a device-to-device copy and Vulkan blit. `--present gl` uses HIP/OpenGL PBO interop. Default `cpu` keeps compatibility readback. |

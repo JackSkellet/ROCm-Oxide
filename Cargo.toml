@@ -138,9 +138,5 @@ name = "vulkan_path_reconstruction"
 required-features = ["visual-demos"]
 
 [[example]]
-name = "vulkan_plasma_demo"
-required-features = ["visual-demos"]
-
-[[example]]
 name = "window_effects_lab"
 required-features = ["device-spike", "capture-demos"]

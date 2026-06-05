@@ -1,10 +1,9 @@
 # ROCm-Oxide Demo Project Catalogue
 
-This directory is reserved for separated demo projects. No source has been moved
-here yet; the table below records the first-pass split candidates from the
-current flat `examples/` directory.
+This directory contains separated demo projects plus the remaining first-pass
+split candidates from the current flat `examples/` directory.
 
-Each future demo project should own its own:
+Each demo project should own its own:
 
 - `Cargo.toml`
 - `README.md`
@@ -15,6 +14,12 @@ Each future demo project should own its own:
 
 The root SDK crate should keep only canonical examples needed to understand
 ROCm-Oxide as a Rust-first ROCm SDK.
+
+## Moved Demo Projects
+
+| Project | Source | Run command | Notes |
+| --- | --- | --- | --- |
+| `demo-projects/vulkan-plasma/` | `demo-projects/vulkan-plasma/src/main.rs` | `cd demo-projects/vulkan-plasma && ROCM_OXIDE_VISUAL_PRESENT=vulkan cargo run -- --frames 300` | First separated visual project; small CPU-generated frame used to smoke-test the Vulkan presenter path. |
 
 ## Candidate Demo Projects
 

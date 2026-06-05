@@ -420,6 +420,10 @@ cargo run --features 'device-spike visual-demos' --example stress_test_gui
 cargo run --features 'device-spike visual-demos' --example stress_3d_gui
 ```
 
+Separated demo projects are being moved under `demo-projects/` so they can own
+their manifests, README files, and demo-only dependencies. The first moved demo
+is `demo-projects/vulkan-plasma/`.
+
 Examples that use generated Rust-device bindings require
 `device-spike`. Visual demos also require `visual-demos`; capture demos such as
 `matrix_lens` require `capture-demos`. HIPRTC-only examples such as `hello_gpu`
