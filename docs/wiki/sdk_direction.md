@@ -40,7 +40,7 @@ and verified on `gfx1100` and `gfx1201`.
 | Build tool (`rocm-oxide-build`) | `tools/rocm-oxide-build/src/main.rs` — kernel discovery, LLVM IR rewrite, `llc` lowering, AMDGPU `clang` link, metadata/bindings/manifest emission |
 | Cargo wrapper (`cargo-rocm-oxide`) | `tools/cargo-rocm-oxide/src/main.rs` — `doctor`, `build`, `run`, `debug`, `inspect`, `pipeline`, `profile`, `verify`, `new` sub-commands |
 | Build-script integration | `build.rs` — invokes `rocm-oxide-build`, copies HSACO + generated bindings into `OUT_DIR`, sets `ROCM_OXIDE_DEVICE_HSACO` and `ROCM_OXIDE_DEVICE_BINDINGS` env vars |
-| Kernel length and disjointness contracts | `docs/wiki/kernel-contracts.md` — `// rocm-oxide: len(...)=...` / `disjoint(...)` parsed by build tool |
+| Kernel length and disjointness contracts | `docs/wiki/kernel-contracts.md` — `#[kernel_contract(len(...)=...)]` / `disjoint(...)` parsed by build tool |
 | Concrete device crate / test kernels | `device-spike/src/lib.rs` — `add_one`, `vector_add`, math intrinsics, LDS, stress kernels |
 
 ### 1.3 Examples and tests

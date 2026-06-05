@@ -1645,6 +1645,15 @@ fn layout_field_type_supported(ty: &str, device_struct: &DeviceStruct) -> Result
 }
 
 fn sanitize_rust_env(command: &mut Command) {
+    let mut keys = env::vars_os()
+        .map(|(key, _)| key)
+        .collect::<Vec<_>>();
+    keys.extend(command.get_envs().map(|(key, _)| key.to_os_string()));
+    for key in keys {
+        if should_remove_nested_cargo_env(&key) {
+            command.env_remove(key);
+        }
+    }
     command
         .env_remove("CARGO_ENCODED_RUSTFLAGS")
         .env_remove("CLIPPY_ARGS")
@@ -1654,6 +1663,28 @@ fn sanitize_rust_env(command: &mut Command) {
         .env_remove("RUSTC_WORKSPACE_WRAPPER")
         .env_remove("RUSTC_WRAPPER")
         .env_remove("RUSTDOC");
+}
+
+fn should_remove_nested_cargo_env(key: &OsStr) -> bool {
+    let key = key.to_string_lossy();
+    key == "DEBUG"
+        || key == "HOST"
+        || key == "NUM_JOBS"
+        || key == "OPT_LEVEL"
+        || key == "OUT_DIR"
+        || key == "PROFILE"
+        || key == "TARGET"
+        || key == "CARGO"
+        || key == "CARGO_CRATE_NAME"
+        || key == "CARGO_MAKEFLAGS"
+        || key == "CARGO_MANIFEST_DIR"
+        || key == "CARGO_MANIFEST_PATH"
+        || key == "CARGO_PRIMARY_PACKAGE"
+        || key.starts_with("CARGO_BIN_EXE_")
+        || key.starts_with("CARGO_CFG_")
+        || key.starts_with("CARGO_FEATURE_")
+        || key.starts_with("CARGO_PKG_")
+        || key.starts_with("DEP_")
 }
 
 fn with_core_build_hint(err: String) -> String {
@@ -2068,6 +2099,11 @@ fn discover_kernels_in_source_at(source: &str, path: &Path) -> Result<Vec<Kernel
         let trimmed = line.trim();
         if let Some(contract) = parse_contract_comment(trimmed)? {
             pending_contracts.push(contract);
+            continue;
+        }
+
+        if let Some(contracts) = parse_contract_attribute(trimmed)? {
+            pending_contracts.extend(contracts);
             continue;
         }
 
@@ -2811,6 +2847,56 @@ fn parse_contract_comment(line: &str) -> Result<Option<KernelContract>, String> 
     }
 
     Err(format!("unsupported rocm-oxide contract: {line}"))
+}
+
+fn parse_contract_attribute(line: &str) -> Result<Option<Vec<KernelContract>>, String> {
+    let Some(inner) = strip_contract_attribute(line)? else {
+        return Ok(None);
+    };
+    let contracts = split_top_level(inner, ',')
+        .into_iter()
+        .map(str::trim)
+        .filter(|contract| !contract.is_empty())
+        .map(|contract| parse_contract_item(contract, line))
+        .collect::<Result<Vec<_>, _>>()?;
+    if contracts.is_empty() {
+        return Err(format!("empty kernel_contract attribute: {line}"));
+    }
+    Ok(Some(contracts))
+}
+
+fn strip_contract_attribute<'a>(line: &'a str) -> Result<Option<&'a str>, String> {
+    for prefix in [
+        "#[kernel_contract(",
+        "#[rocm_oxide_kernel::kernel_contract(",
+        "#[::rocm_oxide_kernel::kernel_contract(",
+    ] {
+        if let Some(rest) = line.strip_prefix(prefix) {
+            return rest
+                .strip_suffix(")]")
+                .map(Some)
+                .ok_or_else(|| format!("malformed kernel_contract attribute: {line}"));
+        }
+    }
+    if line.starts_with("#[kernel_contract")
+        || line.starts_with("#[rocm_oxide_kernel::kernel_contract")
+        || line.starts_with("#[::rocm_oxide_kernel::kernel_contract")
+    {
+        return Err(format!("malformed kernel_contract attribute: {line}"));
+    }
+    Ok(None)
+}
+
+fn parse_contract_item(contract: &str, line: &str) -> Result<KernelContract, String> {
+    if let Some(rest) = contract.strip_prefix("len(") {
+        return parse_length_contract(rest, line);
+    }
+    if let Some(rest) = contract.strip_prefix("disjoint(") {
+        return parse_disjoint_contract(rest, line);
+    }
+    Err(format!(
+        "unsupported kernel_contract item `{contract}` in attribute: {line}"
+    ))
 }
 
 fn parse_length_contract(rest: &str, line: &str) -> Result<KernelContract, String> {
@@ -5937,16 +6023,29 @@ pub unsafe extern "C" fn helper() {}
         let mut command = Command::new("cargo");
         for key in [
             "CARGO_ENCODED_RUSTFLAGS",
+            "CARGO",
+            "CARGO_CFG_TARGET_ARCH",
             "CLIPPY_ARGS",
             "CLIPPY_CONF_DIR",
             "CARGO_CLIPPY",
+            "CARGO_FEATURE_DEFAULT",
+            "CARGO_MANIFEST_DIR",
+            "CARGO_PKG_NAME",
+            "DEP_ROCM_OXIDE",
+            "HOST",
+            "OPT_LEVEL",
+            "OUT_DIR",
+            "PROFILE",
             "RUSTC",
             "RUSTC_WORKSPACE_WRAPPER",
             "RUSTC_WRAPPER",
             "RUSTDOC",
+            "TARGET",
         ] {
             command.env(key, "inherited");
         }
+        command.env("CARGO_HOME", "/keep/cargo-home");
+        command.env("ROCM_PATH", "/keep/rocm");
 
         super::sanitize_rust_env(&mut command);
         let envs = command
@@ -5961,16 +6060,32 @@ pub unsafe extern "C" fn helper() {}
 
         for key in [
             "CARGO_ENCODED_RUSTFLAGS",
+            "CARGO",
+            "CARGO_CFG_TARGET_ARCH",
             "CLIPPY_ARGS",
             "CLIPPY_CONF_DIR",
             "CARGO_CLIPPY",
+            "CARGO_FEATURE_DEFAULT",
+            "CARGO_MANIFEST_DIR",
+            "CARGO_PKG_NAME",
+            "DEP_ROCM_OXIDE",
+            "HOST",
+            "OPT_LEVEL",
+            "OUT_DIR",
+            "PROFILE",
             "RUSTC",
             "RUSTC_WORKSPACE_WRAPPER",
             "RUSTC_WRAPPER",
             "RUSTDOC",
+            "TARGET",
         ] {
             assert_eq!(envs.get(key), Some(&None), "{key} should be removed");
         }
+        assert_eq!(
+            envs.get("CARGO_HOME"),
+            Some(&Some("/keep/cargo-home".to_string()))
+        );
+        assert_eq!(envs.get("ROCM_PATH"), Some(&Some("/keep/rocm".to_string())));
     }
 
     #[test]
@@ -6758,6 +6873,44 @@ pub unsafe extern "C" fn temporal(
         assert!(binding.contains("validate_buffer_len(\"frame\", frame.len(), pixel_count)?"));
         assert!(binding.contains("validate_buffer_len(\"color\", color.len(), pixel_count/4)?"));
         assert!(binding.contains("validate_buffer_len(\"aux\", aux.len(), pixel_count/4*3)?"));
+    }
+
+    #[test]
+    fn parses_kernel_contract_attribute_into_generated_validation() {
+        let kernels = discover_kernels_in_source(
+            r#"
+#[kernel_contract(len(frame)=pixel_count, len(color)=pixel_count/4, disjoint(frame,color))]
+#[kernel]
+pub unsafe extern "C" fn temporal_attr(
+    frame: *mut u32,
+    color: *const u32,
+    pixel_count: usize,
+) {}
+"#,
+        )
+        .expect("source should parse");
+
+        let binding = generate_kernel_binding(&kernels[0], &BTreeMap::new(), None)
+            .expect("binding should generate");
+        assert!(binding.contains("validate_buffer_len(\"frame\", frame.len(), pixel_count)?"));
+        assert!(binding.contains("validate_buffer_len(\"color\", color.len(), pixel_count/4)?"));
+        assert!(
+            binding.contains("validate_device_buffers_disjoint(\"frame\", frame, \"color\", color)?")
+        );
+    }
+
+    #[test]
+    fn rejects_malformed_kernel_contract_attribute() {
+        let err = discover_kernels_in_source(
+            r#"
+#[kernel_contract(len(out)=n]
+#[kernel]
+pub unsafe extern "C" fn bad(out: *mut f32, n: usize) {}
+"#,
+        )
+        .expect_err("malformed attribute should fail");
+
+        assert!(err.contains("malformed kernel_contract attribute"));
     }
 
     #[test]

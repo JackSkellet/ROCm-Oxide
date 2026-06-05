@@ -1,14 +1,16 @@
 # Kernel Contracts
 
 `rocm-oxide-build` can attach source-level host validation contracts to a
-Rust-authored GPU kernel. Contracts are written as line comments immediately
-above a `#[kernel]` function:
+Rust-authored GPU kernel. Prefer `#[kernel_contract(...)]` immediately above a
+`#[kernel]` function:
 
 ```rust
-// rocm-oxide: len(frame)=pixel_count
-// rocm-oxide: len(color)=pixel_count/4
-// rocm-oxide: len(depth)=pixel_count/4
-// rocm-oxide: disjoint(color,depth)
+use rocm_oxide_kernel::{kernel, kernel_contract};
+
+#[kernel_contract(len(frame)=pixel_count)]
+#[kernel_contract(len(color)=pixel_count/4)]
+#[kernel_contract(len(depth)=pixel_count/4)]
+#[kernel_contract(disjoint(color,depth))]
 #[kernel]
 pub unsafe extern "C" fn depth_aware_upscale(
     frame: *mut u32,
@@ -22,14 +24,28 @@ pub unsafe extern "C" fn depth_aware_upscale(
 ```
 
 The build tool parses these contracts before it emits the generated Rust host
-bindings and metadata JSON.
+bindings and metadata JSON. The older line-comment form still works:
+
+```rust
+// rocm-oxide: len(frame)=pixel_count
+// rocm-oxide: disjoint(color,depth)
+#[kernel]
+pub unsafe extern "C" fn legacy_contract_form(
+    frame: *mut u32,
+    color: *const u32,
+    depth: *const f32,
+    pixel_count: usize,
+) {
+    /* device code */
+}
+```
 
 ## Supported Contracts
 
 ### Length
 
 ```text
-// rocm-oxide: len(<buffer_arg>)=<usize expression>
+#[kernel_contract(len(<buffer_arg>)=<usize expression>)]
 ```
 
 The left side must name a pointer argument from the kernel signature. The right
@@ -39,16 +55,22 @@ side may use scalar kernel arguments, integer literals, and the operators `+`,
 Examples:
 
 ```text
-// rocm-oxide: len(frame)=pixel_count
-// rocm-oxide: len(color)=pixel_count/4
-// rocm-oxide: len(motion_reactive)=pixel_count/4*3
-// rocm-oxide: len(camera)=13
+#[kernel_contract(len(frame)=pixel_count)]
+#[kernel_contract(len(color)=pixel_count/4)]
+#[kernel_contract(len(motion_reactive)=pixel_count/4*3)]
+#[kernel_contract(len(camera)=13)]
+```
+
+Multiple contracts can also be grouped into one attribute:
+
+```rust
+#[kernel_contract(len(frame)=pixel_count, len(color)=pixel_count/4)]
 ```
 
 ### Disjointness
 
 ```text
-// rocm-oxide: disjoint(<buffer_arg>,<buffer_arg>)
+#[kernel_contract(disjoint(<buffer_arg>,<buffer_arg>))]
 ```
 
 Both names must be pointer or device-slice kernel arguments. The generated host
@@ -60,8 +82,8 @@ generated check only rejects pairs where at least one argument is mutable.
 Examples:
 
 ```text
-// rocm-oxide: disjoint(color,depth)
-// rocm-oxide: disjoint(prev_frame,next_frame)
+#[kernel_contract(disjoint(color,depth))]
+#[kernel_contract(disjoint(prev_frame,next_frame))]
 ```
 
 ## Generated Binding Behavior
@@ -69,7 +91,7 @@ Examples:
 For a kernel contract like:
 
 ```text
-// rocm-oxide: len(color)=pixel_count/4
+#[kernel_contract(len(color)=pixel_count/4)]
 ```
 
 the generated host binding emits:
@@ -84,7 +106,7 @@ That means short buffers are rejected on the CPU side with a named error before
 For a disjointness contract like:
 
 ```text
-// rocm-oxide: disjoint(color,depth)
+#[kernel_contract(disjoint(color,depth))]
 ```
 
 the generated host binding emits:

@@ -985,9 +985,9 @@ lto = false
         r#"#![no_std]
 
 use rocm_oxide_device::prelude::*;
-use rocm_oxide_kernel::kernel;
+use rocm_oxide_kernel::{kernel, kernel_contract};
 
-// rocm-oxide: len(out)=n
+#[kernel_contract(len(out)=n)]
 #[kernel]
 pub unsafe extern "C" fn fill_indices(out: DeviceSliceMut<u32>, n: usize) {
     let index = global_id_x();
@@ -1070,8 +1070,9 @@ This will:
 
 1. Open `device-spike/src/lib.rs`.
 2. Add a `#[kernel]` function. Length contracts (for the generated binding's
-   runtime validation) are expressed as magic comments immediately before the
-   function — see `docs/wiki/kernel-contracts.md` in the ROCm-Oxide workspace.
+   runtime validation) are expressed with `#[kernel_contract(...)]` immediately
+   before the function — see `docs/wiki/kernel-contracts.md` in the ROCm-Oxide
+   workspace.
 3. `cargo run` picks up the change automatically.
 
 ## Portability

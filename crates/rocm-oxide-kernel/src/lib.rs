@@ -10,10 +10,10 @@
 //! ```rust,ignore
 //! #![no_std]
 //! use rocm_oxide_device as gpu;
-//! use rocm_oxide_kernel::{kernel, device_global, shared};
+//! use rocm_oxide_kernel::{kernel, kernel_contract, device_global, shared};
 //!
 //! // A simple non-generic kernel
-//! // rocm-oxide: len(out)=n
+//! #[kernel_contract(len(out)=n)]
 //! #[kernel]
 //! pub unsafe extern "C" fn fill_indices(out: gpu::DeviceSliceMut<u32>, n: usize) {
 //!     let i = gpu::global_id_x();
@@ -99,21 +99,20 @@ use syn::{
 ///
 /// ## Kernel contracts
 ///
-/// Line comments immediately above `#[kernel]` can declare buffer-length and
-/// disjointness contracts that the build tool checks and embeds in the generated
-/// host bindings:
+/// `#[kernel_contract(...)]` attributes immediately above `#[kernel]` can
+/// declare buffer-length and disjointness contracts that the build tool checks
+/// and embeds in the generated host bindings:
 ///
 /// ```rust,ignore
-/// // rocm-oxide: len(out)=n
-/// // rocm-oxide: len(a)=n
-/// // rocm-oxide: disjoint(out, a)
+/// #[kernel_contract(len(out)=n, len(a)=n, disjoint(out, a))]
 /// #[kernel]
 /// pub unsafe extern "C" fn my_kernel(out: gpu::DeviceSliceMut<f32>, a: gpu::DeviceSlice<f32>, n: usize) {
 ///     // ...
 /// }
 /// ```
 ///
-/// See `docs/kernel-contracts.md` for the full contract syntax.
+/// The older `// rocm-oxide: ...` comment form is still supported. See
+/// `docs/wiki/kernel-contracts.md` for the full contract syntax.
 ///
 /// ## Safety
 ///
@@ -139,6 +138,24 @@ pub fn kernel(attr: TokenStream, item: TokenStream) -> TokenStream {
     expand_kernel(function, attr.monomorphizations)
         .unwrap_or_else(Error::into_compile_error)
         .into()
+}
+
+/// Documents source-level kernel launch contracts for `rocm-oxide-build`.
+///
+/// This attribute is intentionally a compile-time no-op in the proc-macro
+/// crate. The build tool reads the original device source and converts
+/// `#[kernel_contract(...)]` into generated host validation and metadata.
+///
+/// ```rust,ignore
+/// #[kernel_contract(len(out)=n, disjoint(out, input))]
+/// #[kernel]
+/// pub unsafe extern "C" fn copy(out: gpu::DeviceSliceMut<u32>, input: gpu::DeviceSlice<u32>, n: usize) {
+///     // ...
+/// }
+/// ```
+#[proc_macro_attribute]
+pub fn kernel_contract(_attr: TokenStream, item: TokenStream) -> TokenStream {
+    item
 }
 
 /// Marks a `static mut` as a mutable device-global variable.

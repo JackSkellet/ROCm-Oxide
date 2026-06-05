@@ -1,5 +1,6 @@
-use rocm_oxide_kernel::{constant, device_global, kernel, shared};
+use rocm_oxide_kernel::{constant, device_global, kernel, kernel_contract, shared};
 
+#[kernel_contract(len(_out) = _len)]
 #[kernel]
 pub unsafe fn plain_kernel(_out: *mut f32, _len: usize) {}
 

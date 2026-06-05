@@ -27,6 +27,9 @@ All notable ROCm-Oxide changes should be recorded here before a tagged release.
   while still using relative path dependencies.
 - Reserved `cargo rocm-oxide new --standalone` with a clear error until the
   crates and build tool are publishable through crates.io or release artifacts.
+- Added first-class `#[kernel_contract(...)]` syntax for Rust-device kernels,
+  mapped onto the existing generated host validation and metadata contract
+  machinery. The older `// rocm-oxide:` comment form remains supported.
 
 ### SDK onboarding and diagnostics (2026-06)
 
