@@ -456,7 +456,8 @@ src/                  host runtime/library
 crates/               device/runtime support crates
 device-spike/         Rust-authored device kernel spike
 tools/                build tool and cargo wrapper
-examples/             examples, demos, feature labs, probes
+examples/             lean SDK examples, diagnostics, and release probes
+demo-projects/        separated visual, benchmark, capture, and experiment demos
 docs/                 design, SDK, runtime, troubleshooting, release docs
 scripts/              verification and compatibility scripts
 ```

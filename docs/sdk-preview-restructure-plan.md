@@ -14,6 +14,18 @@ may become useful later, but the SDK path is the product: Rust-authored kernels,
 HSACO generation, metadata, typed bindings, HIPRTC, ROCm runtime APIs,
 diagnostics, validation, and examples.
 
+## Current Status
+
+| Area | Status | Evidence |
+| --- | --- | --- |
+| Clean root SDK | Done | Root examples are limited to SDK, diagnostics, and release probes; heavy demos live in `demo-projects/`. |
+| Separate demo catalogue | Done | `demo-projects/README.md` and per-demo manifests own visual, benchmark, capture, and experiment demos. |
+| Shrink root dependencies | Done | Root `Cargo.toml` no longer carries visual/demo-only dependency sets. |
+| Docs during move | Done | `README.md`, `docs/index.md`, `examples/README.md`, `docs/visual-demos.md`, and project-generation docs point at the new layout. |
+| Condense documentation | Done for repo docs | Maintained docs are short and linked from `docs/index.md`; long-form notes are retained under `docs/wiki/` as wiki source. |
+| Improve abstractions | First pass done | Device preludes, `#[kernel_contract]`, generated launch builders, `rocm_oxide::gpu`, and `gpu_test!` are now available. |
+| Release readiness | Ready for preview-candidate review | Doctor JSON/GitHub modes, first-user-path gate, offline gate, and known-good release profile docs are in place. Tagging still needs an explicit release decision. |
+
 ## Phase 1: Clean The Root
 
 Goal: make the root crate feel like the SDK, not a demo dumping ground.
