@@ -33,6 +33,9 @@ ROCm feature exploration, but their exact shape is not stable yet:
   globals, unsafe non-owning raw module/function handles, and raw launch escape
   hatches;
 - `hiprtc`: runtime compiler backends and specialization cache internals;
+- `gpu`: high-level algorithms backed by optional rocPRIM and rocThrust
+  wrappers, currently focused on small reductions, scans, sort/select, and
+  byte-pattern fills;
 - `libraries`: optional ROCm library interop for rocBLAS, rocFFT, rocPRIM,
   hipBLASLt, COMGR, and related handles/descriptors;
 - `operation`: lazy stream/graph operation composition;

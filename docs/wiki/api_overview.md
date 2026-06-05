@@ -247,6 +247,8 @@ compile time — no file path needed at runtime.
 |--------|----------|
 | `runtime` | `Device`, `Module`, `Kernel`, `LaunchConfig`, `DeviceLimits`, `DeviceProperties` |
 | `hip` | `DeviceBuffer<T>`, `ManagedBuffer<T>`, `PinnedHostBuffer`, `Stream`, `Event`, `Graph` |
+| `gpu` | High-level `reduce_sum`, prefix scans, u32 sort/select/map helpers |
+| `libraries` | `RocPrim`, `RocThrust`, `RocBlas`, `RocFft`, `Comgr`, `HipBlasLt` |
 | `operation` | `ExecutionContext`, `StreamPool`, `DeviceOperation` (trait), `CapturedGraph` |
 | `hiprtc` | `SpecializationCache`, HIPRTC/COMGR compilation (internal) |
 | `profiling` | ROC-Tracer integration (internal) |
@@ -286,6 +288,29 @@ GPU-side allocation. Allocate with `DeviceBuffer::new(n)` (uninitialized) or
 host with `copy_to_vec()`. Requires `T: Copy` for `from_slice` and
 `T: Copy + Default` for `copy_to_vec`.
 
+### `gpu` Algorithms
+
+The host-side `rocm_oxide::gpu` module provides small rocPRIM/rocThrust-backed
+helpers for useful GPU work without writing a custom kernel:
+
+```rust,ignore
+use rocm_oxide::{DeviceBuffer, gpu};
+
+let input = DeviceBuffer::from_slice(&[1u32, 2, 3, 4])?;
+let sum = gpu::reduce_sum(&input)?;
+
+let scan = DeviceBuffer::<u32>::new(input.len())?;
+gpu::exclusive_scan(&input, &scan, 0)?;
+
+let mut sortable = DeviceBuffer::from_slice(&[4u32, 1, 3, 2])?;
+gpu::sort(&mut sortable)?;
+```
+
+`reduce_sum`, `inclusive_scan`, and `exclusive_scan` currently support `u32`,
+`i32`, and `f32`. Sorting, select, unique, count, and map-add helpers currently
+target `u32`. Use `RocPrim` and `RocThrust` directly when you need explicit
+stream or temporary-storage control.
+
 ### `ManagedBuffer<T>`
 
 HIP managed (unified) memory accessible from both host and device. Useful for
@@ -319,6 +344,7 @@ The root `examples/` directory contains SDK and diagnostic programs:
 |---------|-------------|
 | `hello_gpu.rs` | **Start here**: minimal HIPRTC vector add, end-to-end lifecycle |
 | `vector_add.rs` | Simple 1-D HIP kernel (C++ via HIPRTC) |
+| `gpu_algorithms.rs` | Small rocPRIM/rocThrust-backed algorithms through `rocm_oxide::gpu` |
 | `rust_device_vector_add.rs` | Same kernel written in Rust |
 | `rust_device_add_one.rs` | Minimal Rust kernel, no slice types |
 | `module_global.rs` | `#[device_global]` and `Module::global` |

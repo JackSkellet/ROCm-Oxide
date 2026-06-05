@@ -5,6 +5,8 @@
 //! intentionally public for experiments and generated bindings, but are not all
 //! stable API yet.
 
+/// Experimental high-level GPU algorithm helpers backed by ROCm libraries.
+pub mod gpu;
 /// Experimental low-level HIP wrapper surface.
 pub mod hip;
 /// Experimental HIPRTC/COMGR runtime compilation and code-object cache surface.
@@ -69,7 +71,7 @@ pub mod prelude {
     pub use crate::{
         Device, DeviceBuffer, DevicePod, DeviceSlice, DeviceSliceMut, Dim3, Error, Event, Global,
         Kernel, KernelMetadata, KernelResource, LaunchConfig, ManagedBuffer, Module,
-        PinnedHostBuffer, Result, RocTx, RocTxScopedRange, Stream, launch, validate_block_x,
+        PinnedHostBuffer, Result, RocTx, RocTxScopedRange, Stream, gpu, launch, validate_block_x,
         validate_buffer_len, validate_device_buffers_disjoint, validate_launch_config,
     };
 }

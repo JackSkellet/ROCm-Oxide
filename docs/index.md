@@ -11,6 +11,9 @@ stay short and link here when a topic needs more detail.
   and build/runtime fixes.
 - [API stability](api-stability.md): stable, experimental, and internal surfaces
   during the `0.x` SDK preview.
+- [ROCm library interop](wiki/rocm-library-interop.md): rocBLAS, rocFFT,
+  rocPRIM/rocThrust, COMGR, and the high-level `rocm_oxide::gpu` algorithms
+  layer.
 - [Project generation](project-generation.md): `cargo rocm-oxide new` scaffold
   layout, path dependencies, and standalone roadmap.
 - [Release process](release.md): repeatable gates for preview tags.

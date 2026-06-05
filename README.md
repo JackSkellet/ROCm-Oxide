@@ -16,6 +16,7 @@ It currently provides:
 - HIPRTC runtime compilation
 - COMGR/toolchain integration
 - Device buffers, streams, events, and graph helpers
+- `rocm_oxide::gpu` helpers for small rocPRIM/rocThrust-backed algorithms
 - `cargo rocm-oxide` diagnostics, build, verification, pipeline, and profiling tools
 
 > **Status:** Experimental SDK preview
@@ -389,6 +390,7 @@ Beginner examples:
 cargo run --example hello_gpu
 cargo run --features device-spike --example hello_gpu_rust
 cargo run --example vector_add
+cargo run --example gpu_algorithms
 cargo run --features device-spike --example rust_device_generated_bindings
 ```
 

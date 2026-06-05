@@ -45,6 +45,42 @@ Because rocFFT and the rocPRIM/hipCUB shim are optional,
 `RocmLibraryReport::query()` reports rocBLAS, rocFFT, and rocPRIM/hipCUB
 availability independently while the rest of ROCm-Oxide continues to run.
 
+### High-Level `gpu` Algorithms
+
+`rocm_oxide::gpu` is the small host-side algorithms layer above the optional
+rocPRIM and rocThrust wrappers. It is intended for users who want common GPU
+operations before writing a custom kernel:
+
+```rust,ignore
+use rocm_oxide::{DeviceBuffer, gpu};
+
+let input = DeviceBuffer::from_slice(&[1u32, 2, 3, 4])?;
+let sum = gpu::reduce_sum(&input)?;
+
+let scan = DeviceBuffer::<u32>::new(input.len())?;
+gpu::exclusive_scan(&input, &scan, 0)?;
+
+let mapped = DeviceBuffer::<u32>::new(input.len())?;
+gpu::map_add_u32(&input, &mapped, 8)?;
+
+let mut sortable = DeviceBuffer::from_slice(&[4u32, 1, 3, 2])?;
+gpu::sort(&mut sortable)?;
+```
+
+Supported first-pass operations:
+
+- `reduce_sum`, `inclusive_scan`, and `exclusive_scan` for `u32`, `i32`, and
+  `f32`;
+- in-place `sort`, out-of-place `sort_keys_u32`, `sort_by_key_u32`,
+  `unique_u32`, and `count_eq_u32`;
+- `select_flagged_u32` and `map_add_u32`;
+- `fill_zero` and byte-pattern `fill_bytes`.
+
+The helpers allocate their own temporary storage and synchronize before
+returning. Use the lower-level `RocPrim` and `RocThrust` methods when the caller
+needs explicit stream ordering, temporary-storage reuse, or APIs not exposed by
+the high-level layer yet.
+
 ## COMGR
 
 `Comgr::open()` loads `libamd_comgr.so` or `libamd_comgr.so.3` and resolves

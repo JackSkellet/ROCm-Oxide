@@ -18,6 +18,7 @@ local device crate and do not use the source-workspace `device-spike` feature.
 | Module global | `examples/module_global.rs` | `cargo run --example module_global` | HIPRTC module/global lookup and host interaction. |
 | Pinned stream vector add | `examples/pinned_stream_vector_add.rs` | `cargo run --example pinned_stream_vector_add` | Pinned host memory plus stream-oriented launch flow. |
 | Device operation chain | `examples/device_operation_chain.rs` | `cargo run --example device_operation_chain` | Higher-level device operation and async composition path. |
+| GPU algorithms | `examples/gpu_algorithms.rs` | `cargo run --example gpu_algorithms` | High-level `rocm_oxide::gpu` reduce, scan, map, select, and sort helpers backed by rocPRIM/rocThrust. |
 | Feature showcase | `examples/feature_showcase.rs` | `cargo run --features device-spike --example feature_showcase` | Broad SDK capability sample covering runtime, generated kernels, library probes, and profiling hooks. |
 
 `scripts/first-user-path.sh` runs the two hello examples plus the local
