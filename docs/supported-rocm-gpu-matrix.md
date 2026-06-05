@@ -11,7 +11,7 @@ produce the same validation artifacts.
 
 ## Shared Expectations
 
-- Rust uses the pinned nightly toolchain with `rust-src`.
+- Rust uses the nightly toolchain selected by `rust-toolchain.toml` with `rust-src`.
 - ROCm tools are discovered from explicit `ROCM_OXIDE_*` variables, `ROCM_PATH`,
   `HIP_PATH`, `/opt/rocm`, or `PATH`.
 - GPU verification runs with one Rust test thread.

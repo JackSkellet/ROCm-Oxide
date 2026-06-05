@@ -4,7 +4,7 @@ ROCm-Oxide emits optimized release HSACO files by default. For ROCgdb or
 ROCm-native debugger sessions, enable device debug info explicitly:
 
 ```bash
-ROCM_OXIDE_DEVICE_DEBUG=1 cargo run --example rust_device_generated_bindings
+ROCM_OXIDE_DEVICE_DEBUG=1 cargo run --features device-spike --example rust_device_generated_bindings
 ```
 
 With this flag set, `tools/rocm-oxide-build` adds `-C debuginfo=2` to the final

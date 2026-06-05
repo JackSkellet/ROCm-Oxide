@@ -63,11 +63,11 @@ These examples must build and run cleanly before tagging:
 | Example | Command | What it tests |
 |---|---|---|
 | `hello_gpu` | `cargo run --example hello_gpu` | HIPRTC runtime path, vector add |
-| `hello_gpu_rust` | `cargo run --example hello_gpu_rust` | Full Rust device-kernel pipeline |
-| `rust_device_generated_bindings` | `cargo run --example rust_device_generated_bindings` | Generated `DeviceKernels` struct, typed launch |
-| `feature_showcase` | `cargo run --example feature_showcase` | Runtime feature coverage sweep |
+| `hello_gpu_rust` | `cargo run --features device-spike --example hello_gpu_rust` | Full Rust device-kernel pipeline |
+| `rust_device_generated_bindings` | `cargo run --features device-spike --example rust_device_generated_bindings` | Generated `DeviceKernels` struct, typed launch |
+| `feature_showcase` | `cargo run --features device-spike --example feature_showcase` | Runtime feature coverage sweep |
 | `validation_profile` | `cargo run --example validation_profile` | Device caps, ROCm version, library availability |
-| `performance_probe` | `cargo run --example performance_probe -- --json target/performance_probe.json` | Timing/resource JSON artifact |
+| `performance_probe` | `cargo run --features device-spike --example performance_probe -- --json target/performance_probe.json` | Timing/resource JSON artifact |
 
 ### Tier 2 — Should pass (documents skip if not)
 

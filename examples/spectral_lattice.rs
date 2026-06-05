@@ -3825,7 +3825,7 @@ fn parse_args() -> Result<DemoArgs, Box<dyn std::error::Error>> {
             }
             "--help" | "-h" => {
                 println!(
-                    "Usage: cargo run --example spectral_lattice -- [--frames N] [--mode MODE] [--resolution 4k|WIDTHxHEIGHT] [--present cpu|gl|vulkan] [--present-scale 1|2|4] [--fps-limit FPS|uncapped] [--gpu-work ITERATIONS] [--output PATH]"
+                    "Usage: cargo run --features 'device-spike visual-demos' --example spectral_lattice -- [--frames N] [--mode MODE] [--resolution 4k|WIDTHxHEIGHT] [--present cpu|gl|vulkan] [--present-scale 1|2|4] [--fps-limit FPS|uncapped] [--gpu-work ITERATIONS] [--output PATH]"
                 );
                 std::process::exit(0);
             }

@@ -897,7 +897,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     )
     .map_err(|err| format!("failed to write src/main.rs: {err}"))?;
 
-    // Pin the same nightly toolchain the ROCm-Oxide workspace requires.
+    // Select the same nightly toolchain the ROCm-Oxide workspace requires.
     // Without this, cargo may use stable Rust and fail on `-Z build-std=core`.
     fs::write(
         path.join("rust-toolchain.toml"),
@@ -920,14 +920,16 @@ components = ["rust-src", "clippy", "rustfmt"]
 ## Build and run
 
 ```sh
+cargo rocm-oxide check-consumer
 cargo run
 ```
 
 This will:
-1. Run `rocm-oxide-build` (from the ROCm-Oxide workspace) to compile the Rust
+1. Validate the scaffold's relative paths and required build files.
+2. Run `rocm-oxide-build` (from the ROCm-Oxide workspace) to compile the Rust
    GPU kernel in `device-spike/` for `amdgcn-amd-amdhsa`.
-2. Produce a `.hsaco` code object and a typed `DeviceKernels` binding.
-3. Compile and run `src/main.rs`, which loads the kernel and verifies it on the GPU.
+3. Produce a `.hsaco` code object and a typed `DeviceKernels` binding.
+4. Compile and run `src/main.rs`, which loads the kernel and verifies it on the GPU.
 
 ## Write your own kernel
 
@@ -967,8 +969,9 @@ portability roadmap.
 
 - AMD GPU (RDNA 2+, RDNA 3+, RDNA 4+, or CDNA 2/3)
 - ROCm 6.0+ at `/opt/rocm` (or set `ROCM_PATH`)
-- `/opt/rocm/bin` on `PATH` (`llc`, `clang`, `llvm-readelf`)
-- Rust nightly with `rust-src` (pinned by `rust-toolchain.toml` in this project)
+- `/opt/rocm/bin` on `PATH` for ROCm executables such as `clang`
+- `/opt/rocm/lib/llvm/bin` on `PATH` for LLVM tools such as `llc` and `llvm-readelf`
+- Rust nightly with `rust-src` (selected by `rust-toolchain.toml` in this project)
 
 Before building, verify all tools are present by running doctor from the
 ROCm-Oxide source workspace:
@@ -993,6 +996,7 @@ output between the dashed markers when filing a bug report.
     println!();
     println!("  Build and run:");
     println!("    cd {}", path.display());
+    println!("    cargo rocm-oxide check-consumer");
     println!("    cargo run");
     println!();
     println!("  Note: `cargo rocm-oxide verify` must be run from the ROCm-Oxide");

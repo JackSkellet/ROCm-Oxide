@@ -55,8 +55,8 @@ That script delegates to `tools/rocm-oxide-build`, which:
 10. links a `.hsaco` with ROCm `clang`
 11. validates that each kernel has a `.kd` kernel descriptor
 
-The root `build.rs` runs the build tool before the host crate compiles and
-exports:
+When the root crate is built with `--features device-spike`, `build.rs` runs the
+build tool before the host crate compiles and exports:
 
 - `ROCM_OXIDE_DEVICE_HSACO`
 - `ROCM_OXIDE_DEVICE_BINDINGS`
@@ -65,8 +65,8 @@ exports:
 The launch tests are:
 
 ```bash
-cargo run --example rust_device_add_one
-cargo run --example rust_device_generated_bindings
+cargo run --features device-spike --example rust_device_add_one
+cargo run --features device-spike --example rust_device_generated_bindings
 ```
 
 This successfully launches two Rust-authored kernels on the current `gfx1100`

@@ -14,7 +14,7 @@ production SDK vision.
 ## Run it
 
 ```sh
-cargo run --example hello_gpu_rust
+cargo run --features device-spike --example hello_gpu_rust
 ```
 
 Expected output:
@@ -26,6 +26,12 @@ hello_gpu_rust: 1048576 elements verified — Rust-authored kernel passed on gfx
 
 The first build triggers the full pipeline (usually 20–60 s). Subsequent builds
 are incremental and very fast unless `device-spike/src` changes.
+
+The feature flag is intentional: it keeps normal source-workspace host builds
+and external path dependencies from compiling the repository's reference
+`device-spike` crate during setup. Generated projects created by
+`cargo rocm-oxide new` compile their own local `device-spike/` crate and do not
+need this flag.
 
 ---
 
@@ -44,8 +50,8 @@ examples/
 build.rs               ← Orchestrates the build pipeline
 ```
 
-`cargo build` on the host crate triggers `build.rs`, which runs
-`rocm-oxide-build` as a subprocess. The build tool:
+`cargo build --features device-spike` on the source workspace triggers
+`build.rs`, which runs `rocm-oxide-build` as a subprocess. The build tool:
 
 1. Scans `device-spike/src/lib.rs` for `#[kernel]` functions.
 2. Compiles the device crate with `cargo rustc -Z build-std=core --target amdgcn-amd-amdhsa`.
@@ -166,7 +172,7 @@ let out = d_out.copy_to_vec()?;
 |-------------|--------|
 | AMD GPU | Any ROCm-supported GPU (RDNA 2+, CDNA 2+) |
 | ROCm | 6.0+ at `/opt/rocm` or `ROCM_PATH` |
-| Rust nightly | Pinned by `rust-toolchain.toml` |
+| Rust nightly | Selected by `rust-toolchain.toml` |
 | `rust-src` component | Required by `-Z build-std=core` |
 | ROCm `llc` | Lowers LLVM IR to object file |
 | ROCm `clang` | Links objects to `.hsaco` |
@@ -192,9 +198,8 @@ rustup component add rust-src --toolchain nightly
 ### `could not compile device crate: error[E0658]: use of unstable library feature`
 
 The device crate uses nightly-only features (`stdarch_amdgpu`, `fn_traits`,
-`unboxed_closures`). These require the exact nightly pinned in
-`rust-toolchain.toml`. If you are using a different nightly, either update the
-toolchain file or set `RUSTUP_TOOLCHAIN=nightly` and re-install `rust-src`.
+`unboxed_closures`). Use the nightly toolchain selected by
+`rust-toolchain.toml`, then re-install `rust-src` if doctor reports it missing.
 
 ### `llc: command not found` / `clang: command not found`
 
@@ -216,7 +221,7 @@ find them:
 ```sh
 export ROCM_PATH=/opt/rocm                              # preferred
 export ROCM_OXIDE_LLC=/opt/rocm/lib/llvm/bin/llc        # or override directly
-ROCM_PATH=/path/to/rocm cargo run --example hello_gpu_rust
+ROCM_PATH=/path/to/rocm cargo run --features device-spike --example hello_gpu_rust
 ```
 
 ### `rocm-oxide-build failed: no #[kernel] functions found in device crate bundle`
@@ -240,7 +245,7 @@ No AMD GPU was found. Either:
 Force the architecture manually if the GPU is present but not detected:
 
 ```sh
-ROCM_OXIDE_ARCH=gfx1100 cargo run --example hello_gpu_rust
+ROCM_OXIDE_ARCH=gfx1100 cargo run --features device-spike --example hello_gpu_rust
 ```
 
 ### `Architecture mismatch: compiled for gfx1100, device is gfx1201`
@@ -249,7 +254,7 @@ The cached `.hsaco` was compiled for a different GPU. Clean and rebuild:
 
 ```sh
 cargo clean
-ROCM_OXIDE_ARCH=gfx1201 cargo run --example hello_gpu_rust
+ROCM_OXIDE_ARCH=gfx1201 cargo run --features device-spike --example hello_gpu_rust
 ```
 
 ### `.hsaco` validation failed: symbol `vector_add` not found
@@ -271,7 +276,7 @@ The kernel ran but produced incorrect results. Possible causes:
 Enable device debug builds to get source-level correlation in crash reports:
 
 ```sh
-ROCM_OXIDE_DEVICE_DEBUG=1 cargo run --example hello_gpu_rust
+ROCM_OXIDE_DEVICE_DEBUG=1 cargo run --features device-spike --example hello_gpu_rust
 ```
 
 ---

@@ -2778,7 +2778,7 @@ fn parse_args() -> Result<DemoArgs, Box<dyn std::error::Error>> {
             }
             "--help" | "-h" => {
                 println!(
-                    "Usage: cargo run --example matrix_lens -- [--frames N] [--mode matrix|glass|thermal|xray] [--capture auto|dmabuf|video|pattern] [--resolution 540p|720p|1080p|WIDTHxHEIGHT] [--fps-limit FPS|uncapped]"
+                    "Usage: cargo run --features 'device-spike capture-demos' --example matrix_lens -- [--frames N] [--mode matrix|glass|thermal|xray] [--capture auto|dmabuf|video|pattern] [--resolution 540p|720p|1080p|WIDTHxHEIGHT] [--fps-limit FPS|uncapped]"
                 );
                 std::process::exit(0);
             }

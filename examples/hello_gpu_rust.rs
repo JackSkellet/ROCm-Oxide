@@ -16,8 +16,8 @@
 //!   Ordinary Rust that opens the device, loads the compiled kernel, sends
 //!   data to the GPU, launches, and reads back results.
 //!
-//! `build.rs` runs `rocm-oxide-build` during `cargo build`, which compiles
-//! the device crate and emits:
+//! In the source workspace, `cargo build --features device-spike` runs
+//! `rocm-oxide-build`, which compiles the device crate and emits:
 //!   - `rocm_oxide_device_spike.hsaco`    — GPU code object
 //!   - `rocm_oxide_device_spike.bindings.rs` — typed `DeviceKernels` struct
 //!   - `rocm_oxide_device_spike.metadata.json` — argument layout records
@@ -25,7 +25,7 @@
 //! # Run
 //!
 //! ```sh
-//! cargo run --example hello_gpu_rust
+//! cargo run --features device-spike --example hello_gpu_rust
 //! ```
 //!
 //! # Kernel source (in device-spike/src/lib.rs)

@@ -9,13 +9,13 @@
 //! Run with Vulkan presentation:
 //!
 //! ```sh
-//! ROCM_OXIDE_VISUAL_PRESENT=vulkan cargo run --example vulkan_orbit_field
+//! ROCM_OXIDE_VISUAL_PRESENT=vulkan cargo run --features visual-demos --example vulkan_orbit_field
 //! ```
 //!
 //! Optional bounded run:
 //!
 //! ```sh
-//! ROCM_OXIDE_VISUAL_PRESENT=vulkan cargo run --example vulkan_orbit_field -- --frames 300
+//! ROCM_OXIDE_VISUAL_PRESENT=vulkan cargo run --features visual-demos --example vulkan_orbit_field -- --frames 300
 //! ```
 //!
 //! This is intentionally self-contained:

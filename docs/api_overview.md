@@ -330,10 +330,12 @@ The `examples/` directory contains end-to-end programs:
 | `matrix_lens.rs` | 2-D matrix kernel with shared memory |
 | `spectral_lattice.rs` | FFT-style wavefront pattern |
 
-Run any example with:
+Run HIPRTC-only examples directly, or enable the source-workspace `device-spike`
+feature for examples that use the repository's generated Rust-device bindings:
 
 ```sh
-cargo run --example rust_device_vector_add
+cargo run --example hello_gpu
+cargo run --features device-spike --example rust_device_vector_add
 ```
 
 ---

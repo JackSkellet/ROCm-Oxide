@@ -388,7 +388,7 @@ impl Args {
                 args.json = Some(PathBuf::from(path));
             } else if arg == "--help" || arg == "-h" {
                 println!(
-                    "Usage: cargo run --example performance_probe -- [--json target/perf.json]"
+                    "Usage: cargo run --features device-spike --example performance_probe -- [--json target/perf.json]"
                 );
                 std::process::exit(0);
             } else {

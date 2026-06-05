@@ -1663,7 +1663,7 @@ fn with_core_build_hint(err: String) -> String {
         || err.contains("rust-src")
     {
         format!(
-            "{err}\n\nhint: ROCm-Oxide device compilation must build `core` for `{TARGET}` with nightly Rust and the `rust-src` component. This repo pins nightly in rust-toolchain.toml; run `rustup component add rust-src` if doctor reports it missing, then retry `cargo rocm-oxide doctor`."
+            "{err}\n\nhint: ROCm-Oxide device compilation must build `core` for `{TARGET}` with nightly Rust and the `rust-src` component. This repo selects nightly in rust-toolchain.toml; run `rustup component add rust-src` if doctor reports it missing, then retry `cargo rocm-oxide doctor`."
         )
     } else {
         err

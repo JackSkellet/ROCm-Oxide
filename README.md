@@ -87,7 +87,7 @@ Walkthrough:
 This is the main SDK path.
 
 ```sh
-cargo run --example hello_gpu_rust
+cargo run --features device-spike --example hello_gpu_rust
 ```
 
 Expected output:
@@ -109,6 +109,10 @@ This path demonstrates:
 The first build can take 20–60 seconds while the device crate compiles.
 Subsequent builds are incremental.
 
+The `device-spike` feature is required only for source-workspace examples that
+embed the repository's reference Rust device crate. Normal host/runtime builds
+and generated consumer projects do not compile this reference kernel code.
+
 Walkthrough:
 
 - [docs/hello_gpu_rust.md](docs/hello_gpu_rust.md)
@@ -127,7 +131,7 @@ Install the cargo subcommand once from the repository root:
 cargo install --path tools/cargo-rocm-oxide
 ```
 
-Then run the three-command sequence:
+Then run the four-command sequence:
 
 ```sh
 # 1. Clone (or cd into) the ROCm-Oxide workspace
@@ -137,8 +141,12 @@ cd ROCm-Oxide
 # 2. Generate the scaffold — paths are computed automatically
 cargo rocm-oxide new ../my-project
 
-# 3. Build and run
-cd ../my-project && cargo run
+# 3. Validate the scaffold paths
+cd ../my-project
+cargo rocm-oxide check-consumer
+
+# 4. Build and run
+cargo run
 ```
 
 The generated project uses relative `path` links back to this workspace.
@@ -159,7 +167,7 @@ Required:
 For Rust-authored device kernels:
 
 ```sh
-rustup component add rust-src
+rustup component add rust-src --toolchain nightly
 ```
 
 If something fails, run:
@@ -259,6 +267,7 @@ After installing `cargo-rocm-oxide`, these commands are available:
 ```sh
 cargo rocm-oxide doctor
 cargo rocm-oxide build
+cargo rocm-oxide check-consumer
 cargo rocm-oxide verify --quick
 cargo rocm-oxide verify --full
 cargo rocm-oxide pipeline
@@ -271,6 +280,7 @@ Common uses:
 |---|---|
 | `cargo rocm-oxide doctor` | Check ROCm, Rust, GPU, and workspace setup |
 | `cargo rocm-oxide build` | Build device artifacts |
+| `cargo rocm-oxide check-consumer` | Validate a generated scaffold project |
 | `cargo rocm-oxide verify --quick` | Run the source-workspace quick verification gate |
 | `cargo rocm-oxide verify --full` | Run the full verification gate |
 | `cargo rocm-oxide pipeline` | Inspect generated kernels and pipeline artifacts |
@@ -335,6 +345,7 @@ Validated machine profiles:
 See:
 
 - [docs/release_checklist.md](docs/release_checklist.md)
+- [docs/sdk-preview-restructure-plan.md](docs/sdk-preview-restructure-plan.md)
 - [docs/supported-rocm-gpu-matrix.md](docs/supported-rocm-gpu-matrix.md)
 
 ---
@@ -385,33 +396,40 @@ Beginner examples:
 
 ```sh
 cargo run --example hello_gpu
-cargo run --example hello_gpu_rust
+cargo run --features device-spike --example hello_gpu_rust
 cargo run --example vector_add
-cargo run --example rust_device_generated_bindings
+cargo run --features device-spike --example rust_device_generated_bindings
 ```
 
 Runtime and feature examples:
 
 ```sh
-cargo run --example feature_showcase
+cargo run --features device-spike --example feature_showcase
 cargo run --example validation_profile
-cargo run --example performance_probe -- --json target/performance_probe.json
+cargo run --features device-spike --example performance_probe -- --json target/performance_probe.json
 ```
 
 Visual and experimental demos:
 
 ```sh
-cargo run --example spectral_lattice
-cargo run --example spectral_lattice -- --frames 3 --resolution 4k --fps-limit 120
-cargo run --example matrix_lens -- --resolution 720p --mode matrix
-cargo run --example compiler_feature_lab
-cargo run --example stress_test_gui
-cargo run --example stress_3d_gui
+cargo run --features 'device-spike visual-demos' --example spectral_lattice
+cargo run --features 'device-spike visual-demos' --example spectral_lattice -- --frames 3 --resolution 4k --fps-limit 120
+cargo run --features 'device-spike capture-demos' --example matrix_lens -- --resolution 720p --mode matrix
+cargo run --features 'device-spike visual-demos' --example compiler_feature_lab
+cargo run --features 'device-spike visual-demos' --example stress_test_gui
+cargo run --features 'device-spike visual-demos' --example stress_3d_gui
 ```
+
+Examples that use generated Rust-device bindings require
+`device-spike`. Visual demos also require `visual-demos`; capture demos such as
+`matrix_lens` require `capture-demos`. HIPRTC-only examples such as `hello_gpu`
+and `vector_add` do not need demo features.
 
 For the full visual demo table, see:
 
 - [docs/visual-demos.md](docs/visual-demos.md)
+- [examples/README.md](examples/README.md)
+- [demo-projects/README.md](demo-projects/README.md)
 
 ---
 

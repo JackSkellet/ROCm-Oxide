@@ -23,7 +23,7 @@ produces this layout:
 my-app/
   Cargo.toml              — host crate; depends on rocm-oxide via relative path
   build.rs                — invokes rocm-oxide-build; RUNTIME_PATH is relative
-  rust-toolchain.toml     — pins nightly + rust-src (required for device build)
+  rust-toolchain.toml     — selects nightly + rust-src (required for device build)
   README.md               — scaffold-specific usage and portability notes
   src/
     main.rs               — sample host program using generated DeviceKernels

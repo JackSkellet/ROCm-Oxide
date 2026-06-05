@@ -9,13 +9,13 @@
 //! Run with the Vulkan presenter:
 //!
 //! ```sh
-//! ROCM_OXIDE_VISUAL_PRESENT=vulkan cargo run --example vulkan_plasma_demo
+//! ROCM_OXIDE_VISUAL_PRESENT=vulkan cargo run --features visual-demos --example vulkan_plasma_demo
 //! ```
 //!
 //! Optional bounded run:
 //!
 //! ```sh
-//! ROCM_OXIDE_VISUAL_PRESENT=vulkan cargo run --example vulkan_plasma_demo -- --frames 300
+//! ROCM_OXIDE_VISUAL_PRESENT=vulkan cargo run --features visual-demos --example vulkan_plasma_demo -- --frames 300
 //! ```
 //!
 //! This demo intentionally does not add a new Vulkan stack. It reuses the

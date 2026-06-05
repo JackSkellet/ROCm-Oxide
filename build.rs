@@ -17,6 +17,10 @@ fn main() {
 
     compile_rocprim_shim(&rocm_path);
 
+    if !device_spike_feature_enabled() {
+        return;
+    }
+
     println!("cargo:rerun-if-changed=device-spike/Cargo.toml");
     println!("cargo:rerun-if-changed=device-spike/src");
     println!("cargo:rerun-if-changed=crates/rocm-oxide-device/Cargo.toml");
@@ -92,6 +96,10 @@ fn main() {
         "cargo:rustc-env=ROCM_OXIDE_DEVICE_MANIFEST={}",
         manifest_out.display()
     );
+}
+
+fn device_spike_feature_enabled() -> bool {
+    env::var_os("CARGO_FEATURE_DEVICE_SPIKE").is_some()
 }
 
 fn validate_generated_artifacts(hsaco: &Path, bindings: &Path, metadata: &Path, manifest: &Path) {

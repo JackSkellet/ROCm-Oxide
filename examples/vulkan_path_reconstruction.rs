@@ -9,13 +9,13 @@
 //! Run with Vulkan presentation:
 //!
 //! ```sh
-//! ROCM_OXIDE_VISUAL_PRESENT=vulkan cargo run --example vulkan_path_reconstruction
+//! ROCM_OXIDE_VISUAL_PRESENT=vulkan cargo run --features visual-demos --example vulkan_path_reconstruction
 //! ```
 //!
 //! Optional bounded run:
 //!
 //! ```sh
-//! ROCM_OXIDE_VISUAL_PRESENT=vulkan cargo run --example vulkan_path_reconstruction -- --frames 300
+//! ROCM_OXIDE_VISUAL_PRESENT=vulkan cargo run --features visual-demos --example vulkan_path_reconstruction -- --frames 300
 //! ```
 //!
 //! What this demonstrates:

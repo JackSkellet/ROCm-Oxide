@@ -9,13 +9,13 @@
 //! Run:
 //!
 //! ```sh
-//! ROCM_OXIDE_VISUAL_PRESENT=vulkan cargo run --example vulkan_interactive_path_reconstruction
+//! ROCM_OXIDE_VISUAL_PRESENT=vulkan cargo run --features visual-demos --example vulkan_interactive_path_reconstruction_motion_denoise_v2
 //! ```
 //!
 //! Bounded run:
 //!
 //! ```sh
-//! ROCM_OXIDE_VISUAL_PRESENT=vulkan cargo run --example vulkan_interactive_path_reconstruction -- --frames 300
+//! ROCM_OXIDE_VISUAL_PRESENT=vulkan cargo run --features visual-demos --example vulkan_interactive_path_reconstruction_motion_denoise_v2 -- --frames 300
 //! ```
 //!
 //! What this demonstrates:

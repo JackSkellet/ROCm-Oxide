@@ -1,7 +1,7 @@
-# Getting Started with ROCm Oxide
+# Getting Started with ROCm-Oxide
 
 This guide walks you from a bare machine to a running GPU kernel written in Rust,
-using the ROCm Oxide SDK.
+using the ROCm-Oxide SDK.
 
 ---
 
@@ -46,8 +46,9 @@ rustup toolchain install nightly
 rustup component add rust-src --toolchain nightly
 ```
 
-The workspace `rust-toolchain.toml` pins the exact nightly version used for this
-project, so `cargo` picks it up automatically inside the workspace.
+The workspace `rust-toolchain.toml` selects the nightly channel and requests
+`rust-src`, so `cargo` picks that toolchain up automatically inside the
+workspace.
 
 ---
 
@@ -80,6 +81,7 @@ target, `rust-src`, `/dev/kfd` access, ROCm tools (`llc`, `clang`, `llvm-readelf
 ```sh
 cargo rocm-oxide new my-gpu-project
 cd my-gpu-project
+cargo rocm-oxide check-consumer
 ```
 
 This creates:
@@ -174,6 +176,16 @@ On first build this triggers the full pipeline:
 
 Subsequent builds only recompile when device-spike source changes.
 
+In the ROCm-Oxide source workspace, Rust-device examples use the repository's
+reference `device-spike` crate and must opt in explicitly:
+
+```sh
+cargo run --features device-spike --example hello_gpu_rust
+```
+
+Generated consumer projects do not need that feature flag; their own `build.rs`
+compiles their local `device-spike/` crate.
+
 ---
 
 ## Verify the build
@@ -250,6 +262,18 @@ export ROCM_OXIDE_CLANG=/opt/rocm/bin/clang
 ```
 
 Then re-run `cargo rocm-oxide doctor` to confirm.
+
+### `target \`...\` requires the features: \`device-spike\``
+
+You are running a source-workspace example that embeds the repository's
+reference Rust device crate. Re-run with the feature enabled:
+
+```sh
+cargo run --features device-spike --example hello_gpu_rust
+```
+
+This gate keeps normal host/runtime builds and path-dependent consumer crates
+from compiling the source workspace's previous device kernel code during setup.
 
 ### `Architecture mismatch: metadata says gfx1100 but device is gfx1201`
 

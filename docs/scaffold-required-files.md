@@ -16,7 +16,7 @@ produces an opaque error that does not point back to the scaffold.
 | File | Purpose | Missing symptom |
 |---|---|---|
 | `build.rs` | Invokes `rocm-oxide-build` to compile the Rust GPU kernel; sets `ROCM_OXIDE_DEVICE_BINDINGS`, `ROCM_OXIDE_DEVICE_HSACO`, `ROCM_OXIDE_DEVICE_METADATA`, and `ROCM_OXIDE_DEVICE_MANIFEST` env vars that `src/main.rs` reads at compile time | `error: environment variable 'ROCM_OXIDE_DEVICE_BINDINGS' not defined` at compile time |
-| `rust-toolchain.toml` | Pins the same nightly Rust channel used by the ROCm-Oxide workspace; requests `rust-src`, `clippy`, and `rustfmt` components | Cargo uses stable Rust; `cargo build` fails with `error[E0635]: unknown feature \`build-std\`` or similar `-Z` flag rejection |
+| `rust-toolchain.toml` | Selects the nightly Rust channel used by the ROCm-Oxide workspace; requests `rust-src`, `clippy`, and `rustfmt` components | Cargo uses stable Rust; `cargo build` fails with `error[E0635]: unknown feature \`build-std\`` or similar `-Z` flag rejection |
 | `device-spike/Cargo.toml` | Declares the GPU device crate with the correct `rocm-oxide-device` and `rocm-oxide-kernel` path dependencies | Cargo resolver error citing a missing or wrong `Cargo.toml` |
 
 ---
@@ -54,8 +54,9 @@ channel = "nightly"
 components = ["rust-src", "clippy", "rustfmt"]
 ```
 
-The exact nightly pin is inherited from the ROCm-Oxide source workspace's own
-`rust-toolchain.toml` at scaffold generation time.
+The scaffold currently tracks the `nightly` channel rather than a dated nightly.
+Keep it aligned with the ROCm-Oxide source workspace if the workspace switches
+to a dated toolchain.
 
 ---
 

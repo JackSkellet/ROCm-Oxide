@@ -34,7 +34,7 @@ The GPU architecture string (`gfx1100`, `gfx1201`, etc.) matches your hardware.
 |-------------|--------|
 | AMD GPU | Any ROCm-supported GPU (RDNA 2+, CDNA 2+) |
 | ROCm | 6.0+ installed at `/opt/rocm` (or pointed to by `ROCM_PATH`) |
-| Rust nightly | Required for this workspace (`rust-toolchain.toml` pins it) |
+| Rust nightly | Required for this workspace (`rust-toolchain.toml` selects it) |
 | `libamdhip64.so` | Provided by ROCm; linked automatically by `build.rs` |
 | `libhiprtc.so` | Provided by ROCm; used to compile the kernel at runtime |
 
