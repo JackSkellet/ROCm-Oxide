@@ -41,8 +41,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     unsafe {
         kernels
             .add_one_launcher()
-            .grid_for(gpu_add_input.len())
-            .launch(&gpu_add_out, &gpu_add_input)?;
+            .launch_auto(&gpu_add_out, &gpu_add_input)?;
     }
     rocm_oxide::hip::synchronize()?;
     assert_eq!(gpu_add_out.download()?, vec![4.0, 1.0, 2.5]);

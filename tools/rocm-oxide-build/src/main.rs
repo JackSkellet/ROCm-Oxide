@@ -5630,6 +5630,7 @@ fn generate_kernel_binding(
     ));
     out.push_str(&format!("        {launcher_name}::new(self)\n"));
     out.push_str("    }\n\n");
+    out.push_str(&generate_kernel_doc_lines(kernel, "    "));
     out.push_str(&format!(
         "    pub unsafe fn {}(&self, {}) -> rocm_oxide::Result<()> {{\n",
         method_name,
@@ -5830,13 +5831,19 @@ fn generate_kernel_launcher_binding(
     let mut params = Vec::new();
     let mut operation_params = Vec::new();
     let mut call_args = Vec::new();
+    let mut buffer_arg_names = Vec::new();
     let mut operation_supported = true;
+    let has_block_x_arg = kernel
+        .args
+        .iter()
+        .any(|arg| arg.name == "block_x" && matches!(arg.kind, ArgKind::Scalar));
 
     for arg in &kernel.args {
         call_args.push(arg.name.clone());
         match &arg.kind {
             ArgKind::MutPtr(inner) | ArgKind::MutSlice(inner) => {
                 params.push(generated_buffer_ref_param(&arg.name, inner));
+                buffer_arg_names.push(arg.name.clone());
                 operation_params.push(format!(
                     "{}: std::sync::Arc<rocm_oxide::DeviceBuffer<{}>>",
                     arg.name, inner
@@ -5844,6 +5851,7 @@ fn generate_kernel_launcher_binding(
             }
             ArgKind::ConstPtr(inner) | ArgKind::ConstSlice(inner) => {
                 params.push(generated_buffer_ref_param(&arg.name, inner));
+                buffer_arg_names.push(arg.name.clone());
                 operation_params.push(format!(
                     "{}: std::sync::Arc<rocm_oxide::DeviceBuffer<{}>>",
                     arg.name, inner
@@ -5948,6 +5956,39 @@ fn generate_kernel_launcher_binding(
     out.push_str("            },\n");
     out.push_str("        }\n");
     out.push_str("    }\n\n");
+    let has_usize_len_arg = kernel
+        .args
+        .iter()
+        .any(|arg| arg.name == "n" && arg.ty == "usize" && matches!(arg.kind, ArgKind::Scalar));
+    if let Some(auto_len_expr) = generated_auto_launch_len_expr(has_usize_len_arg, &buffer_arg_names)
+    {
+        out.push_str("    /// Infers a one-dimensional launch grid from kernel arguments.\n");
+        out.push_str("    ///\n");
+        out.push_str("    /// Uses `n` when the kernel has a scalar `n` argument; otherwise uses the\n");
+        out.push_str("    /// first device buffer argument length. Call `.config(...)` or\n");
+        out.push_str("    /// `.grid_for(...)` first when the kernel's logical work size differs\n");
+        out.push_str("    /// from those values.\n");
+        out.push_str("    ///\n");
+        out.push_str("    /// # Safety\n");
+        out.push_str("    /// Same safety contract as [`launch`](Self::launch).\n");
+        out.push_str(&format!(
+            "    pub unsafe fn launch_auto(self{}) -> rocm_oxide::Result<()> {{\n",
+            generated_self_params(&params)
+        ));
+        out.push_str(&format!("        let __num_elems = {auto_len_expr};\n"));
+        if has_block_x_arg {
+            out.push_str("        let __config = rocm_oxide::LaunchConfig::try_for_num_elems_with_block_size(__num_elems, block_x)?;\n");
+        } else {
+            out.push_str("        let __config = rocm_oxide::LaunchConfig::try_for_num_elems(__num_elems)?;\n");
+        }
+        out.push_str("        unsafe {\n");
+        out.push_str(&format!(
+            "            self.config(__config).launch({})\n",
+            call_args.join(", ")
+        ));
+        out.push_str("        }\n");
+        out.push_str("    }\n\n");
+    }
     if operation_supported {
         out.push_str(&format!(
             "    pub unsafe fn operation(self{}) -> rocm_oxide::Result<impl rocm_oxide::DeviceOperation<Output = rocm_oxide::KernelLaunchCompletion> + 'static> {{\n",
@@ -5969,6 +6010,55 @@ fn generate_kernel_launcher_binding(
     }
     out.push_str("}\n");
     Ok(out)
+}
+
+fn generate_kernel_doc_lines(kernel: &KernelDecl, indent: &str) -> String {
+    let mut out = String::new();
+    out.push_str(indent);
+    out.push_str(&format!(
+        "/// Launches generated kernel `{}` with generated validation.\n",
+        kernel_method_name(&kernel.name)
+    ));
+    if !kernel.contracts.is_empty() {
+        out.push_str(indent);
+        out.push_str("///\n");
+        out.push_str(indent);
+        out.push_str("/// Generated contract checks:\n");
+        for contract in &kernel.contracts {
+            out.push_str(indent);
+            match contract {
+                KernelContract::Length(contract) => {
+                    out.push_str(&format!(
+                        "/// - `len({}) = {}`\n",
+                        contract.buffer, contract.required_len.source
+                    ));
+                }
+                KernelContract::Disjoint(contract) => {
+                    out.push_str(&format!(
+                        "/// - `disjoint({}, {})`\n",
+                        contract.left, contract.right
+                    ));
+                }
+            }
+        }
+    }
+    out.push_str(indent);
+    out.push_str("///\n");
+    out.push_str(indent);
+    out.push_str("/// # Safety\n");
+    out.push_str(indent);
+    out.push_str("/// The kernel ABI and argument order must match the generated binding.\n");
+    out
+}
+
+fn generated_auto_launch_len_expr(has_usize_len_arg: bool, buffer_arg_names: &[String]) -> Option<String> {
+    if has_usize_len_arg {
+        Some("n".to_string())
+    } else {
+        buffer_arg_names
+            .first()
+            .map(|name| format!("{name}.as_ref().len()"))
+    }
 }
 
 fn scalar_arg_is_indirect_global_buffer(
@@ -7075,6 +7165,7 @@ pub unsafe extern "C" fn vector_add(
         assert!(binding.contains("n: usize"));
         assert!(binding.contains("let out = out.as_ref();"));
         assert!(binding.contains("let a = a.as_ref();"));
+        assert!(binding.contains("/// Launches generated kernel `vector_add` with generated validation."));
         assert!(binding.contains("validate_launch_config(config)?"));
         assert!(binding.contains("validate_buffer_len(\"out\", out.len(), n)?"));
         assert!(binding.contains("validate_buffer_len(\"a\", a.len(), n)?"));
@@ -7102,6 +7193,9 @@ pub unsafe extern "C" fn vector_add(
         assert!(launcher.contains("pub fn try_grid_for(mut self, num_elems: usize) -> rocm_oxide::Result<Self>"));
         assert!(launcher.contains("pub fn on_stream(mut self, stream: &'a rocm_oxide::Stream) -> Self"));
         assert!(launcher.contains("pub unsafe fn launch(self, out: &impl AsRef<rocm_oxide::DeviceBuffer<f32>>, a: &impl AsRef<rocm_oxide::DeviceBuffer<f32>>, n: usize)"));
+        assert!(launcher.contains("pub unsafe fn launch_auto(self, out: &impl AsRef<rocm_oxide::DeviceBuffer<f32>>, a: &impl AsRef<rocm_oxide::DeviceBuffer<f32>>, n: usize)"));
+        assert!(launcher.contains("let __num_elems = n;"));
+        assert!(launcher.contains("self.config(__config).launch(out, a, n)"));
         assert!(launcher.contains("self.kernels.vector_add(config, out, a, n)"));
         assert!(launcher.contains("pub unsafe fn operation(self, out: std::sync::Arc<rocm_oxide::DeviceBuffer<f32>>, a: std::sync::Arc<rocm_oxide::DeviceBuffer<f32>>, n: usize)"));
         assert!(launcher.contains("self.kernels.vector_add_operation(config, out, a, n)"));
@@ -7201,6 +7295,11 @@ pub unsafe extern "C" fn vector_add(
         assert!(binding.contains("out.len()"));
         assert!(binding.contains("a.as_ptr()"));
         assert!(binding.contains("a.len()"));
+
+        let launcher = super::generate_kernel_launcher_binding(&kernels[0], &BTreeMap::new(), None)
+            .expect("launcher binding should generate");
+        assert!(launcher.contains("pub unsafe fn launch_auto(self, out: &impl AsRef<rocm_oxide::DeviceBuffer<f32>>, a: &impl AsRef<rocm_oxide::DeviceBuffer<f32>>, b: &impl AsRef<rocm_oxide::DeviceBuffer<f32>>)"));
+        assert!(launcher.contains("let __num_elems = out.as_ref().len();"));
     }
 
     #[test]
@@ -7354,6 +7453,8 @@ pub unsafe extern "C" fn temporal(
 
         let binding = generate_kernel_binding(&kernels[0], &BTreeMap::new(), None)
             .expect("binding should generate");
+        assert!(binding.contains("/// - `len(frame) = pixel_count`"));
+        assert!(binding.contains("/// - `len(color) = pixel_count/4`"));
         assert!(binding.contains("validate_buffer_len(\"frame\", frame.len(), pixel_count)?"));
         assert!(binding.contains("validate_buffer_len(\"color\", color.len(), pixel_count/4)?"));
         assert!(binding.contains("validate_buffer_len(\"aux\", aux.len(), pixel_count/4*3)?"));
@@ -7376,6 +7477,9 @@ pub unsafe extern "C" fn temporal_attr(
 
         let binding = generate_kernel_binding(&kernels[0], &BTreeMap::new(), None)
             .expect("binding should generate");
+        assert!(binding.contains("/// - `len(frame) = pixel_count`"));
+        assert!(binding.contains("/// - `len(color) = pixel_count/4`"));
+        assert!(binding.contains("/// - `disjoint(frame, color)`"));
         assert!(binding.contains("validate_buffer_len(\"frame\", frame.len(), pixel_count)?"));
         assert!(binding.contains("validate_buffer_len(\"color\", color.len(), pixel_count/4)?"));
         assert!(

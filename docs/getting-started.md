@@ -142,7 +142,7 @@ fn main() -> Result<()> {
     let out = DeviceBuffer::<u32>::new(n)?;   // allocate; kernel writes every element
 
     unsafe {
-        kernels.fill_indices_launcher().grid_for(n).launch(&out, n)?;
+        kernels.fill_indices_launcher().launch_auto(&out, n)?;
     }
     rocm_oxide::hip::synchronize()?;
 
@@ -155,11 +155,12 @@ fn main() -> Result<()> {
 
 > **`DeviceBuffer::new(n)`** allocates without zeroing. The generated binding
 > accepts `&impl AsRef<DeviceBuffer<T>>` for both read and write parameters, so
-> plain `DeviceBuffer<T>` and higher-level wrappers such as `GpuArray<T>` can be
-> passed directly. Mutability is expressed by the kernel's `DeviceSliceMut` type,
-> not by the Rust reference.
+> plain `DeviceBuffer<T>` and higher-level wrappers such as `GpuArray<T>` and
+> `GpuArray2D<T>` can be passed directly. Mutability is expressed by the
+> kernel's `DeviceSliceMut` type, not by the Rust reference.
 > The `unsafe` block is required: `launch!`, `launch_1d!`, generated launch
-> methods, and generated launcher `.launch(...)` calls are unsafe.
+> methods, generated launcher `.launch(...)` calls, and generated launcher
+> `.launch_auto(...)` calls are unsafe.
 
 ---
 

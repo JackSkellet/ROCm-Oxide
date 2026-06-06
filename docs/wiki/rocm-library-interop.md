@@ -53,7 +53,7 @@ operations before writing a custom kernel. The easiest path is `GpuArray<T>`,
 which wraps `DeviceBuffer<T>` with method-oriented helpers:
 
 ```rust,ignore
-use rocm_oxide::{GpuArray, gpu};
+use rocm_oxide::{GpuArray, GpuArray2D, gpu};
 
 let input = gpu::array([1u32, 2, 3, 4])?;
 assert_eq!(input.shape(), [4]);
@@ -61,7 +61,9 @@ let sum = input.sum()?;
 let same_sum = gpu::reduce_sum(&input)?;
 
 let scan = input.exclusive_scan(0)?;
+let inclusive = input.cumsum()?;
 let mapped = input.add_scalar(8)?;
+let copied = input.copy()?;
 
 let mapped_into = gpu::empty::<u32>(input.len())?;
 input.add_scalar_into(&mapped_into, 3)?;
@@ -73,12 +75,16 @@ let value = params.item()?;
 let filled = gpu::full(3, 42u32)?;
 let host = filled.to_list()?;
 
+let matrix = GpuArray2D::from_slice(2, 3, &[1u32, 2, 3, 4, 5, 6])?;
+assert_eq!(matrix.shape(), [2, 3]);
+let rows = matrix.to_rows()?;
+
 let mut sortable = GpuArray::from_slice(&[4u32, 1, 3, 2])?;
 sortable.sort()?;
 let sorted = sortable.download()?;
 
 let flags = GpuArray::from_slice(&[1u8, 0, 1, 0])?;
-let (selected, selected_count) = input.compact_by_flags(&flags)?;
+let (selected, selected_count) = input.where_flags(&flags)?;
 
 let mut keys = GpuArray::from_slice(&[3u32, 1, 2])?;
 let mut values = GpuArray::from_slice(&[30u32, 10, 20])?;
@@ -93,6 +99,7 @@ use rocm_oxide::{DeviceBuffer, gpu};
 
 let input = DeviceBuffer::from_slice(&[1u32, 2, 3, 4])?;
 let sum = gpu::reduce_sum(&input)?;
+let inclusive = gpu::cumsum(&input)?;
 
 let scan = DeviceBuffer::<u32>::new(input.len())?;
 gpu::exclusive_scan(&input, &scan, 0)?;
@@ -107,11 +114,18 @@ gpu::sort(&mut sortable)?;
 Supported first-pass operations:
 
 - `reduce_sum`, `inclusive_scan`, and `exclusive_scan` for `u32`, `i32`, and
-  `f32`;
+  `f32`, plus allocation-returning `cumsum` and `exclusive_cumsum` aliases;
 - in-place `sort`, out-of-place `sort_keys_u32`, `sort_by_key_u32`,
-  `unique_u32`, and `count_eq_u32`;
-- `select_flagged_u32` and `map_add_u32`;
+  `unique_u32`, `sort_unique_u32`, `sorted_unique_u32`, and `count_eq_u32`;
+- `select_flagged_u32`, `where_flags_u32`, `map_add_u32`, and
+  allocation-returning `add_scalar_u32`;
 - `fill_zero` and byte-pattern `fill_bytes`.
+
+`GpuArray2D<T>` provides row-major shape metadata on top of the same flat
+device allocation, including `shape() -> [rows, cols]`, `rows`/`cols`,
+`width`/`height`, and `to_rows()`. It still implements `AsRef<DeviceBuffer<T>>`
+so generated bindings and free `gpu::` algorithms can use it where they accept
+a flat device buffer.
 
 The helpers allocate their own temporary storage and synchronize before
 returning. Use the lower-level `RocPrim` and `RocThrust` methods when the caller

@@ -55,11 +55,11 @@ The generated bindings continue to validate nonzero grid/block dimensions,
 cuda-oxide scalarizes slices and exposes safe `DisjointSlice` bounds checks.
 ROCm-Oxide has the AMD device-side slice ABI for generated kernels. Kernels can
 accept `rocm_oxide_device::DeviceSlice<T>` and `DeviceSliceMut<T>`; generated
-host bindings accept `DeviceBuffer<T>` or wrappers such as `GpuArray<T>` through
-`AsRef<DeviceBuffer<T>>`, pass pointer/length pairs to HIP, and validate lengths
-plus obvious mutable-buffer aliasing before launch. The simple kernels and
-larger image, upscaling, stress, and raytrace paths all use this pointer/length
-ABI.
+host bindings accept `DeviceBuffer<T>` or wrappers such as `GpuArray<T>` and
+`GpuArray2D<T>` through `AsRef<DeviceBuffer<T>>`, pass pointer/length pairs to
+HIP, and validate lengths plus obvious mutable-buffer aliasing before launch.
+The simple kernels and larger image, upscaling, stress, and raytrace paths all
+use this pointer/length ABI.
 
 ## Memory And Synchronization
 

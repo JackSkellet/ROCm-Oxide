@@ -259,12 +259,20 @@ Then load and use:
 ```rust
 let kernels = DeviceKernels::load_embedded(&device)?;
 unsafe {
-    kernels.fill_indices_launcher().grid_for(n).launch(&out, n)?;
+    kernels.fill_indices_launcher().launch_auto(&out, n)?;
 }
 ```
 
 `load_embedded` reads the HSACO from the bytes embedded by `build.rs` at
 compile time — no file path needed at runtime.
+
+For simple 1-D kernels, generated launcher structs include `launch_auto(...)`.
+It derives a `LaunchConfig` from a scalar `n: usize` argument when present, or
+from the first device-buffer argument length otherwise. Use `.grid_for(...)`,
+`.block_x(...)`, or `.config(...)` when a kernel needs explicit launch geometry.
+Generated methods include rustdoc for parsed contracts such as buffer lengths
+and disjointness checks, so rust-analyzer can show the same validation rules
+the launcher enforces.
 
 ---
 
@@ -324,7 +332,7 @@ helpers for useful GPU work without writing a custom kernel. The most
 discoverable surface is `GpuArray<T>`:
 
 ```rust,ignore
-use rocm_oxide::{GpuArray, gpu};
+use rocm_oxide::{GpuArray, GpuArray2D, gpu};
 
 let input = gpu::array([1u32, 2, 3, 4])?;
 assert_eq!(input.shape(), [4]);
@@ -332,7 +340,9 @@ let sum = input.sum()?;
 let same_sum = gpu::reduce_sum(&input)?;
 
 let scan = input.exclusive_scan(0)?;
+let inclusive = input.cumsum()?;
 let mapped = input.add_scalar(8)?;
+let copied = input.copy()?;
 
 let mapped_into = gpu::empty::<u32>(input.len())?;
 input.add_scalar_into(&mapped_into, 3)?;
@@ -344,12 +354,16 @@ let value = params.item()?;
 let filled = gpu::full(3, 42u32)?;
 let host = filled.to_list()?;
 
+let matrix = GpuArray2D::from_slice(2, 3, &[1u32, 2, 3, 4, 5, 6])?;
+assert_eq!(matrix.shape(), [2, 3]);
+let rows = matrix.to_rows()?;
+
 let mut sortable = GpuArray::from_slice(&[4u32, 1, 3, 2])?;
 sortable.sort()?;
 let sorted = sortable.download()?;
 
 let flags = GpuArray::from_slice(&[1u8, 0, 1, 0])?;
-let (selected, selected_count) = input.compact_by_flags(&flags)?;
+let (selected, selected_count) = input.where_flags(&flags)?;
 
 let mut keys = GpuArray::from_slice(&[3u32, 1, 2])?;
 let mut values = GpuArray::from_slice(&[30u32, 10, 20])?;
@@ -363,6 +377,7 @@ use rocm_oxide::{DeviceBuffer, gpu};
 
 let input = DeviceBuffer::from_slice(&[1u32, 2, 3, 4])?;
 let sum = gpu::reduce_sum(&input)?;
+let inclusive = gpu::cumsum(&input)?;
 
 let scan = DeviceBuffer::<u32>::new(input.len())?;
 gpu::exclusive_scan(&input, &scan, 0)?;
@@ -373,15 +388,21 @@ gpu::sort(&mut sortable)?;
 
 `GpuArray<T>` also has `new`/`empty`, `zeros`/`zeroed`, `repeat`/`full`,
 `size`, `shape`, `byte_len`, `upload`/`assign`, `copy_to_slice`, `copy_to`,
-`copy_from`, `cloned`, `to_vec`/`to_list`, and `download` helpers for
-script-like host code. The `gpu::array`, `gpu::empty`, `gpu::zeros`, and
-`gpu::full` constructors are short aliases around the same type.
+`copy_from`, `cloned`/`copy`, `to_vec`/`to_list`, and `download` helpers for
+script-like host code. `GpuArray2D<T>` adds row-major shape metadata,
+`rows`/`cols`, `width`/`height`, `shape() -> [rows, cols]`, and `to_rows()`
+while still passing to generated kernels as `AsRef<DeviceBuffer<T>>`. The
+`gpu::array`, `gpu::empty`, `gpu::zeros`, `gpu::full`, `gpu::array_2d`,
+`gpu::empty_2d`, `gpu::zeros_2d`, and `gpu::full_2d` constructors are short
+aliases around the same types.
 `reduce_sum`, `inclusive_scan`, and `exclusive_scan` currently support `u32`,
-`i32`, and `f32`. Sorting, key/value sort, compact-by-flag, unique,
-sort-unique, count, contains, and add-scalar/map-add helpers currently target
-`u32`. Free functions in `gpu::` accept either `DeviceBuffer<T>` or wrappers
-such as `GpuArray<T>` where practical. Use `RocPrim` and `RocThrust` directly
-when you need explicit stream or temporary-storage control.
+`i32`, and `f32`; `cumsum` and `exclusive_cumsum` are allocation-returning
+aliases around those scans. Sorting, key/value sort, compact-by-flag,
+`where_flags`, unique, sorted-unique, count, contains, and add-scalar/map-add
+helpers currently target `u32`. Free functions in `gpu::` accept either
+`DeviceBuffer<T>` or wrappers such as `GpuArray<T>` and `GpuArray2D<T>` where
+practical. Use `RocPrim` and `RocThrust` directly when you need explicit stream
+or temporary-storage control.
 
 ### GPU Tests
 

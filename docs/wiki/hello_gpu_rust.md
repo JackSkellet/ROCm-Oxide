@@ -133,7 +133,7 @@ pub unsafe fn vector_add(
 ```
 
 Compared to using `launch!` with raw pointers, the generated method:
-- Takes `&DeviceBuffer<f32>` or `&GpuArray<f32>` instead of raw
+- Takes `&DeviceBuffer<f32>`, `&GpuArray<f32>`, or `&GpuArray2D<f32>` instead of raw
   `(*mut f32, usize)` pairs.
 - Validates that `a.len() == out.len()` and `b.len() == out.len()`.
 - Validates that `out`, `a`, `b` do not overlap in device memory.
@@ -145,13 +145,13 @@ It also generates a small launcher wrapper:
 unsafe {
     kernels
         .vector_add_launcher()
-        .grid_for(n)
-        .launch(&d_out, &d_a, &d_b)?;
+        .launch_auto(&d_out, &d_a, &d_b)?;
 }
 ```
 
 The launcher delegates to the same validated method after building the
-`LaunchConfig`.
+`LaunchConfig`. Use `.grid_for(...)`, `.block_x(...)`, or `.config(...)` when a
+kernel needs explicit launch geometry.
 
 ---
 

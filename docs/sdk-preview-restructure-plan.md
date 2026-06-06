@@ -141,9 +141,9 @@ Likely abstraction work:
   and bounded `DeviceSlice::read` / `DeviceSliceMut::set` helpers
 - editor support for device kernels: rust-analyzer linked projects, runnable
   build tasks, and snippets
-- method-oriented host algorithms through `GpuArray<T>`
+- method-oriented host algorithms through `GpuArray<T>` and `GpuArray2D<T>`
 - third-pass `GpuArray<T>` host ergonomics for Python-like constructor, upload,
-  download, scalar read/write, select, and unique workflows
+  download, scalar read/write, select, cumsum, copy, and unique workflows
 
 ## Release Ordering
 

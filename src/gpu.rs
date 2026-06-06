@@ -129,6 +129,173 @@ impl<T> GpuArray<T> {
         self.copy_to(&output)?;
         Ok(output)
     }
+
+    /// Return a device-to-device copy of this array.
+    ///
+    /// Alias for [`cloned`](Self::cloned) that matches the familiar Python
+    /// array spelling.
+    pub fn copy(&self) -> Result<Self> {
+        self.cloned()
+    }
+}
+
+/// A row-major 2-D wrapper around [`GpuArray`].
+///
+/// `GpuArray2D<T>` keeps shape metadata next to the device allocation while
+/// preserving the same generated-binding compatibility as [`GpuArray<T>`].
+/// Passing a `GpuArray2D<T>` to generated kernels works through
+/// `AsRef<DeviceBuffer<T>>`; kernels still see a flat contiguous buffer.
+pub struct GpuArray2D<T> {
+    array: GpuArray<T>,
+    rows: usize,
+    cols: usize,
+}
+
+impl<T> GpuArray2D<T> {
+    /// Allocate an uninitialized row-major 2-D device array.
+    pub fn new(rows: usize, cols: usize) -> Result<Self> {
+        Self::empty(rows, cols)
+    }
+
+    /// Allocate an uninitialized row-major 2-D device array.
+    pub fn empty(rows: usize, cols: usize) -> Result<Self> {
+        let len = checked_shape_len("GpuArray2D::empty", rows, cols)?;
+        Ok(Self {
+            array: GpuArray::empty(len)?,
+            rows,
+            cols,
+        })
+    }
+
+    /// Wrap an existing flat device array with 2-D shape metadata.
+    pub fn from_array(array: GpuArray<T>, rows: usize, cols: usize) -> Result<Self> {
+        let expected = checked_shape_len("GpuArray2D::from_array", rows, cols)?;
+        expect_shape_len("GpuArray2D::from_array", array.len(), expected, rows, cols)?;
+        Ok(Self { array, rows, cols })
+    }
+
+    /// Return the underlying flat array.
+    pub fn into_array(self) -> GpuArray<T> {
+        self.array
+    }
+
+    /// Borrow the underlying flat array.
+    pub fn as_array(&self) -> &GpuArray<T> {
+        &self.array
+    }
+
+    /// Mutably borrow the underlying flat array.
+    pub fn as_mut_array(&mut self) -> &mut GpuArray<T> {
+        &mut self.array
+    }
+
+    /// Borrow the underlying device buffer.
+    pub fn as_buffer(&self) -> &DeviceBuffer<T> {
+        self.array.as_buffer()
+    }
+
+    /// Mutably borrow the underlying device buffer.
+    pub fn as_mut_buffer(&mut self) -> &mut DeviceBuffer<T> {
+        self.array.as_mut_buffer()
+    }
+
+    /// Number of rows.
+    pub fn rows(&self) -> usize {
+        self.rows
+    }
+
+    /// Number of columns.
+    pub fn cols(&self) -> usize {
+        self.cols
+    }
+
+    /// Image-style width alias for [`cols`](Self::cols).
+    pub fn width(&self) -> usize {
+        self.cols()
+    }
+
+    /// Image-style height alias for [`rows`](Self::rows).
+    pub fn height(&self) -> usize {
+        self.rows()
+    }
+
+    /// Number of elements in the flat allocation.
+    pub fn len(&self) -> usize {
+        self.array.len()
+    }
+
+    /// Number of elements in the flat allocation.
+    pub fn size(&self) -> usize {
+        self.len()
+    }
+
+    /// Row-major shape as `[rows, cols]`.
+    pub fn shape(&self) -> [usize; 2] {
+        [self.rows, self.cols]
+    }
+
+    /// Size of one element in bytes.
+    pub fn element_size(&self) -> usize {
+        self.array.element_size()
+    }
+
+    /// Total logical element storage size in bytes.
+    pub fn byte_len(&self) -> usize {
+        self.array.byte_len()
+    }
+
+    /// Returns `true` when the flat allocation has no elements.
+    pub fn is_empty(&self) -> bool {
+        self.array.is_empty()
+    }
+
+    /// Fill the array with zero bytes.
+    pub fn fill_zero(&self) -> Result<()> {
+        self.array.fill_zero()
+    }
+
+    /// Fill the array with a byte pattern.
+    pub fn fill_bytes(&self, value: u8) -> Result<()> {
+        self.array.fill_bytes(value)
+    }
+
+    /// Copy this device array into another same-shape device array.
+    pub fn copy_to(&self, output: &Self) -> Result<()> {
+        self.expect_same_shape("GpuArray2D::copy_to", output)?;
+        self.array.copy_to(&output.array)
+    }
+
+    /// Copy another same-shape device array into this array.
+    pub fn copy_from(&self, input: &Self) -> Result<()> {
+        self.expect_same_shape("GpuArray2D::copy_from", input)?;
+        self.array.copy_from(&input.array)
+    }
+
+    /// Return a device-to-device copy of this array with the same shape.
+    pub fn cloned(&self) -> Result<Self> {
+        Ok(Self {
+            array: self.array.cloned()?,
+            rows: self.rows,
+            cols: self.cols,
+        })
+    }
+
+    /// Return a device-to-device copy of this array with the same shape.
+    pub fn copy(&self) -> Result<Self> {
+        self.cloned()
+    }
+
+    fn expect_same_shape(&self, operation: &str, other: &Self) -> Result<()> {
+        if self.shape() == other.shape() {
+            Ok(())
+        } else {
+            Err(Error::InvalidLaunch(format!(
+                "{operation} shape mismatch: left is {:?}, right is {:?}",
+                self.shape(),
+                other.shape()
+            )))
+        }
+    }
 }
 
 impl<T: DevicePod> GpuArray<T> {
@@ -262,6 +429,125 @@ impl<T: Copy + Default> GpuArray<T> {
     }
 }
 
+impl<T: DevicePod> GpuArray2D<T> {
+    /// Allocate a zero-filled row-major 2-D device array.
+    pub fn zeros(rows: usize, cols: usize) -> Result<Self> {
+        let len = checked_shape_len("GpuArray2D::zeros", rows, cols)?;
+        Ok(Self {
+            array: GpuArray::zeros(len)?,
+            rows,
+            cols,
+        })
+    }
+
+    /// Allocate a zero-filled row-major 2-D device array.
+    pub fn zeroed(rows: usize, cols: usize) -> Result<Self> {
+        Self::zeros(rows, cols)
+    }
+}
+
+impl<T: Copy> GpuArray2D<T> {
+    /// Allocate a row-major 2-D device array and upload `input`.
+    pub fn from_slice(rows: usize, cols: usize, input: &[T]) -> Result<Self> {
+        let expected = checked_shape_len("GpuArray2D::from_slice", rows, cols)?;
+        expect_shape_len("GpuArray2D::from_slice", input.len(), expected, rows, cols)?;
+        Ok(Self {
+            array: GpuArray::from_slice(input)?,
+            rows,
+            cols,
+        })
+    }
+
+    /// Allocate a row-major 2-D device array and upload values from an iterator.
+    pub fn from_values(
+        rows: usize,
+        cols: usize,
+        values: impl IntoIterator<Item = T>,
+    ) -> Result<Self> {
+        let host = values.into_iter().collect::<Vec<_>>();
+        Self::from_slice(rows, cols, host.as_slice())
+    }
+
+    /// Allocate a row-major 2-D device array containing copies of `value`.
+    pub fn repeat(rows: usize, cols: usize, value: T) -> Result<Self> {
+        let len = checked_shape_len("GpuArray2D::repeat", rows, cols)?;
+        Ok(Self {
+            array: GpuArray::repeat(value, len)?,
+            rows,
+            cols,
+        })
+    }
+
+    /// Allocate a row-major 2-D device array containing copies of `value`.
+    pub fn full(rows: usize, cols: usize, value: T) -> Result<Self> {
+        Self::repeat(rows, cols, value)
+    }
+
+    /// Copy `input` into this existing row-major 2-D device array.
+    pub fn copy_from_slice(&self, input: &[T]) -> Result<()> {
+        expect_shape_len(
+            "GpuArray2D::copy_from_slice",
+            input.len(),
+            self.len(),
+            self.rows,
+            self.cols,
+        )?;
+        self.array.copy_from_slice(input)
+    }
+
+    /// Copy `input` into this existing row-major 2-D device array.
+    pub fn upload(&self, input: &[T]) -> Result<()> {
+        self.copy_from_slice(input)
+    }
+
+    /// Copy `input` into this existing row-major 2-D device array.
+    pub fn assign(&self, input: &[T]) -> Result<()> {
+        self.upload(input)
+    }
+
+    /// Copy this row-major 2-D device array into an existing flat host slice.
+    pub fn copy_to_slice(&self, output: &mut [T]) -> Result<()> {
+        expect_shape_len(
+            "GpuArray2D::copy_to_slice",
+            output.len(),
+            self.len(),
+            self.rows,
+            self.cols,
+        )?;
+        self.array.copy_to_slice(output)
+    }
+}
+
+impl<T: Copy + Default> GpuArray2D<T> {
+    /// Copy this row-major 2-D device array back to a flat host vector.
+    pub fn to_vec(&self) -> Result<Vec<T>> {
+        self.array.to_vec()
+    }
+
+    /// Copy this row-major 2-D device array back to a flat host vector.
+    pub fn to_list(&self) -> Result<Vec<T>> {
+        self.to_vec()
+    }
+
+    /// Copy this row-major 2-D device array back to a flat host vector.
+    pub fn download(&self) -> Result<Vec<T>> {
+        self.to_vec()
+    }
+
+    /// Copy this device array back as nested row vectors.
+    pub fn to_rows(&self) -> Result<Vec<Vec<T>>> {
+        if self.cols == 0 {
+            return Ok((0..self.rows).map(|_| Vec::new()).collect());
+        }
+
+        Ok(self
+            .to_vec()?
+            .chunks(self.cols)
+            .map(|row| row.to_vec())
+            .collect())
+    }
+}
+
 impl<T: ReduceSum> GpuArray<T> {
     /// Sum all elements and return the scalar result on the host.
     pub fn sum(&self) -> Result<T> {
@@ -280,6 +566,22 @@ impl<T: PrefixSum> GpuArray<T> {
         let output = DeviceBuffer::<T>::new(self.len())?;
         inclusive_scan(&self.buffer, &output)?;
         Ok(Self { buffer: output })
+    }
+
+    /// Write the inclusive prefix sum of this array into `output`.
+    ///
+    /// Alias for [`inclusive_scan_into`](Self::inclusive_scan_into) using the
+    /// NumPy/Python spelling.
+    pub fn cumsum_into(&self, output: &GpuArray<T>) -> Result<()> {
+        self.inclusive_scan_into(output)
+    }
+
+    /// Return an array containing the inclusive prefix sum of this array.
+    ///
+    /// Alias for [`inclusive_scan`](Self::inclusive_scan) using the
+    /// NumPy/Python spelling.
+    pub fn cumsum(&self) -> Result<Self> {
+        self.inclusive_scan()
     }
 
     /// Write the exclusive prefix sum of this array into `output`.
@@ -350,6 +652,15 @@ impl GpuArray<u32> {
         Ok(Self { buffer: output })
     }
 
+    /// Return a sorted copy and the number of unique values in that copy.
+    ///
+    /// Only the first `unique_count` elements are unique values.
+    pub fn sorted_unique(&self) -> Result<(Self, usize)> {
+        let mut output = self.copy()?;
+        let unique_count = output.sort_unique()?;
+        Ok((output, unique_count))
+    }
+
     /// Sort in place, remove consecutive duplicate values, and return the
     /// number of unique values.
     ///
@@ -397,6 +708,12 @@ impl GpuArray<u32> {
         Ok((Self { buffer: output }, count[0] as usize))
     }
 
+    /// Alias for [`select_flagged`](Self::select_flagged) with a NumPy-style
+    /// selection name.
+    pub fn where_flags(&self, flags: &GpuArray<u8>) -> Result<(Self, usize)> {
+        self.select_flagged(flags)
+    }
+
     /// Alias for [`select_flagged`](Self::select_flagged) with a compacting
     /// algorithm name.
     pub fn compact_by_flags(&self, flags: &GpuArray<u8>) -> Result<(Self, usize)> {
@@ -414,9 +731,38 @@ fn expect_len(operation: &str, actual: usize, expected: usize) -> Result<()> {
     }
 }
 
+fn checked_shape_len(operation: &str, rows: usize, cols: usize) -> Result<usize> {
+    rows.checked_mul(cols).ok_or_else(|| {
+        Error::InvalidLaunch(format!(
+            "{operation} shape overflow: {rows} rows * {cols} columns"
+        ))
+    })
+}
+
+fn expect_shape_len(
+    operation: &str,
+    actual: usize,
+    expected: usize,
+    rows: usize,
+    cols: usize,
+) -> Result<()> {
+    if actual == expected {
+        Ok(())
+    } else {
+        Err(Error::InvalidLaunch(format!(
+            "{operation} shape mismatch: [{rows}, {cols}] expects {expected} element(s), got {actual}"
+        )))
+    }
+}
+
 /// Allocate an uninitialized GPU array.
 pub fn empty<T>(len: usize) -> Result<GpuArray<T>> {
     GpuArray::empty(len)
+}
+
+/// Allocate an uninitialized row-major 2-D GPU array.
+pub fn empty_2d<T>(rows: usize, cols: usize) -> Result<GpuArray2D<T>> {
+    GpuArray2D::empty(rows, cols)
 }
 
 /// Allocate a zero-filled GPU array.
@@ -424,14 +770,48 @@ pub fn zeros<T: DevicePod>(len: usize) -> Result<GpuArray<T>> {
     GpuArray::zeros(len)
 }
 
+/// Allocate a zero-filled row-major 2-D GPU array.
+pub fn zeros_2d<T: DevicePod>(rows: usize, cols: usize) -> Result<GpuArray2D<T>> {
+    GpuArray2D::zeros(rows, cols)
+}
+
 /// Allocate a device array and upload values from an iterator.
 pub fn array<T: Copy>(values: impl IntoIterator<Item = T>) -> Result<GpuArray<T>> {
     GpuArray::from_values(values)
 }
 
+/// Allocate a row-major 2-D device array and upload values from an iterator.
+pub fn array_2d<T: Copy>(
+    rows: usize,
+    cols: usize,
+    values: impl IntoIterator<Item = T>,
+) -> Result<GpuArray2D<T>> {
+    GpuArray2D::from_values(rows, cols, values)
+}
+
 /// Allocate a device array containing `len` copies of `value`.
 pub fn full<T: Copy>(len: usize, value: T) -> Result<GpuArray<T>> {
     GpuArray::full(len, value)
+}
+
+/// Allocate a row-major 2-D device array containing copies of `value`.
+pub fn full_2d<T: Copy>(rows: usize, cols: usize, value: T) -> Result<GpuArray2D<T>> {
+    GpuArray2D::full(rows, cols, value)
+}
+
+/// Copy a device buffer or GPU array into another same-length device buffer.
+pub fn copy_into<T>(
+    input: &impl AsRef<DeviceBuffer<T>>,
+    output: &impl AsRef<DeviceBuffer<T>>,
+) -> Result<()> {
+    Ok(input.as_ref().copy_to_device(output.as_ref())?)
+}
+
+/// Return a device-to-device copy as a [`GpuArray`].
+pub fn copy<T>(input: &impl AsRef<DeviceBuffer<T>>) -> Result<GpuArray<T>> {
+    let output = GpuArray::empty(input.as_ref().len())?;
+    copy_into(input, &output)?;
+    Ok(output)
 }
 
 impl<T> AsRef<DeviceBuffer<T>> for GpuArray<T> {
@@ -441,6 +821,18 @@ impl<T> AsRef<DeviceBuffer<T>> for GpuArray<T> {
 }
 
 impl<T> AsMut<DeviceBuffer<T>> for GpuArray<T> {
+    fn as_mut(&mut self) -> &mut DeviceBuffer<T> {
+        self.as_mut_buffer()
+    }
+}
+
+impl<T> AsRef<DeviceBuffer<T>> for GpuArray2D<T> {
+    fn as_ref(&self) -> &DeviceBuffer<T> {
+        self.as_buffer()
+    }
+}
+
+impl<T> AsMut<DeviceBuffer<T>> for GpuArray2D<T> {
     fn as_mut(&mut self) -> &mut DeviceBuffer<T> {
         self.as_mut_buffer()
     }
@@ -469,6 +861,12 @@ impl<T> From<DeviceBuffer<T>> for GpuArray<T> {
 impl<T> From<GpuArray<T>> for DeviceBuffer<T> {
     fn from(array: GpuArray<T>) -> Self {
         array.into_buffer()
+    }
+}
+
+impl<T> From<GpuArray2D<T>> for GpuArray<T> {
+    fn from(array: GpuArray2D<T>) -> Self {
+        array.into_array()
     }
 }
 
@@ -598,6 +996,31 @@ where
     T::exclusive_scan(input.as_ref(), output.as_ref(), initial_value)
 }
 
+/// Returns the inclusive prefix sum of `input` as a new [`GpuArray`].
+///
+/// Alias for [`inclusive_scan`] using the NumPy/Python spelling.
+pub fn cumsum<T>(input: &impl AsRef<DeviceBuffer<T>>) -> Result<GpuArray<T>>
+where
+    T: PrefixSum,
+{
+    let output = GpuArray::<T>::empty(input.as_ref().len())?;
+    inclusive_scan(input, &output)?;
+    Ok(output)
+}
+
+/// Returns the exclusive prefix sum of `input` as a new [`GpuArray`].
+pub fn exclusive_cumsum<T>(
+    input: &impl AsRef<DeviceBuffer<T>>,
+    initial_value: T,
+) -> Result<GpuArray<T>>
+where
+    T: PrefixSum,
+{
+    let output = GpuArray::<T>::empty(input.as_ref().len())?;
+    exclusive_scan(input, &output, initial_value)?;
+    Ok(output)
+}
+
 /// Element types supported by [`sort`].
 pub trait Sort: DevicePod + Sized {
     fn sort(data: &mut DeviceBuffer<Self>) -> Result<()>;
@@ -666,6 +1089,15 @@ pub fn sort_unique_u32(data: &mut impl AsMut<DeviceBuffer<u32>>) -> Result<usize
     unique_u32(data)
 }
 
+/// Returns a sorted copy and the number of unique values in that copy.
+///
+/// Only the first returned `usize` elements are unique values.
+pub fn sorted_unique_u32(input: &impl AsRef<DeviceBuffer<u32>>) -> Result<(GpuArray<u32>, usize)> {
+    let mut output = copy(input)?;
+    let unique_count = sort_unique_u32(&mut output)?;
+    Ok((output, unique_count))
+}
+
 /// Selects `input[i]` into `output` whenever `flags[i] != 0`.
 ///
 /// The number of selected elements is written to `selected_count[0]`.
@@ -683,6 +1115,30 @@ pub fn select_flagged_u32(
     )
 }
 
+/// Returns selected `input` values where `flags[i] != 0`.
+///
+/// The returned array has the same allocation length as `input`; only
+/// `0..selected_count` contains selected values.
+pub fn where_flags_u32(
+    input: &impl AsRef<DeviceBuffer<u32>>,
+    flags: &impl AsRef<DeviceBuffer<u8>>,
+) -> Result<(GpuArray<u32>, usize)> {
+    if flags.as_ref().len() != input.as_ref().len() {
+        return Err(Error::InvalidLaunch(format!(
+            "where_flags_u32 length mismatch: input has {} elements, flags has {}",
+            input.as_ref().len(),
+            flags.as_ref().len()
+        )));
+    }
+
+    let output = GpuArray::<u32>::empty(input.as_ref().len())?;
+    let selected_count = DeviceBuffer::<u32>::new(1)?;
+    select_flagged_u32(input, flags, &output, &selected_count)?;
+    let mut count = [0u32; 1];
+    selected_count.copy_to_host(&mut count)?;
+    Ok((output, count[0] as usize))
+}
+
 /// Adds `addend` to every `input` element and writes the result to `output`.
 ///
 /// This is the first map-like helper over the existing rocPRIM shim. General
@@ -693,6 +1149,13 @@ pub fn map_add_u32(
     addend: u32,
 ) -> Result<()> {
     RocPrim::open()?.transform_add_u32(input.as_ref(), output.as_ref(), addend)
+}
+
+/// Adds `addend` to every `input` element and returns the mapped output.
+pub fn add_scalar_u32(input: &impl AsRef<DeviceBuffer<u32>>, addend: u32) -> Result<GpuArray<u32>> {
+    let output = GpuArray::<u32>::empty(input.as_ref().len())?;
+    map_add_u32(input, &output, addend)?;
+    Ok(output)
 }
 
 /// Fills a device buffer with zero bytes.
@@ -800,6 +1263,27 @@ mod tests {
             inclusive.download().expect("inclusive into download"),
             [1, 3, 6, 10]
         );
+        assert_eq!(
+            input
+                .cumsum()
+                .expect("array cumsum")
+                .download()
+                .expect("cumsum download"),
+            [1, 3, 6, 10]
+        );
+        let cumsum_into = GpuArray::<u32>::empty(input.len()).expect("cumsum into output");
+        input.cumsum_into(&cumsum_into).expect("cumsum into");
+        assert_eq!(
+            cumsum_into.download().expect("cumsum into download"),
+            [1, 3, 6, 10]
+        );
+        assert_eq!(
+            cumsum(&input)
+                .expect("free cumsum")
+                .download()
+                .expect("free cumsum download"),
+            [1, 3, 6, 10]
+        );
 
         let free_exclusive = GpuArray::<u32>::empty(input.len()).expect("free exclusive output");
         exclusive_scan(&input, &free_exclusive, 0).expect("free exclusive over array");
@@ -827,6 +1311,13 @@ mod tests {
             [0, 1, 3, 6]
         );
         assert_eq!(
+            exclusive_cumsum(&input, 0)
+                .expect("free exclusive cumsum")
+                .download()
+                .expect("exclusive cumsum download"),
+            [0, 1, 3, 6]
+        );
+        assert_eq!(
             input
                 .add_scalar(5)
                 .expect("array add scalar")
@@ -850,6 +1341,13 @@ mod tests {
             free_mapped.download().expect("free mapped download"),
             [4, 5, 6, 7]
         );
+        assert_eq!(
+            add_scalar_u32(&input, 2)
+                .expect("free add scalar")
+                .download()
+                .expect("free add scalar download"),
+            [3, 4, 5, 6]
+        );
 
         let zeros = GpuArray::<u32>::zeros(4).expect("zero array");
         assert_eq!(zeros.to_vec().expect("zero download"), [0, 0, 0, 0]);
@@ -864,6 +1362,19 @@ mod tests {
         assert_eq!(selected_count, 2);
         assert_eq!(
             &selected.download().expect("selected download")[..selected_count],
+            [1, 3]
+        );
+        let (where_selected, where_count) = input.where_flags(&flags).expect("array where flags");
+        assert_eq!(where_count, 2);
+        assert_eq!(
+            &where_selected.download().expect("where download")[..where_count],
+            [1, 3]
+        );
+        let (free_where, free_where_count) =
+            where_flags_u32(&input, &flags).expect("free where flags");
+        assert_eq!(free_where_count, 2);
+        assert_eq!(
+            &free_where.download().expect("free where download")[..free_where_count],
             [1, 3]
         );
     }
@@ -905,6 +1416,13 @@ mod tests {
 
         let cloned = from_vec.cloned().expect("device clone");
         assert_eq!(cloned.download().expect("clone download"), [10, 11, 12]);
+        let copied = from_vec.copy().expect("device copy alias");
+        assert_eq!(copied.download().expect("copy download"), [10, 11, 12]);
+        let free_copied = copy(&from_vec).expect("free copy");
+        assert_eq!(
+            free_copied.download().expect("free copy download"),
+            [10, 11, 12]
+        );
 
         let destination = GpuArray::<u32>::zeroed(3).expect("copy destination");
         destination.copy_from(&values).expect("device copy from");
@@ -932,6 +1450,48 @@ mod tests {
 
         let err = values.read().expect_err("multi-element read should fail");
         assert!(err.to_string().contains("GpuArray::read expects 1"));
+
+        let matrix = GpuArray2D::from_slice(2, 3, &[1u32, 2, 3, 4, 5, 6]).expect("matrix upload");
+        assert_eq!(matrix.shape(), [2, 3]);
+        assert_eq!(matrix.rows(), 2);
+        assert_eq!(matrix.cols(), 3);
+        assert_eq!(matrix.height(), 2);
+        assert_eq!(matrix.width(), 3);
+        assert_eq!(matrix.len(), 6);
+        assert_eq!(
+            matrix.to_rows().expect("matrix rows"),
+            vec![vec![1, 2, 3], vec![4, 5, 6]]
+        );
+
+        let matrix_copy = matrix.copy().expect("matrix copy");
+        assert_eq!(
+            matrix_copy.download().expect("matrix copy download"),
+            [1, 2, 3, 4, 5, 6]
+        );
+
+        let free_matrix = array_2d(2, 2, [9u32, 8, 7, 6]).expect("free matrix");
+        assert_eq!(
+            free_matrix.to_rows().expect("free matrix rows"),
+            vec![vec![9, 8], vec![7, 6]]
+        );
+
+        let zero_matrix = zeros_2d::<u32>(2, 2).expect("zero matrix");
+        assert_eq!(
+            zero_matrix.download().expect("zero matrix download"),
+            [0, 0, 0, 0]
+        );
+
+        let full_matrix = full_2d(1, 3, 5u32).expect("full matrix");
+        assert_eq!(
+            full_matrix.to_rows().expect("full matrix rows"),
+            vec![vec![5, 5, 5]]
+        );
+
+        let matrix_err = match GpuArray2D::from_slice(2, 3, &[1u32, 2]) {
+            Ok(_) => panic!("shape mismatch should fail"),
+            Err(err) => err,
+        };
+        assert!(matrix_err.to_string().contains("GpuArray2D::from_slice"));
     }
 
     #[test]
@@ -1000,6 +1560,27 @@ mod tests {
         assert_eq!(
             &sort_unique.download().expect("sort unique download")[..3],
             [1, 2, 3]
+        );
+        let sorted_unique_input =
+            GpuArray::from_slice(&[2u32, 4, 1, 1]).expect("sorted unique input");
+        let (sorted_unique, sorted_unique_count) = sorted_unique_input
+            .sorted_unique()
+            .expect("array sorted unique copy");
+        assert_eq!(sorted_unique_count, 3);
+        assert_eq!(
+            &sorted_unique
+                .download()
+                .expect("array sorted unique download")[..sorted_unique_count],
+            [1, 2, 4]
+        );
+        let (free_sorted_unique, free_sorted_unique_count) =
+            sorted_unique_u32(&sorted_unique_input).expect("free sorted unique copy");
+        assert_eq!(free_sorted_unique_count, 3);
+        assert_eq!(
+            &free_sorted_unique
+                .download()
+                .expect("free sorted unique download")[..free_sorted_unique_count],
+            [1, 2, 4]
         );
 
         let mut array_keys = GpuArray::from_slice(&[3u32, 1, 2]).expect("array keys upload");
