@@ -319,14 +319,26 @@ discoverable surface is `GpuArray<T>`:
 ```rust,ignore
 use rocm_oxide::GpuArray;
 
-let input = GpuArray::from_slice(&[1u32, 2, 3, 4])?;
+let input = GpuArray::from_values([1u32, 2, 3, 4])?;
 let sum = input.sum()?;
 
 let scan = input.exclusive_scan(0)?;
 let mapped = input.map_add(8)?;
 
+let params = GpuArray::from_value(7u32)?;
+params.write(11)?;
+let value = params.read()?;
+
 let mut sortable = GpuArray::from_slice(&[4u32, 1, 3, 2])?;
 sortable.sort()?;
+let sorted = sortable.download()?;
+
+let flags = GpuArray::from_slice(&[1u8, 0, 1, 0])?;
+let (selected, selected_count) = input.compact_by_flags(&flags)?;
+
+let mut keys = GpuArray::from_slice(&[3u32, 1, 2])?;
+let mut values = GpuArray::from_slice(&[30u32, 10, 20])?;
+keys.sort_by_key(&mut values)?;
 ```
 
 The lower-level free functions work directly with `DeviceBuffer<T>`:
@@ -344,10 +356,14 @@ let mut sortable = DeviceBuffer::from_slice(&[4u32, 1, 3, 2])?;
 gpu::sort(&mut sortable)?;
 ```
 
+`GpuArray<T>` also has `new`/`empty`, `zeros`/`zeroed`, `repeat`, `upload`,
+`copy_to_slice`, `copy_to`, `copy_from`, `cloned`, and `download` helpers for
+script-like host code.
 `reduce_sum`, `inclusive_scan`, and `exclusive_scan` currently support `u32`,
-`i32`, and `f32`. Sorting, select, unique, count, and map-add helpers currently
-target `u32`. Use `RocPrim` and `RocThrust` directly when you need explicit
-stream or temporary-storage control.
+`i32`, and `f32`. Sorting, key/value sort, compact-by-flag, unique,
+sort-unique, count, contains, and map-add helpers currently target `u32`. Use
+`RocPrim` and `RocThrust` directly when you need explicit stream or
+temporary-storage control.
 
 ### GPU Tests
 

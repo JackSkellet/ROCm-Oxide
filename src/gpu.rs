@@ -5,7 +5,7 @@
 //! lower-level wrappers for callers that need explicit temporary-storage or
 //! stream control.
 
-use crate::{DeviceBuffer, DevicePod, Result, RocPrim, RocThrust};
+use crate::{DeviceBuffer, DevicePod, Error, Result, RocPrim, RocThrust};
 use std::ops::{Deref, DerefMut};
 
 /// A small method-oriented wrapper around [`DeviceBuffer`].
@@ -32,6 +32,24 @@ pub struct GpuArray<T> {
 }
 
 impl<T> GpuArray<T> {
+    /// Allocate an uninitialized device array.
+    ///
+    /// This mirrors [`DeviceBuffer::new`] for output arrays that a kernel or
+    /// library call will fill before the host reads them.
+    pub fn new(len: usize) -> Result<Self> {
+        Ok(Self {
+            buffer: DeviceBuffer::<T>::new(len)?,
+        })
+    }
+
+    /// Allocate an uninitialized device array.
+    ///
+    /// `empty` is an autocomplete-friendly alias for [`new`](Self::new), named
+    /// after the familiar NumPy/Python convention.
+    pub fn empty(len: usize) -> Result<Self> {
+        Self::new(len)
+    }
+
     /// Wrap an existing device buffer.
     pub fn from_buffer(buffer: DeviceBuffer<T>) -> Self {
         Self { buffer }
@@ -71,6 +89,23 @@ impl<T> GpuArray<T> {
     pub fn fill_bytes(&self, value: u8) -> Result<()> {
         fill_bytes(&self.buffer, value)
     }
+
+    /// Copy this device array into another same-length device array.
+    pub fn copy_to(&self, output: &Self) -> Result<()> {
+        Ok(self.buffer.copy_to_device(output.as_buffer())?)
+    }
+
+    /// Copy another same-length device array into this array.
+    pub fn copy_from(&self, input: &Self) -> Result<()> {
+        Ok(self.buffer.copy_from_device(input.as_buffer())?)
+    }
+
+    /// Return a device-to-device copy of this array.
+    pub fn cloned(&self) -> Result<Self> {
+        let output = Self::new(self.len())?;
+        self.copy_to(&output)?;
+        Ok(output)
+    }
 }
 
 impl<T: DevicePod> GpuArray<T> {
@@ -79,6 +114,14 @@ impl<T: DevicePod> GpuArray<T> {
         let buffer = DeviceBuffer::<T>::new(len)?;
         buffer.set_zero()?;
         Ok(Self { buffer })
+    }
+
+    /// Allocate a zero-filled device array.
+    ///
+    /// Alias for [`zeros`](Self::zeros) that reads naturally beside
+    /// [`empty`](Self::empty).
+    pub fn zeroed(len: usize) -> Result<Self> {
+        Self::zeros(len)
     }
 }
 
@@ -90,9 +133,62 @@ impl<T: Copy> GpuArray<T> {
         })
     }
 
+    /// Allocate a one-element device array and upload `value`.
+    pub fn from_value(value: T) -> Result<Self> {
+        Self::from_slice(&[value])
+    }
+
+    /// Allocate a device array and upload `input`.
+    pub fn from_vec(input: Vec<T>) -> Result<Self> {
+        Self::from_slice(input.as_slice())
+    }
+
+    /// Allocate a device array and upload values from an iterator.
+    ///
+    /// This is a fallible alternative to `collect::<Vec<_>>()` followed by
+    /// [`from_slice`](Self::from_slice).
+    pub fn from_values(values: impl IntoIterator<Item = T>) -> Result<Self> {
+        let host = values.into_iter().collect::<Vec<_>>();
+        Self::from_slice(host.as_slice())
+    }
+
+    /// Allocate a device array containing `len` copies of `value`.
+    pub fn repeat(value: T, len: usize) -> Result<Self> {
+        let host = vec![value; len];
+        Self::from_slice(host.as_slice())
+    }
+
     /// Copy `input` into this existing device array.
     pub fn copy_from_slice(&self, input: &[T]) -> Result<()> {
         Ok(self.buffer.copy_from_host(input)?)
+    }
+
+    /// Copy `input` into this existing device array.
+    ///
+    /// Alias for [`copy_from_slice`](Self::copy_from_slice) with a shorter name
+    /// for script-like code.
+    pub fn upload(&self, input: &[T]) -> Result<()> {
+        self.copy_from_slice(input)
+    }
+
+    /// Copy this device array into an existing host slice.
+    pub fn copy_to_slice(&self, output: &mut [T]) -> Result<()> {
+        Ok(self.buffer.copy_to_host(output)?)
+    }
+
+    /// Copy this one-element device array back to the host.
+    pub fn read(&self) -> Result<T>
+    where
+        T: Default,
+    {
+        expect_len("read", self.len(), 1)?;
+        Ok(self.to_vec()?[0])
+    }
+
+    /// Copy `value` into this one-element device array.
+    pub fn write(&self, value: T) -> Result<()> {
+        expect_len("write", self.len(), 1)?;
+        self.copy_from_slice(&[value])
     }
 }
 
@@ -100,6 +196,13 @@ impl<T: Copy + Default> GpuArray<T> {
     /// Copy this device array back to host memory.
     pub fn to_vec(&self) -> Result<Vec<T>> {
         Ok(self.buffer.copy_to_vec()?)
+    }
+
+    /// Copy this device array back to host memory.
+    ///
+    /// Alias for [`to_vec`](Self::to_vec) with a data-science-style name.
+    pub fn download(&self) -> Result<Vec<T>> {
+        self.to_vec()
     }
 }
 
@@ -139,6 +242,18 @@ impl GpuArray<u32> {
         sort(&mut self.buffer)
     }
 
+    /// Sort this keys array and reorder `values` to preserve key/value pairs.
+    pub fn sort_by_key(&mut self, values: &mut GpuArray<u32>) -> Result<()> {
+        if values.len() != self.len() {
+            return Err(Error::InvalidLaunch(format!(
+                "GpuArray::sort_by_key length mismatch: keys has {} elements, values has {}",
+                self.len(),
+                values.len()
+            )));
+        }
+        sort_by_key_u32(&mut self.buffer, values.as_mut_buffer())
+    }
+
     /// Return a sorted copy of this array.
     pub fn sorted(&self) -> Result<Self> {
         let mut output = DeviceBuffer::<u32>::new(self.len())?;
@@ -147,9 +262,74 @@ impl GpuArray<u32> {
         Ok(Self { buffer: output })
     }
 
+    /// Return a sorted copy using rocPRIM's out-of-place key sort.
+    pub fn sorted_keys(&self) -> Result<Self> {
+        let output = DeviceBuffer::<u32>::new(self.len())?;
+        sort_keys_u32(&self.buffer, &output)?;
+        Ok(Self { buffer: output })
+    }
+
+    /// Sort in place, remove consecutive duplicate values, and return the
+    /// number of unique values.
+    ///
+    /// Values after the returned count are unspecified until overwritten.
+    pub fn sort_unique(&mut self) -> Result<usize> {
+        sort_unique_u32(&mut self.buffer)
+    }
+
     /// Count elements equal to `value`.
     pub fn count_eq(&self, value: u32) -> Result<usize> {
         count_eq_u32(&self.buffer, value)
+    }
+
+    /// Return `true` when at least one element equals `value`.
+    pub fn contains(&self, value: u32) -> Result<bool> {
+        contains_eq_u32(&self.buffer, value)
+    }
+
+    /// Remove consecutive duplicate values in place and return the unique count.
+    ///
+    /// Values after the returned count are unspecified until overwritten.
+    pub fn unique_consecutive(&mut self) -> Result<usize> {
+        unique_u32(&mut self.buffer)
+    }
+
+    /// Select elements whose matching `flags[i]` is nonzero.
+    ///
+    /// Returns the output array and the number of valid selected elements. The
+    /// returned array has the same allocation length as `self`; only
+    /// `0..selected_count` contains selected values.
+    pub fn select_flagged(&self, flags: &GpuArray<u8>) -> Result<(Self, usize)> {
+        if flags.len() != self.len() {
+            return Err(Error::InvalidLaunch(format!(
+                "GpuArray::select_flagged length mismatch: input has {} elements, flags has {}",
+                self.len(),
+                flags.len()
+            )));
+        }
+
+        let output = DeviceBuffer::<u32>::new(self.len())?;
+        let selected_count = DeviceBuffer::<u32>::new(1)?;
+        select_flagged_u32(&self.buffer, flags.as_buffer(), &output, &selected_count)?;
+        let mut count = [0u32; 1];
+        selected_count.copy_to_host(&mut count)?;
+        Ok((Self { buffer: output }, count[0] as usize))
+    }
+
+    /// Alias for [`select_flagged`](Self::select_flagged) with a compacting
+    /// algorithm name.
+    pub fn compact_by_flags(&self, flags: &GpuArray<u8>) -> Result<(Self, usize)> {
+        self.select_flagged(flags)
+    }
+}
+
+fn expect_len(operation: &str, actual: usize, expected: usize) -> Result<()> {
+    if actual == expected {
+        Ok(())
+    } else {
+        Err(Error::InvalidLaunch(format!(
+            "GpuArray::{operation} expects {expected} element(s), got {actual}"
+        )))
     }
 }
 
@@ -362,6 +542,20 @@ pub fn count_eq_u32(data: &DeviceBuffer<u32>, value: u32) -> Result<usize> {
     RocThrust::open()?.count_u32(data, value)
 }
 
+/// Returns `true` when at least one `u32` element equals `value`.
+pub fn contains_eq_u32(data: &DeviceBuffer<u32>, value: u32) -> Result<bool> {
+    Ok(count_eq_u32(data, value)? != 0)
+}
+
+/// Sorts `data` in place, removes consecutive duplicates, and returns the
+/// number of unique values.
+///
+/// Values after the returned count are unspecified until overwritten.
+pub fn sort_unique_u32(data: &mut DeviceBuffer<u32>) -> Result<usize> {
+    sort(data)?;
+    unique_u32(data)
+}
+
 /// Selects `input[i]` into `output` whenever `flags[i] != 0`.
 ///
 /// The number of selected elements is written to `selected_count[0]`.
@@ -496,6 +690,59 @@ mod tests {
 
         let zeros = GpuArray::<u32>::zeros(4).expect("zero array");
         assert_eq!(zeros.to_vec().expect("zero download"), [0, 0, 0, 0]);
+
+        let flags = GpuArray::from_slice(&[1u8, 0, 1, 0]).expect("array flags upload");
+        let (selected, selected_count) = input.select_flagged(&flags).expect("array select");
+        assert_eq!(selected_count, 2);
+        assert_eq!(
+            &selected.download().expect("selected download")[..selected_count],
+            [1, 3]
+        );
+    }
+
+    #[test]
+    fn gpu_array_copy_helpers_smoke_if_device_available() {
+        if crate::Device::first().is_err() {
+            return;
+        }
+
+        let empty = GpuArray::<u32>::empty(3).expect("empty array");
+        assert_eq!(empty.len(), 3);
+
+        let zeroed = GpuArray::<u32>::zeroed(2).expect("zeroed array");
+        assert_eq!(zeroed.download().expect("zeroed download"), [0, 0]);
+
+        let values = GpuArray::from_values([1u32, 2, 3]).expect("values upload");
+        assert_eq!(values.download().expect("values download"), [1, 2, 3]);
+
+        let from_vec = GpuArray::from_vec(vec![4u32, 5, 6]).expect("vec upload");
+        let mut host = [0u32; 3];
+        from_vec.copy_to_slice(&mut host).expect("copy to slice");
+        assert_eq!(host, [4, 5, 6]);
+
+        from_vec.upload(&[7, 8, 9]).expect("upload alias");
+        assert_eq!(from_vec.download().expect("upload download"), [7, 8, 9]);
+
+        let cloned = from_vec.cloned().expect("device clone");
+        assert_eq!(cloned.download().expect("clone download"), [7, 8, 9]);
+
+        let destination = GpuArray::<u32>::zeroed(3).expect("copy destination");
+        destination.copy_from(&values).expect("device copy from");
+        assert_eq!(
+            destination.download().expect("copy destination download"),
+            [1, 2, 3]
+        );
+
+        let repeated = GpuArray::repeat(42u32, 3).expect("repeat upload");
+        assert_eq!(repeated.download().expect("repeat download"), [42, 42, 42]);
+
+        let scalar = GpuArray::from_value(11u32).expect("scalar upload");
+        assert_eq!(scalar.read().expect("scalar read"), 11);
+        scalar.write(13).expect("scalar write");
+        assert_eq!(scalar.read().expect("scalar reread"), 13);
+
+        let err = values.read().expect_err("multi-element read should fail");
+        assert!(err.to_string().contains("GpuArray::read expects 1"));
     }
 
     #[test]
@@ -505,6 +752,8 @@ mod tests {
         }
 
         let mut data = DeviceBuffer::from_slice(&[4u32, 1, 3, 1]).expect("sort upload");
+        assert!(contains_eq_u32(&data, 3).expect("buffer contains"));
+        assert!(!contains_eq_u32(&data, 99).expect("buffer not contains"));
         sort(&mut data).expect("in-place sort");
         assert_eq!(data.copy_to_vec().expect("sort download"), [1, 1, 3, 4]);
 
@@ -517,6 +766,19 @@ mod tests {
 
         assert_eq!(count_eq_u32(&data, 1).expect("count"), 1);
 
+        let mut free_sort_unique =
+            DeviceBuffer::from_slice(&[3u32, 1, 3, 2, 1]).expect("free sort unique upload");
+        assert_eq!(
+            sort_unique_u32(&mut free_sort_unique).expect("free sort unique"),
+            3
+        );
+        assert_eq!(
+            &free_sort_unique
+                .copy_to_vec()
+                .expect("free sort unique download")[..3],
+            [1, 2, 3]
+        );
+
         let mut keys = DeviceBuffer::from_slice(&[3u32, 1, 2]).expect("keys upload");
         let mut values = DeviceBuffer::from_slice(&[30u32, 10, 20]).expect("values upload");
         sort_by_key_u32(&mut keys, &mut values).expect("sort by key");
@@ -524,8 +786,45 @@ mod tests {
         assert_eq!(values.copy_to_vec().expect("values download"), [10, 20, 30]);
 
         let mut array = GpuArray::from_slice(&[2u32, 4, 1, 1]).expect("array sort upload");
+        assert!(array.contains(4).expect("array contains"));
+        assert!(!array.contains(99).expect("array not contains"));
+        assert_eq!(
+            array
+                .sorted_keys()
+                .expect("array sorted keys")
+                .download()
+                .expect("sorted keys download"),
+            [1, 1, 2, 4]
+        );
         array.sort().expect("array sort");
         assert_eq!(array.to_vec().expect("array sort download"), [1, 1, 2, 4]);
         assert_eq!(array.count_eq(1).expect("array count"), 2);
+        assert_eq!(array.unique_consecutive().expect("array unique"), 3);
+        assert_eq!(
+            &array.download().expect("array unique download")[..3],
+            [1, 2, 4]
+        );
+
+        let mut sort_unique =
+            GpuArray::from_slice(&[3u32, 1, 3, 2, 1]).expect("sort unique upload");
+        assert_eq!(sort_unique.sort_unique().expect("sort unique"), 3);
+        assert_eq!(
+            &sort_unique.download().expect("sort unique download")[..3],
+            [1, 2, 3]
+        );
+
+        let mut array_keys = GpuArray::from_slice(&[3u32, 1, 2]).expect("array keys upload");
+        let mut array_values = GpuArray::from_slice(&[30u32, 10, 20]).expect("array values upload");
+        array_keys
+            .sort_by_key(&mut array_values)
+            .expect("array sort by key");
+        assert_eq!(
+            array_keys.download().expect("array keys download"),
+            [1, 2, 3]
+        );
+        assert_eq!(
+            array_values.download().expect("array values download"),
+            [10, 20, 30]
+        );
     }
 }

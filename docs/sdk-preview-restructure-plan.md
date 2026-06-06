@@ -142,6 +142,8 @@ Likely abstraction work:
 - editor support for device kernels: rust-analyzer linked projects, runnable
   build tasks, and snippets
 - method-oriented host algorithms through `GpuArray<T>`
+- third-pass `GpuArray<T>` host ergonomics for Python-like constructor, upload,
+  download, scalar read/write, select, and unique workflows
 
 ## Release Ordering
 

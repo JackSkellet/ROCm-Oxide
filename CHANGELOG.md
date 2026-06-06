@@ -23,6 +23,13 @@ All notable ROCm-Oxide changes should be recorded here before a tagged release.
   recommendations, and device-kernel snippets.
 - Added `GpuArray<T>` as a method-oriented wrapper around `DeviceBuffer<T>` for
   discoverable host-side reduce, scan, map-add, fill, sort, and copy workflows.
+- Added third-pass `GpuArray<T>` ergonomics: `new`/`empty`, `zeroed`,
+  `from_value`, `from_values`, `repeat`, `upload`, `download`, `read`, `write`,
+  `copy_to`, `copy_from`, `cloned`, `select_flagged`/`compact_by_flags`,
+  `sort_by_key`, `sorted_keys`, `sort_unique`, `contains`, and
+  `unique_consecutive` helpers for autocomplete-friendly script-like host code.
+- Added lower-level `gpu::contains_eq_u32` and `gpu::sort_unique_u32` helpers for
+  callers working directly with `DeviceBuffer<u32>`.
 - Added a `vulkan_interactive_path_reconstruction_motion_denoise_v2_gpuarray`
   demo binary that uses `GpuArray<T>` host buffers for side-by-side API
   comparison with the HIPRTC path-reconstruction demo.

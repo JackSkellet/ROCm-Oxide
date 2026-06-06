@@ -55,14 +55,26 @@ which wraps `DeviceBuffer<T>` with method-oriented helpers:
 ```rust,ignore
 use rocm_oxide::GpuArray;
 
-let input = GpuArray::from_slice(&[1u32, 2, 3, 4])?;
+let input = GpuArray::from_values([1u32, 2, 3, 4])?;
 let sum = input.sum()?;
 
 let scan = input.exclusive_scan(0)?;
 let mapped = input.map_add(8)?;
 
+let params = GpuArray::from_value(7u32)?;
+params.write(11)?;
+let value = params.read()?;
+
 let mut sortable = GpuArray::from_slice(&[4u32, 1, 3, 2])?;
 sortable.sort()?;
+let sorted = sortable.download()?;
+
+let flags = GpuArray::from_slice(&[1u8, 0, 1, 0])?;
+let (selected, selected_count) = input.compact_by_flags(&flags)?;
+
+let mut keys = GpuArray::from_slice(&[3u32, 1, 2])?;
+let mut values = GpuArray::from_slice(&[30u32, 10, 20])?;
+keys.sort_by_key(&mut values)?;
 ```
 
 The free-function layer remains available when you already own
