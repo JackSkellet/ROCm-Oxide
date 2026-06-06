@@ -40,9 +40,9 @@
 //!     a:   DeviceSlice<f32>,
 //!     b:   DeviceSlice<f32>,
 //! ) {
-//!     for_each_element(out.len(), |i| {
+//!     out.for_each_mut(|i, out| {
 //!         if let (Some(lhs), Some(rhs)) = (a.read(i), b.read(i)) {
-//!             out.set(i, lhs + rhs);
+//!             out.write(i, lhs + rhs);
 //!         }
 //!     });
 //! }

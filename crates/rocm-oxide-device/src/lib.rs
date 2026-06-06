@@ -34,7 +34,7 @@
 //! #[kernel]
 //! pub unsafe extern "C" fn fill_indices(out: DeviceSliceMut<u32>, n: usize) {
 //!     for_each_element(n, |i| {
-//!         out.set(i, i.as_usize() as u32);
+//!         out.write(i, i.as_usize() as u32);
 //!     });
 //! }
 //! ```
@@ -3024,7 +3024,7 @@ pub fn thread_index_x_witness() -> ThreadIndex {
 /// ```rust,ignore
 /// let i = element_index();
 /// if i.is_in_bounds(n) {
-///     out.set(i, 1.0);
+///     out.write(i, 1.0);
 /// }
 /// ```
 #[inline(always)]
@@ -3039,7 +3039,7 @@ pub fn element_index() -> ThreadIndex {
 ///
 /// ```rust,ignore
 /// for_each_element(n, |i| {
-///     out.set(i, i.as_usize() as u32);
+///     out.write(i, i.as_usize() as u32);
 /// });
 /// ```
 #[inline(always)]
@@ -3150,6 +3150,35 @@ impl<T> DeviceSlice<T> {
     {
         self.read_at(index.as_usize())
     }
+
+    /// Read a copy of `T` for this GPU thread's global 1-D element index.
+    #[inline(always)]
+    pub fn read_current(self) -> Option<T>
+    where
+        T: Copy,
+    {
+        self.read(element_index())
+    }
+
+    /// Run `f` for this GPU thread when its global 1-D element index is within
+    /// this slice.
+    ///
+    /// This is a method-oriented alias for [`for_each_element`] that keeps the
+    /// slice in the autocomplete path while still passing both the
+    /// [`ThreadIndex`] and copied element to the closure.
+    #[inline(always)]
+    pub fn for_each<F>(self, f: F) -> bool
+    where
+        T: Copy,
+        F: FnOnce(ThreadIndex, T),
+    {
+        let len = self.len;
+        for_each_element(len, |index| {
+            if let Some(value) = self.read(index) {
+                f(index, value);
+            }
+        })
+    }
 }
 
 /// A mutable view of a device buffer passed into a kernel.
@@ -3158,9 +3187,9 @@ impl<T> DeviceSlice<T> {
 /// length). The build tool generates host-side glue that converts a
 /// `&DeviceBuffer<T>` output argument into the correct `(ptr, len)` pair.
 ///
-/// Prefer [`set`](Self::set) with [`element_index`] or [`for_each_element`] for
-/// ordinary one-thread-per-element kernels. `write_unchecked` remains available
-/// after a caller-provided bounds check.
+/// Prefer [`write`](Self::write) with [`element_index`] or
+/// [`for_each_element`] for ordinary one-thread-per-element kernels.
+/// `write_unchecked` remains available after a caller-provided bounds check.
 ///
 /// ```rust,ignore
 /// use rocm_oxide_device::prelude::*;
@@ -3168,7 +3197,7 @@ impl<T> DeviceSlice<T> {
 /// #[kernel]
 /// pub unsafe extern "C" fn write_kernel(out: DeviceSliceMut<f32>) {
 ///     for_each_element(out.len(), |i| {
-///         out.set(i, 42.0);
+///         out.write(i, 42.0);
 ///     });
 /// }
 /// ```
@@ -3259,6 +3288,18 @@ impl<T> DeviceSliceMut<T> {
         self.set_at(index.as_usize(), value)
     }
 
+    /// Write `value` at `index` when `index < self.len()`.
+    #[inline(always)]
+    pub fn write_at(self, index: usize, value: T) -> bool {
+        self.set_at(index, value)
+    }
+
+    /// Write `value` at the current logical thread index when in bounds.
+    #[inline(always)]
+    pub fn write(self, index: ThreadIndex, value: T) -> bool {
+        self.set(index, value)
+    }
+
     #[inline(always)]
     pub fn write_for_thread(self, index: ThreadIndex, value: T) -> bool {
         self.set(index, value)
@@ -3280,6 +3321,35 @@ impl<T> DeviceSliceMut<T> {
         T: Copy,
     {
         self.as_const().read(index)
+    }
+
+    /// Read a copy of `T` for this GPU thread's global 1-D element index.
+    #[inline(always)]
+    pub fn read_current(self) -> Option<T>
+    where
+        T: Copy,
+    {
+        self.as_const().read_current()
+    }
+
+    /// Run `f` for this GPU thread when its global 1-D element index is within
+    /// this mutable slice.
+    ///
+    /// The closure receives the in-bounds [`ThreadIndex`] and the slice itself,
+    /// making write-oriented kernels read naturally:
+    ///
+    /// ```rust,ignore
+    /// out.for_each_mut(|i, out| {
+    ///     out.write(i, i.as_usize() as u32);
+    /// });
+    /// ```
+    #[inline(always)]
+    pub fn for_each_mut<F>(self, f: F) -> bool
+    where
+        F: FnOnce(ThreadIndex, DeviceSliceMut<T>),
+    {
+        let len = self.len;
+        for_each_element(len, |index| f(index, self))
     }
 }
 
@@ -3310,8 +3380,18 @@ impl<T> DisjointSliceMut<T> {
     }
 
     #[inline(always)]
+    pub fn write(self, index: ThreadIndex, value: T) -> bool {
+        self.slice.write(index, value)
+    }
+
+    #[inline(always)]
     pub fn set_at(self, index: usize, value: T) -> bool {
         self.slice.set_at(index, value)
+    }
+
+    #[inline(always)]
+    pub fn write_at(self, index: usize, value: T) -> bool {
+        self.slice.write_at(index, value)
     }
 
     #[inline(always)]

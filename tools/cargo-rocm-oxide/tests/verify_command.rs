@@ -359,8 +359,8 @@ fn new_project_scaffold_allows_default_pipeline() {
         "generated starter should use the ergonomic element helper:\n{device_source}"
     );
     assert!(
-        device_source.contains("out.set(i, i.as_usize() as u32);"),
-        "generated starter should use bounded DeviceSliceMut::set:\n{device_source}"
+        device_source.contains("out.write(i, i.as_usize() as u32);"),
+        "generated starter should use bounded DeviceSliceMut::write:\n{device_source}"
     );
     assert!(app.join(".vscode/settings.json").is_file());
     assert!(app.join(".vscode/tasks.json").is_file());

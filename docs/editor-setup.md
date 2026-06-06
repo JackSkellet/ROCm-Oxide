@@ -32,9 +32,10 @@ use rocm_oxide_kernel::{kernel, kernel_contract};
 Autocomplete should then discover the intended device-code path:
 
 - `for_each_element(n, |i| { ... })`
+- `out.for_each_mut(|i, out| { ... })`
 - `i.as_usize()` and `i.is_in_bounds(len)`
 - `input.read(i)`
-- `out.set(i, value)`
+- `out.write(i, value)`
 - `math::sqrt_f32(...)`, `this_thread_block()`, atomics, vectors, and barriers
 
 VS Code also gets snippets:

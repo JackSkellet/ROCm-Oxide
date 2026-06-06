@@ -115,7 +115,7 @@ use rocm_oxide_kernel::{kernel, kernel_contract};
 #[kernel]
 pub unsafe extern "C" fn fill_indices(out: DeviceSliceMut<u32>, n: usize) {
     for_each_element(n, |i| {
-        out.set(i, i.as_usize() as u32);
+        out.write(i, i.as_usize() as u32);
     });
 }
 ```

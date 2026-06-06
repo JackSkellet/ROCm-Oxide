@@ -1359,7 +1359,7 @@ use rocm_oxide_kernel::{kernel, kernel_contract};
 #[kernel]
 pub unsafe extern "C" fn fill_indices(out: DeviceSliceMut<u32>, n: usize) {
     for_each_element(n, |i| {
-        out.set(i, i.as_usize() as u32);
+        out.write(i, i.as_usize() as u32);
     });
 }
 "#,
@@ -1475,7 +1475,7 @@ fn vscode_snippets() -> &'static str {
       "#[kernel]",
       "pub unsafe extern \"C\" fn ${3:kernel_name}(${1:out}: DeviceSliceMut<${4:u32}>, ${2:n}: usize) {",
       "    for_each_element(${2:n}, |i| {",
-      "        ${1:out}.set(i, ${5:i.as_usize() as ${4:u32}});",
+      "        ${1:out}.write(i, ${5:i.as_usize() as ${4:u32}});",
       "    });",
       "}"
     ],
@@ -1488,9 +1488,9 @@ fn vscode_snippets() -> &'static str {
       "#[kernel_contract(len(out)=n, len(a)=n, len(b)=n)]",
       "#[kernel]",
       "pub unsafe extern \"C\" fn ${1:vector_add}(out: DeviceSliceMut<f32>, a: DeviceSlice<f32>, b: DeviceSlice<f32>, n: usize) {",
-      "    for_each_element(n, |i| {",
+      "    out.for_each_mut(|i, out| {",
       "        if let (Some(lhs), Some(rhs)) = (a.read(i), b.read(i)) {",
-      "            out.set(i, lhs + rhs);",
+      "            out.write(i, lhs + rhs);",
       "        }",
       "    });",
       "}"

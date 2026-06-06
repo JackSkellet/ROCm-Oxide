@@ -93,9 +93,9 @@ pub unsafe extern "C" fn vector_add(
     a:   DeviceSlice<f32>,
     b:   DeviceSlice<f32>,
 ) {
-    for_each_element(out.len(), |i| {
+    out.for_each_mut(|i, out| {
         if let (Some(lhs), Some(rhs)) = (a.read(i), b.read(i)) {
-            out.set(i, lhs + rhs);
+            out.write(i, lhs + rhs);
         }
     });
 }
@@ -112,9 +112,9 @@ pub unsafe extern "C" fn vector_add(
 - `DeviceSliceMut<f32>` / `DeviceSlice<f32>` — `#[repr(C)]` fat
   pointers carrying `(ptr, len)`. They are ABI-safe to pass through the kernel
   argument list and appear on the host side as `&impl AsRef<DeviceBuffer<f32>>`.
-- `for_each_element(out.len(), |i| { ... })` — runs the closure only for
-  in-bounds 1-D element indices and gives autocomplete-friendly access to
-  `i.as_usize()`, `input.read(i)`, and `out.set(i, value)`.
+- `out.for_each_mut(|i, out| { ... })` — runs the closure only for in-bounds
+  1-D element indices and gives autocomplete-friendly access to `i.as_usize()`,
+  `input.read(i)`, and `out.write(i, value)`.
 
 ---
 

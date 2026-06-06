@@ -92,6 +92,8 @@ every kernel. Use it inside `device-spike/src/lib.rs`.
 | `global_id_x/y/z()` | `blockIdx.x * blockDim.x + threadIdx.x` | `usize` |
 | `element_index()` | 1-D global element index wrapper | `ThreadIndex` |
 | `for_each_element(n, \|i\| ...)` | Run only when the 1-D element index is in bounds | `bool` |
+| `DeviceSlice<T>::for_each(\|i, value\| ...)` | Method-style bounded read for this thread | `bool` |
+| `DeviceSliceMut<T>::for_each_mut(\|i, out\| ...)` | Method-style bounded write for this thread | `bool` |
 
 The most common pattern for a 1-D kernel:
 
@@ -103,8 +105,11 @@ for_each_element(n, |i| {
 
 `ThreadIndex` exposes `i.as_usize()` for raw offset math and
 `i.is_in_bounds(len)` for explicit bounds checks. `DeviceSlice<T>::read(i)` and
-`DeviceSliceMut<T>::set(i, value)` accept `ThreadIndex` directly so rust-analyzer
-completion leads from the current element to safe bounded buffer access.
+`DeviceSliceMut<T>::write(i, value)` accept `ThreadIndex` directly so
+rust-analyzer completion leads from the current element to safe bounded buffer
+access. For method-oriented code, `input.for_each(|i, value| { ... })` and
+`out.for_each_mut(|i, out| out.write(i, value))` keep the slice itself in the
+autocomplete path.
 
 ### Wavefront / lane utilities
 
@@ -194,7 +199,7 @@ Prefer the bounded helpers in ordinary kernels:
 ```rust
 for_each_element(n, |i| {
     if let Some(value) = input.read(i) {
-        out.set(i, value + 1.0);
+        out.write(i, value + 1.0);
     }
 });
 ```
