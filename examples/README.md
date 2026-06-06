@@ -14,7 +14,7 @@ local device crate and do not use the source-workspace `device-spike` feature.
 | --- | --- | --- | --- |
 | Hello HIPRTC | `examples/hello_gpu.rs` | `cargo run --example hello_gpu` | Smallest runtime smoke test: open a device, compile a HIPRTC kernel, launch, sync, and verify. |
 | Hello Rust GPU | `examples/hello_gpu_rust.rs` | `cargo run --features device-spike --example hello_gpu_rust` | Main Rust-authored kernel walkthrough using generated typed bindings. |
-| HIPRTC vector add | `examples/vector_add.rs` | `cargo run --example vector_add` | Compact raw `launch!` vector-add example. |
+| HIPRTC vector add | `examples/vector_add.rs` | `cargo run --example vector_add` | Compact raw `launch_1d!` vector-add example. |
 | Module global | `examples/module_global.rs` | `cargo run --example module_global` | HIPRTC module/global lookup and host interaction. |
 | Pinned stream vector add | `examples/pinned_stream_vector_add.rs` | `cargo run --example pinned_stream_vector_add` | Pinned host memory plus stream-oriented launch flow. |
 | Device operation chain | `examples/device_operation_chain.rs` | `cargo run --example device_operation_chain` | Higher-level device operation and async composition path. |

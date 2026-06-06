@@ -154,10 +154,12 @@ fn main() -> Result<()> {
 ```
 
 > **`DeviceBuffer::new(n)`** allocates without zeroing. The generated binding
-> takes `&DeviceBuffer<T>` for both read and write parameters — mutability is
-> expressed by the kernel's `DeviceSliceMut` type, not by the Rust reference.
-> The `unsafe` block is required: `launch!`, generated launch methods, and
-> generated launcher `.launch(...)` calls are unsafe.
+> accepts `&impl AsRef<DeviceBuffer<T>>` for both read and write parameters, so
+> plain `DeviceBuffer<T>` and higher-level wrappers such as `GpuArray<T>` can be
+> passed directly. Mutability is expressed by the kernel's `DeviceSliceMut` type,
+> not by the Rust reference.
+> The `unsafe` block is required: `launch!`, `launch_1d!`, generated launch
+> methods, and generated launcher `.launch(...)` calls are unsafe.
 
 ---
 

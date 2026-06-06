@@ -1,6 +1,6 @@
 use rocm_oxide::{
-    Device, DeviceBuffer, DeviceOperation, Dim3, LaunchConfig, ManagedBuffer, ManagedMemoryKind,
-    PinnedHostBuffer, StreamPool,
+    Device, DeviceBuffer, DeviceOperation, Dim3, GpuArray, LaunchConfig, ManagedBuffer,
+    ManagedMemoryKind, PinnedHostBuffer, StreamPool,
 };
 use std::sync::Arc;
 
@@ -35,6 +35,17 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     }
     rocm_oxide::hip::synchronize()?;
     assert_eq!(add_out.copy_to_vec()?, vec![3.0, 7.5, -1.0, 2.25]);
+
+    let gpu_add_input = GpuArray::from_values([2.0f32, -1.0, 0.5])?;
+    let gpu_add_out = GpuArray::<f32>::zeroed(gpu_add_input.len())?;
+    unsafe {
+        kernels
+            .add_one_launcher()
+            .grid_for(gpu_add_input.len())
+            .launch(&gpu_add_out, &gpu_add_input)?;
+    }
+    rocm_oxide::hip::synchronize()?;
+    assert_eq!(gpu_add_out.download()?, vec![4.0, 1.0, 2.5]);
 
     let math_input = DeviceBuffer::from_slice(&[4.0f32, 0.0, 1.0, -1.0])?;
     let math_out = DeviceBuffer::<f32>::new(30)?;

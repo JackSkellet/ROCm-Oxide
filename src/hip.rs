@@ -1847,6 +1847,12 @@ pub struct DeviceBuffer<T> {
 unsafe impl<T: Send> Send for DeviceBuffer<T> {}
 unsafe impl<T: Sync> Sync for DeviceBuffer<T> {}
 
+impl<T> AsRef<DeviceBuffer<T>> for DeviceBuffer<T> {
+    fn as_ref(&self) -> &DeviceBuffer<T> {
+        self
+    }
+}
+
 /// Plain-old-data element type that can be safely represented by zeroed host
 /// memory and copied to/from device memory as raw bytes.
 ///

@@ -9,7 +9,7 @@ HIPRTC runtime-compilation path: no separate device-crate build is needed.
 1. Opens the first AMD GPU with `Device::first()`.
 2. Compiles an inline HIP C++ kernel at runtime with `device.compile_hip_source()`.
 3. Uploads two `f32` vectors to the GPU with `DeviceBuffer::from_slice()`.
-4. Launches the kernel with `launch!` and `LaunchConfig::for_num_elems()`.
+4. Launches the kernel with `launch_1d!`.
 5. Synchronizes the device with `rocm_oxide::hip::synchronize()`.
 6. Downloads the result with `DeviceBuffer::copy_to_vec()` and verifies correctness.
 
@@ -91,9 +91,9 @@ a synchronous host-to-device copy. `new(n)` allocates without initializing
 
 ```rust
 unsafe {
-    rocm_oxide::launch!(
+    rocm_oxide::launch_1d!(
         kernel,
-        LaunchConfig::for_num_elems(n),
+        n,
         d_out.as_mut_ptr(),
         d_a.as_ptr(),
         d_b.as_ptr(),
@@ -102,11 +102,10 @@ unsafe {
 }
 ```
 
-The `launch!` macro builds the HIP kernel argument array and calls
-`hipLaunchKernel`. It is `unsafe` because argument types are checked at
-the programmer's discretion — they must match the HIP C++ function signature.
-`LaunchConfig::for_num_elems(n)` computes a 1-D grid with 256 threads per
-block, which is a sensible default for most element-wise kernels.
+The `launch_1d!` macro computes a 1-D grid with 256 threads per block, builds
+the HIP kernel argument array, and calls `hipLaunchKernel`. It is `unsafe`
+because argument types are checked at the programmer's discretion — they must
+match the HIP C++ function signature.
 
 Kernel launch is asynchronous — control returns to the host before the GPU
 has finished. The following `synchronize()` call blocks until the GPU is idle.

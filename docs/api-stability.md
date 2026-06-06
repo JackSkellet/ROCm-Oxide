@@ -18,7 +18,7 @@ runtime work:
   helpers used by generated bindings;
 - memory and synchronization: `DeviceBuffer`, `ManagedBuffer`,
   `PinnedHostBuffer`, `DevicePod`, `Stream`, `Event`;
-- launch entry point: `launch!`;
+- launch entry points: `launch!`, `launch_1d!`, `launch_1d_with_block!`;
 - shared error/result types: `Error`, `Result`.
 
 These names should be kept source-compatible where practical. Breaking changes

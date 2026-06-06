@@ -1,4 +1,4 @@
-use rocm_oxide::{Device, DeviceBuffer, LaunchConfig};
+use rocm_oxide::{Device, DeviceBuffer};
 
 const KERNEL: &str = r#"
 extern "C" __global__
@@ -24,9 +24,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let d_out = DeviceBuffer::<f32>::new(n)?;
 
     unsafe {
-        rocm_oxide::launch!(
+        rocm_oxide::launch_1d!(
             kernel,
-            LaunchConfig::for_num_elems(n),
+            n,
             d_out.as_mut_ptr(),
             d_a.as_ptr(),
             d_b.as_ptr(),

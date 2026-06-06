@@ -99,7 +99,7 @@ fn main() -> Result<()> {
     // ── Step 4: launch the kernel ─────────────────────────────────────────────
     // The generated launcher:
     //   - picks a 1-D launch config with `.grid_for(n)`
-    //   - takes typed `&DeviceBuffer<f32>` instead of raw pointers
+    //   - takes typed `&DeviceBuffer<f32>` or `&GpuArray<f32>` instead of raw pointers
     //   - validates buffer lengths match and buffers don't alias
     //   - builds the HIP argument array and calls hipLaunchKernel
     //

@@ -32,7 +32,7 @@ may still change, but changes will come with a migration note in `CHANGELOG.md`:
 - `DeviceBuffer<T>`, `ManagedBuffer<T>`, `PinnedHostBuffer`
 - `Stream`, `Event`
 - `LaunchConfig`, `Dim3`
-- `launch!` macro
+- `launch!`, `launch_1d!`, and `launch_1d_with_block!` macros
 - `Error`, `Result`
 - `DevicePod`
 
@@ -106,7 +106,7 @@ For Tier 1 APIs, these are breaking changes that will appear in `CHANGELOG.md`:
 - Renaming or removing a public type or function
 - Changing a function signature in a backwards-incompatible way
 - Changing the memory layout of a public type
-- Changing the `launch!` macro syntax
+- Changing the `launch!`, `launch_1d!`, or `launch_1d_with_block!` macro syntax
 
 For Tier 2 and Tier 3, any change may happen silently. Check `CHANGELOG.md`
 and `git log` when upgrading.

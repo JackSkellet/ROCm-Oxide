@@ -111,7 +111,7 @@ pub unsafe extern "C" fn vector_add(
   `extern "C"` keeps the symbol name unmangled so the host can look it up by name.
 - `DeviceSliceMut<f32>` / `DeviceSlice<f32>` — `#[repr(C)]` fat
   pointers carrying `(ptr, len)`. They are ABI-safe to pass through the kernel
-  argument list and appear on the host side as `&DeviceBuffer<f32>`.
+  argument list and appear on the host side as `&impl AsRef<DeviceBuffer<f32>>`.
 - `for_each_element(out.len(), |i| { ... })` — runs the closure only for
   in-bounds 1-D element indices and gives autocomplete-friendly access to
   `i.as_usize()`, `input.read(i)`, and `out.set(i, value)`.
@@ -126,14 +126,15 @@ pub unsafe extern "C" fn vector_add(
 pub unsafe fn vector_add(
     &self,
     config: rocm_oxide::LaunchConfig,
-    out: &rocm_oxide::DeviceBuffer<f32>,
-    a:   &rocm_oxide::DeviceBuffer<f32>,
-    b:   &rocm_oxide::DeviceBuffer<f32>,
+    out: &impl AsRef<rocm_oxide::DeviceBuffer<f32>>,
+    a:   &impl AsRef<rocm_oxide::DeviceBuffer<f32>>,
+    b:   &impl AsRef<rocm_oxide::DeviceBuffer<f32>>,
 ) -> rocm_oxide::Result<()>
 ```
 
 Compared to using `launch!` with raw pointers, the generated method:
-- Takes `&DeviceBuffer<f32>` instead of `(*mut f32, usize)` pairs.
+- Takes `&DeviceBuffer<f32>` or `&GpuArray<f32>` instead of raw
+  `(*mut f32, usize)` pairs.
 - Validates that `a.len() == out.len()` and `b.len() == out.len()`.
 - Validates that `out`, `a`, `b` do not overlap in device memory.
 - Expands each `DeviceSlice` into the `(ptr, len)` pair the ABI expects.

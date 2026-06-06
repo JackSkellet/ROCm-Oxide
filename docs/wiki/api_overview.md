@@ -13,7 +13,7 @@ For a hands-on introduction see [getting-started.md](getting-started.md).
 ```
 ┌────────────────────────────────────────────────────┐
 │  Your host code (src/main.rs)                      │
-│  Device, Module, Kernel, DeviceBuffer, launch!     │
+│  Device, Module, Kernel, DeviceBuffer, launch_1d!  │
 │  (rocm-oxide / src/)                               │
 ├────────────────────────────────────────────────────┤
 │  Generated typed bindings (bindings.rs)            │
@@ -237,10 +237,11 @@ normal workflows. It implements the full Rust → GPU pipeline:
 `rocm-oxide-build` emits a `DeviceKernels` struct with one validated method and
 one fluent launcher per `#[kernel]` function. The validated method signature
 matches the kernel exactly but accepts host-side types: both `DeviceSlice<T>`
-and `DeviceSliceMut<T>` map to `&DeviceBuffer<T>` (shared reference).
-Mutability is handled internally by calling `.as_mut_ptr()` or `.as_ptr()`
-depending on the kernel parameter kind. Runtime overlap and length checks are
-applied before launch.
+and `DeviceSliceMut<T>` map to `&impl AsRef<DeviceBuffer<T>>` (shared
+reference), so `DeviceBuffer<T>` and wrappers such as `GpuArray<T>` can use the
+same generated launcher. Mutability is handled internally by calling
+`.as_mut_ptr()` or `.as_ptr()` depending on the kernel parameter kind. Runtime
+overlap and length checks are applied before launch.
 
 Include the bindings in `src/main.rs` (or `src/lib.rs`):
 
@@ -290,7 +291,8 @@ A loaded `.hsaco` code object. Produced by `Device::load_code_object_file`,
 ### `Kernel`
 
 A function pointer from a loaded `Module`. `Send + Sync`. Launch with
-`launch!(kernel, config, arg0, ..., argN)?`.
+`launch!(kernel, config, arg0, ..., argN)?` or
+`launch_1d!(kernel, num_elems, arg0, ..., argN)?` for 1-D kernels.
 
 ### `LaunchConfig`
 
@@ -405,6 +407,12 @@ dependency tracking. See `src/operation.rs` for the `DeviceOperation` trait.
 
 Builds the HIP argument pointer array and calls `Kernel::launch_raw`. Supports
 0–16 arguments. Returns `Result<()>`. Always append `?`.
+
+### `launch_1d!` and `launch_1d_with_block!`
+
+Convenience wrappers for raw 1-D kernels. They build a `LaunchConfig` with
+`LaunchConfig::for_num_elems(...)` or
+`LaunchConfig::for_num_elems_with_block_size(...)`, then delegate to `launch!`.
 
 ---
 

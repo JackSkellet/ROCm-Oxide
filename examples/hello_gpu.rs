@@ -53,16 +53,15 @@ fn main() -> Result<()> {
     let d_out = DeviceBuffer::<f32>::new(n)?; // uninitialized output buffer
 
     // ── Step 4: launch the kernel ─────────────────────────────────────────────
-    // `LaunchConfig::for_num_elems` picks a grid/block shape for a 1-D workload.
+    // `launch_1d!` picks a grid/block shape for a 1-D workload.
     // The kernel arguments must exactly match the C++ signature above.
     //
     // SAFETY: argument types and order match `vector_add`'s C++ signature.
     //         The device buffers are live for the duration of the launch.
-    let config = LaunchConfig::for_num_elems(n);
     unsafe {
-        rocm_oxide::launch!(
+        rocm_oxide::launch_1d!(
             kernel,
-            config,
+            n,
             d_out.as_mut_ptr(), // float* out
             d_a.as_ptr(),       // const float* a
             d_b.as_ptr(),       // const float* b

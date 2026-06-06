@@ -5540,10 +5540,7 @@ fn generate_kernel_binding(
     for arg in &kernel.args {
         match &arg.kind {
             ArgKind::MutPtr(inner) => {
-                params.push(format!(
-                    "{}: &rocm_oxide::DeviceBuffer<{}>",
-                    arg.name, inner
-                ));
+                params.push(generated_buffer_ref_param(&arg.name, inner));
                 operation_params.push(format!(
                     "{}: std::sync::Arc<rocm_oxide::DeviceBuffer<{}>>",
                     arg.name, inner
@@ -5553,10 +5550,7 @@ fn generate_kernel_binding(
                 keep_alive_arg_names.push(arg.name.clone());
             }
             ArgKind::ConstPtr(inner) => {
-                params.push(format!(
-                    "{}: &rocm_oxide::DeviceBuffer<{}>",
-                    arg.name, inner
-                ));
+                params.push(generated_buffer_ref_param(&arg.name, inner));
                 operation_params.push(format!(
                     "{}: std::sync::Arc<rocm_oxide::DeviceBuffer<{}>>",
                     arg.name, inner
@@ -5566,10 +5560,7 @@ fn generate_kernel_binding(
                 keep_alive_arg_names.push(arg.name.clone());
             }
             ArgKind::MutSlice(inner) => {
-                params.push(format!(
-                    "{}: &rocm_oxide::DeviceBuffer<{}>",
-                    arg.name, inner
-                ));
+                params.push(generated_buffer_ref_param(&arg.name, inner));
                 operation_params.push(format!(
                     "{}: std::sync::Arc<rocm_oxide::DeviceBuffer<{}>>",
                     arg.name, inner
@@ -5580,10 +5571,7 @@ fn generate_kernel_binding(
                 keep_alive_arg_names.push(arg.name.clone());
             }
             ArgKind::ConstSlice(inner) => {
-                params.push(format!(
-                    "{}: &rocm_oxide::DeviceBuffer<{}>",
-                    arg.name, inner
-                ));
+                params.push(generated_buffer_ref_param(&arg.name, inner));
                 operation_params.push(format!(
                     "{}: std::sync::Arc<rocm_oxide::DeviceBuffer<{}>>",
                     arg.name, inner
@@ -5596,10 +5584,7 @@ fn generate_kernel_binding(
             ArgKind::Scalar => {
                 if let Some(device_struct) = device_structs.get(type_leaf_name(&arg.ty)) {
                     if scalar_arg_is_indirect_global_buffer(metadata, &arg.name) {
-                        params.push(format!(
-                            "{}: &rocm_oxide::DeviceBuffer<{}>",
-                            arg.name, device_struct.name
-                        ));
+                        params.push(generated_buffer_ref_param(&arg.name, &device_struct.name));
                         operation_params.push(format!(
                             "{}: std::sync::Arc<rocm_oxide::DeviceBuffer<{}>>",
                             arg.name, device_struct.name
@@ -5650,6 +5635,10 @@ fn generate_kernel_binding(
         method_name,
         params.join(", ")
     ));
+    out.push_str(&generate_kernel_buffer_borrow_lines(
+        &buffer_arg_names,
+        "        ",
+    ));
     out.push_str(&generate_kernel_validation_lines(
         kernel,
         &buffer_arg_names,
@@ -5673,6 +5662,10 @@ fn generate_kernel_binding(
         "    pub unsafe fn {}_on_stream(&self, {}) -> rocm_oxide::Result<()> {{\n",
         method_name,
         stream_params.join(", ")
+    ));
+    out.push_str(&generate_kernel_buffer_borrow_lines(
+        &buffer_arg_names,
+        "        ",
     ));
     out.push_str(&generate_kernel_validation_lines(
         kernel,
@@ -5703,6 +5696,10 @@ fn generate_kernel_binding(
         method_name,
         params.join(", ")
     ));
+    out.push_str(&generate_kernel_buffer_borrow_lines(
+        &buffer_arg_names,
+        "        ",
+    ));
     out.push_str(&generate_kernel_param_setup(&launch_args, "        "));
     out.push_str("        unsafe {\n");
     out.push_str(&format!(
@@ -5725,6 +5722,10 @@ fn generate_kernel_binding(
         "    pub unsafe fn {}_on_stream_unchecked(&self, {}) -> rocm_oxide::Result<()> {{\n",
         method_name,
         stream_params.join(", ")
+    ));
+    out.push_str(&generate_kernel_buffer_borrow_lines(
+        &buffer_arg_names,
+        "        ",
     ));
     out.push_str(&generate_kernel_param_setup(&launch_args, "        "));
     out.push_str("        unsafe {\n");
@@ -5749,6 +5750,10 @@ fn generate_kernel_binding(
         "    pub unsafe fn {}_graph_node(&self, {}) -> rocm_oxide::Result<rocm_oxide::hip::GraphNode> {{\n",
         method_name,
         graph_params.join(", ")
+    ));
+    out.push_str(&generate_kernel_buffer_borrow_lines(
+        &buffer_arg_names,
+        "        ",
     ));
     out.push_str(&generate_kernel_validation_lines(
         kernel,
@@ -5831,20 +5836,14 @@ fn generate_kernel_launcher_binding(
         call_args.push(arg.name.clone());
         match &arg.kind {
             ArgKind::MutPtr(inner) | ArgKind::MutSlice(inner) => {
-                params.push(format!(
-                    "{}: &rocm_oxide::DeviceBuffer<{}>",
-                    arg.name, inner
-                ));
+                params.push(generated_buffer_ref_param(&arg.name, inner));
                 operation_params.push(format!(
                     "{}: std::sync::Arc<rocm_oxide::DeviceBuffer<{}>>",
                     arg.name, inner
                 ));
             }
             ArgKind::ConstPtr(inner) | ArgKind::ConstSlice(inner) => {
-                params.push(format!(
-                    "{}: &rocm_oxide::DeviceBuffer<{}>",
-                    arg.name, inner
-                ));
+                params.push(generated_buffer_ref_param(&arg.name, inner));
                 operation_params.push(format!(
                     "{}: std::sync::Arc<rocm_oxide::DeviceBuffer<{}>>",
                     arg.name, inner
@@ -5853,10 +5852,7 @@ fn generate_kernel_launcher_binding(
             ArgKind::Scalar => {
                 if let Some(device_struct) = device_structs.get(type_leaf_name(&arg.ty)) {
                     if scalar_arg_is_indirect_global_buffer(metadata, &arg.name) {
-                        params.push(format!(
-                            "{}: &rocm_oxide::DeviceBuffer<{}>",
-                            arg.name, device_struct.name
-                        ));
+                        params.push(generated_buffer_ref_param(&arg.name, &device_struct.name));
                         operation_params.push(format!(
                             "{}: std::sync::Arc<rocm_oxide::DeviceBuffer<{}>>",
                             arg.name, device_struct.name
@@ -6006,6 +6002,22 @@ fn generated_self_params(params: &[String]) -> String {
     } else {
         format!(", {}", params.join(", "))
     }
+}
+
+fn generated_buffer_ref_param(name: &str, inner: &str) -> String {
+    format!("{name}: &impl AsRef<rocm_oxide::DeviceBuffer<{inner}>>")
+}
+
+fn generate_kernel_buffer_borrow_lines(
+    buffer_arg_names: &[(String, bool)],
+    indent: &str,
+) -> String {
+    let mut out = String::new();
+    for (arg_name, _) in buffer_arg_names {
+        out.push_str(indent);
+        out.push_str(&format!("let {arg_name} = {arg_name}.as_ref();\n"));
+    }
+    out
 }
 
 fn generate_kernel_param_setup(launch_args: &[String], indent: &str) -> String {
@@ -7058,9 +7070,11 @@ pub unsafe extern "C" fn vector_add(
 
         let binding = generate_kernel_binding(&kernels[0], &BTreeMap::new(), None)
             .expect("binding should generate");
-        assert!(binding.contains("out: &rocm_oxide::DeviceBuffer<f32>"));
-        assert!(binding.contains("a: &rocm_oxide::DeviceBuffer<f32>"));
+        assert!(binding.contains("out: &impl AsRef<rocm_oxide::DeviceBuffer<f32>>"));
+        assert!(binding.contains("a: &impl AsRef<rocm_oxide::DeviceBuffer<f32>>"));
         assert!(binding.contains("n: usize"));
+        assert!(binding.contains("let out = out.as_ref();"));
+        assert!(binding.contains("let a = a.as_ref();"));
         assert!(binding.contains("validate_launch_config(config)?"));
         assert!(binding.contains("validate_buffer_len(\"out\", out.len(), n)?"));
         assert!(binding.contains("validate_buffer_len(\"a\", a.len(), n)?"));
@@ -7087,7 +7101,7 @@ pub unsafe extern "C" fn vector_add(
         assert!(launcher.contains("pub fn grid_for(self, num_elems: usize) -> Self"));
         assert!(launcher.contains("pub fn try_grid_for(mut self, num_elems: usize) -> rocm_oxide::Result<Self>"));
         assert!(launcher.contains("pub fn on_stream(mut self, stream: &'a rocm_oxide::Stream) -> Self"));
-        assert!(launcher.contains("pub unsafe fn launch(self, out: &rocm_oxide::DeviceBuffer<f32>, a: &rocm_oxide::DeviceBuffer<f32>, n: usize)"));
+        assert!(launcher.contains("pub unsafe fn launch(self, out: &impl AsRef<rocm_oxide::DeviceBuffer<f32>>, a: &impl AsRef<rocm_oxide::DeviceBuffer<f32>>, n: usize)"));
         assert!(launcher.contains("self.kernels.vector_add(config, out, a, n)"));
         assert!(launcher.contains("pub unsafe fn operation(self, out: std::sync::Arc<rocm_oxide::DeviceBuffer<f32>>, a: std::sync::Arc<rocm_oxide::DeviceBuffer<f32>>, n: usize)"));
         assert!(launcher.contains("self.kernels.vector_add_operation(config, out, a, n)"));
@@ -7167,9 +7181,12 @@ pub unsafe extern "C" fn vector_add(
 
         let binding = generate_kernel_binding(&kernels[0], &BTreeMap::new(), None)
             .expect("binding should generate");
-        assert!(binding.contains("out: &rocm_oxide::DeviceBuffer<f32>"));
-        assert!(binding.contains("a: &rocm_oxide::DeviceBuffer<f32>"));
-        assert!(binding.contains("b: &rocm_oxide::DeviceBuffer<f32>"));
+        assert!(binding.contains("out: &impl AsRef<rocm_oxide::DeviceBuffer<f32>>"));
+        assert!(binding.contains("a: &impl AsRef<rocm_oxide::DeviceBuffer<f32>>"));
+        assert!(binding.contains("b: &impl AsRef<rocm_oxide::DeviceBuffer<f32>>"));
+        assert!(binding.contains("let out = out.as_ref();"));
+        assert!(binding.contains("let a = a.as_ref();"));
+        assert!(binding.contains("let b = b.as_ref();"));
         assert!(binding.contains("validate_buffer_len(\"a\", a.len(), out.len())?"));
         assert!(binding.contains("validate_buffer_len(\"b\", b.len(), out.len())?"));
         assert!(binding.contains("validate_device_buffers_disjoint(\"out\", out, \"a\", a)?"));
@@ -7931,7 +7948,10 @@ pub unsafe extern "C" fn apply_closure<F: FnOnce(u32) -> u32 + Copy>(
         let binding = generate_kernel_binding(&kernels[0], &device_structs, Some(&metadata))
             .expect("binding should generate");
         assert!(binding.contains("pub unsafe fn apply_closure_host_affine_closure"));
-        assert!(binding.contains("f: &rocm_oxide::DeviceBuffer<HostAffineClosure>"));
+        assert!(
+            binding.contains("f: &impl AsRef<rocm_oxide::DeviceBuffer<HostAffineClosure>>")
+        );
+        assert!(binding.contains("let f = f.as_ref();"));
         assert!(binding.contains("rocm_oxide::validate_buffer_len(\"f\", f.len(), 1)?;"));
         assert!(binding.contains("let mut __arg4 = f.as_ptr();"));
         assert!(binding.contains("let mut __arg5 = n;"));
