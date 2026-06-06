@@ -1853,6 +1853,12 @@ impl<T> AsRef<DeviceBuffer<T>> for DeviceBuffer<T> {
     }
 }
 
+impl<T> AsMut<DeviceBuffer<T>> for DeviceBuffer<T> {
+    fn as_mut(&mut self) -> &mut DeviceBuffer<T> {
+        self
+    }
+}
+
 /// Plain-old-data element type that can be safely represented by zeroed host
 /// memory and copied to/from device memory as raw bytes.
 ///

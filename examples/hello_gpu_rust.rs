@@ -58,9 +58,9 @@ use rocm_oxide::prelude::*;
 //   pub unsafe fn vector_add(
 //       &self,
 //       config: LaunchConfig,
-//       out: &DeviceBuffer<f32>,
-//       a:   &DeviceBuffer<f32>,
-//       b:   &DeviceBuffer<f32>,
+//       out: &impl AsRef<DeviceBuffer<f32>>,
+//       a:   &impl AsRef<DeviceBuffer<f32>>,
+//       b:   &impl AsRef<DeviceBuffer<f32>>,
 //   ) -> Result<()>
 //
 // The build tool validates argument types, buffer lengths, and overlap at

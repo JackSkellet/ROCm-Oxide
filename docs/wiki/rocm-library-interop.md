@@ -53,17 +53,25 @@ operations before writing a custom kernel. The easiest path is `GpuArray<T>`,
 which wraps `DeviceBuffer<T>` with method-oriented helpers:
 
 ```rust,ignore
-use rocm_oxide::GpuArray;
+use rocm_oxide::{GpuArray, gpu};
 
-let input = GpuArray::from_values([1u32, 2, 3, 4])?;
+let input = gpu::array([1u32, 2, 3, 4])?;
+assert_eq!(input.shape(), [4]);
 let sum = input.sum()?;
+let same_sum = gpu::reduce_sum(&input)?;
 
 let scan = input.exclusive_scan(0)?;
-let mapped = input.map_add(8)?;
+let mapped = input.add_scalar(8)?;
+
+let mapped_into = gpu::empty::<u32>(input.len())?;
+input.add_scalar_into(&mapped_into, 3)?;
 
 let params = GpuArray::from_value(7u32)?;
 params.write(11)?;
-let value = params.read()?;
+let value = params.item()?;
+
+let filled = gpu::full(3, 42u32)?;
+let host = filled.to_list()?;
 
 let mut sortable = GpuArray::from_slice(&[4u32, 1, 3, 2])?;
 sortable.sort()?;

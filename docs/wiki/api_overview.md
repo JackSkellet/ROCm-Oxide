@@ -319,17 +319,25 @@ helpers for useful GPU work without writing a custom kernel. The most
 discoverable surface is `GpuArray<T>`:
 
 ```rust,ignore
-use rocm_oxide::GpuArray;
+use rocm_oxide::{GpuArray, gpu};
 
-let input = GpuArray::from_values([1u32, 2, 3, 4])?;
+let input = gpu::array([1u32, 2, 3, 4])?;
+assert_eq!(input.shape(), [4]);
 let sum = input.sum()?;
+let same_sum = gpu::reduce_sum(&input)?;
 
 let scan = input.exclusive_scan(0)?;
-let mapped = input.map_add(8)?;
+let mapped = input.add_scalar(8)?;
+
+let mapped_into = gpu::empty::<u32>(input.len())?;
+input.add_scalar_into(&mapped_into, 3)?;
 
 let params = GpuArray::from_value(7u32)?;
 params.write(11)?;
-let value = params.read()?;
+let value = params.item()?;
+
+let filled = gpu::full(3, 42u32)?;
+let host = filled.to_list()?;
 
 let mut sortable = GpuArray::from_slice(&[4u32, 1, 3, 2])?;
 sortable.sort()?;
@@ -358,14 +366,17 @@ let mut sortable = DeviceBuffer::from_slice(&[4u32, 1, 3, 2])?;
 gpu::sort(&mut sortable)?;
 ```
 
-`GpuArray<T>` also has `new`/`empty`, `zeros`/`zeroed`, `repeat`, `upload`,
-`copy_to_slice`, `copy_to`, `copy_from`, `cloned`, and `download` helpers for
-script-like host code.
+`GpuArray<T>` also has `new`/`empty`, `zeros`/`zeroed`, `repeat`/`full`,
+`size`, `shape`, `byte_len`, `upload`/`assign`, `copy_to_slice`, `copy_to`,
+`copy_from`, `cloned`, `to_vec`/`to_list`, and `download` helpers for
+script-like host code. The `gpu::array`, `gpu::empty`, `gpu::zeros`, and
+`gpu::full` constructors are short aliases around the same type.
 `reduce_sum`, `inclusive_scan`, and `exclusive_scan` currently support `u32`,
 `i32`, and `f32`. Sorting, key/value sort, compact-by-flag, unique,
-sort-unique, count, contains, and map-add helpers currently target `u32`. Use
-`RocPrim` and `RocThrust` directly when you need explicit stream or
-temporary-storage control.
+sort-unique, count, contains, and add-scalar/map-add helpers currently target
+`u32`. Free functions in `gpu::` accept either `DeviceBuffer<T>` or wrappers
+such as `GpuArray<T>` where practical. Use `RocPrim` and `RocThrust` directly
+when you need explicit stream or temporary-storage control.
 
 ### GPU Tests
 

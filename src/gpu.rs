@@ -16,16 +16,16 @@ use std::ops::{Deref, DerefMut};
 /// free functions in this module and the underlying `DeviceBuffer`.
 ///
 /// ```rust,ignore
-/// use rocm_oxide::gpu::GpuArray;
+/// use rocm_oxide::gpu;
 ///
-/// let input = GpuArray::from_slice(&[1u32, 2, 3, 4])?;
+/// let input = gpu::array([1u32, 2, 3, 4])?;
 /// let sum = input.sum()?;
-/// let mapped = input.map_add(8)?;
+/// let mapped = input.add_scalar(8)?;
 /// let scanned = input.exclusive_scan(0)?;
 ///
 /// assert_eq!(sum, 10);
-/// assert_eq!(mapped.to_vec()?, [9, 10, 11, 12]);
-/// assert_eq!(scanned.to_vec()?, [0, 1, 3, 6]);
+/// assert_eq!(mapped.to_list()?, [9, 10, 11, 12]);
+/// assert_eq!(scanned.to_list()?, [0, 1, 3, 6]);
 /// ```
 pub struct GpuArray<T> {
     buffer: DeviceBuffer<T>,
@@ -73,6 +73,29 @@ impl<T> GpuArray<T> {
     /// Number of elements in the array.
     pub fn len(&self) -> usize {
         self.buffer.len()
+    }
+
+    /// Number of elements in the array.
+    ///
+    /// Alias for [`len`](Self::len) that reads naturally beside Python and
+    /// NumPy examples.
+    pub fn size(&self) -> usize {
+        self.len()
+    }
+
+    /// One-dimensional array shape.
+    pub fn shape(&self) -> [usize; 1] {
+        [self.len()]
+    }
+
+    /// Size of one element in bytes.
+    pub fn element_size(&self) -> usize {
+        std::mem::size_of::<T>()
+    }
+
+    /// Total logical element storage size in bytes.
+    pub fn byte_len(&self) -> usize {
+        self.len().saturating_mul(self.element_size())
     }
 
     /// Returns `true` when the array has no elements.
@@ -158,6 +181,14 @@ impl<T: Copy> GpuArray<T> {
         Self::from_slice(host.as_slice())
     }
 
+    /// Allocate a device array containing `len` copies of `value`.
+    ///
+    /// Alias for [`repeat`](Self::repeat) using the familiar `full(len, value)`
+    /// constructor shape.
+    pub fn full(len: usize, value: T) -> Result<Self> {
+        Self::repeat(value, len)
+    }
+
     /// Copy `input` into this existing device array.
     pub fn copy_from_slice(&self, input: &[T]) -> Result<()> {
         Ok(self.buffer.copy_from_host(input)?)
@@ -169,6 +200,14 @@ impl<T: Copy> GpuArray<T> {
     /// for script-like code.
     pub fn upload(&self, input: &[T]) -> Result<()> {
         self.copy_from_slice(input)
+    }
+
+    /// Copy `input` into this existing device array.
+    ///
+    /// Alias for [`upload`](Self::upload) for script-like code that treats an
+    /// existing GPU allocation as an assignable array.
+    pub fn assign(&self, input: &[T]) -> Result<()> {
+        self.upload(input)
     }
 
     /// Copy this device array into an existing host slice.
@@ -185,6 +224,16 @@ impl<T: Copy> GpuArray<T> {
         Ok(self.to_vec()?[0])
     }
 
+    /// Copy this one-element device array back to the host.
+    ///
+    /// Alias for [`read`](Self::read) named after NumPy scalar extraction.
+    pub fn item(&self) -> Result<T>
+    where
+        T: Default,
+    {
+        self.read()
+    }
+
     /// Copy `value` into this one-element device array.
     pub fn write(&self, value: T) -> Result<()> {
         expect_len("write", self.len(), 1)?;
@@ -196,6 +245,13 @@ impl<T: Copy + Default> GpuArray<T> {
     /// Copy this device array back to host memory.
     pub fn to_vec(&self) -> Result<Vec<T>> {
         Ok(self.buffer.copy_to_vec()?)
+    }
+
+    /// Copy this device array back to host memory.
+    ///
+    /// Alias for [`to_vec`](Self::to_vec) with a Python-like collection name.
+    pub fn to_list(&self) -> Result<Vec<T>> {
+        self.to_vec()
     }
 
     /// Copy this device array back to host memory.
@@ -214,11 +270,21 @@ impl<T: ReduceSum> GpuArray<T> {
 }
 
 impl<T: PrefixSum> GpuArray<T> {
+    /// Write the inclusive prefix sum of this array into `output`.
+    pub fn inclusive_scan_into(&self, output: &GpuArray<T>) -> Result<()> {
+        inclusive_scan(&self.buffer, output)
+    }
+
     /// Return an array containing the inclusive prefix sum of this array.
     pub fn inclusive_scan(&self) -> Result<Self> {
         let output = DeviceBuffer::<T>::new(self.len())?;
         inclusive_scan(&self.buffer, &output)?;
         Ok(Self { buffer: output })
+    }
+
+    /// Write the exclusive prefix sum of this array into `output`.
+    pub fn exclusive_scan_into(&self, output: &GpuArray<T>, initial_value: T) -> Result<()> {
+        exclusive_scan(&self.buffer, output, initial_value)
     }
 
     /// Return an array containing the exclusive prefix sum of this array.
@@ -230,11 +296,26 @@ impl<T: PrefixSum> GpuArray<T> {
 }
 
 impl GpuArray<u32> {
+    /// Add `addend` to every element and write the result into `output`.
+    pub fn map_add_into(&self, output: &GpuArray<u32>, addend: u32) -> Result<()> {
+        map_add_u32(&self.buffer, output, addend)
+    }
+
     /// Add `addend` to every element and return the mapped output array.
     pub fn map_add(&self, addend: u32) -> Result<Self> {
         let output = DeviceBuffer::<u32>::new(self.len())?;
         map_add_u32(&self.buffer, &output, addend)?;
         Ok(Self { buffer: output })
+    }
+
+    /// Add `addend` to every element and write the result into `output`.
+    pub fn add_scalar_into(&self, output: &GpuArray<u32>, addend: u32) -> Result<()> {
+        self.map_add_into(output, addend)
+    }
+
+    /// Add `addend` to every element and return the mapped output array.
+    pub fn add_scalar(&self, addend: u32) -> Result<Self> {
+        self.map_add(addend)
     }
 
     /// Sort this array in place.
@@ -333,6 +414,26 @@ fn expect_len(operation: &str, actual: usize, expected: usize) -> Result<()> {
     }
 }
 
+/// Allocate an uninitialized GPU array.
+pub fn empty<T>(len: usize) -> Result<GpuArray<T>> {
+    GpuArray::empty(len)
+}
+
+/// Allocate a zero-filled GPU array.
+pub fn zeros<T: DevicePod>(len: usize) -> Result<GpuArray<T>> {
+    GpuArray::zeros(len)
+}
+
+/// Allocate a device array and upload values from an iterator.
+pub fn array<T: Copy>(values: impl IntoIterator<Item = T>) -> Result<GpuArray<T>> {
+    GpuArray::from_values(values)
+}
+
+/// Allocate a device array containing `len` copies of `value`.
+pub fn full<T: Copy>(len: usize, value: T) -> Result<GpuArray<T>> {
+    GpuArray::full(len, value)
+}
+
 impl<T> AsRef<DeviceBuffer<T>> for GpuArray<T> {
     fn as_ref(&self) -> &DeviceBuffer<T> {
         self.as_buffer()
@@ -409,11 +510,11 @@ impl ReduceSum for f32 {
 /// Sums all elements in `input` and returns the scalar result on the host.
 ///
 /// Supported element types are `u32`, `i32`, and `f32`.
-pub fn reduce_sum<T>(input: &DeviceBuffer<T>) -> Result<T>
+pub fn reduce_sum<T>(input: &impl AsRef<DeviceBuffer<T>>) -> Result<T>
 where
     T: ReduceSum,
 {
-    T::reduce_sum(input)
+    T::reduce_sum(input.as_ref())
 }
 
 /// Element types supported by [`inclusive_scan`] and [`exclusive_scan`].
@@ -472,11 +573,14 @@ impl PrefixSum for f32 {
 ///
 /// Supported element types are `u32`, `i32`, and `f32`. `output.len()` must
 /// equal `input.len()`.
-pub fn inclusive_scan<T>(input: &DeviceBuffer<T>, output: &DeviceBuffer<T>) -> Result<()>
+pub fn inclusive_scan<T>(
+    input: &impl AsRef<DeviceBuffer<T>>,
+    output: &impl AsRef<DeviceBuffer<T>>,
+) -> Result<()>
 where
     T: PrefixSum,
 {
-    T::inclusive_scan(input, output)
+    T::inclusive_scan(input.as_ref(), output.as_ref())
 }
 
 /// Writes the exclusive prefix sum of `input` into `output`.
@@ -484,14 +588,14 @@ where
 /// Supported element types are `u32`, `i32`, and `f32`. `output.len()` must
 /// equal `input.len()`.
 pub fn exclusive_scan<T>(
-    input: &DeviceBuffer<T>,
-    output: &DeviceBuffer<T>,
+    input: &impl AsRef<DeviceBuffer<T>>,
+    output: &impl AsRef<DeviceBuffer<T>>,
     initial_value: T,
 ) -> Result<()>
 where
     T: PrefixSum,
 {
-    T::exclusive_scan(input, output, initial_value)
+    T::exclusive_scan(input.as_ref(), output.as_ref(), initial_value)
 }
 
 /// Element types supported by [`sort`].
@@ -508,42 +612,48 @@ impl Sort for u32 {
 /// Sorts `data` in place in ascending order.
 ///
 /// The current high-level sort supports `u32`.
-pub fn sort<T>(data: &mut DeviceBuffer<T>) -> Result<()>
+pub fn sort<T>(data: &mut impl AsMut<DeviceBuffer<T>>) -> Result<()>
 where
     T: Sort,
 {
-    T::sort(data)
+    T::sort(data.as_mut())
 }
 
 /// Sorts `input` into `output` in ascending order.
 ///
 /// This out-of-place helper uses rocPRIM and currently supports `u32`.
-pub fn sort_keys_u32(input: &DeviceBuffer<u32>, output: &DeviceBuffer<u32>) -> Result<()> {
-    RocPrim::open()?.sort_keys_u32(input, output)
+pub fn sort_keys_u32(
+    input: &impl AsRef<DeviceBuffer<u32>>,
+    output: &impl AsRef<DeviceBuffer<u32>>,
+) -> Result<()> {
+    RocPrim::open()?.sort_keys_u32(input.as_ref(), output.as_ref())
 }
 
 /// Sorts `keys` in place and reorders `values` to preserve key/value pairs.
 ///
 /// This helper uses rocThrust and currently supports `u32` keys and values.
-pub fn sort_by_key_u32(keys: &mut DeviceBuffer<u32>, values: &mut DeviceBuffer<u32>) -> Result<()> {
-    RocThrust::open()?.sort_by_key_u32(keys, values)
+pub fn sort_by_key_u32(
+    keys: &mut impl AsMut<DeviceBuffer<u32>>,
+    values: &mut impl AsMut<DeviceBuffer<u32>>,
+) -> Result<()> {
+    RocThrust::open()?.sort_by_key_u32(keys.as_mut(), values.as_mut())
 }
 
 /// Removes consecutive duplicate `u32` values in place.
 ///
 /// Returns the number of unique elements. Values after that count are
 /// unspecified until overwritten by the caller.
-pub fn unique_u32(data: &mut DeviceBuffer<u32>) -> Result<usize> {
-    RocThrust::open()?.unique_u32(data)
+pub fn unique_u32(data: &mut impl AsMut<DeviceBuffer<u32>>) -> Result<usize> {
+    RocThrust::open()?.unique_u32(data.as_mut())
 }
 
 /// Counts elements equal to `value` in a `u32` buffer.
-pub fn count_eq_u32(data: &DeviceBuffer<u32>, value: u32) -> Result<usize> {
-    RocThrust::open()?.count_u32(data, value)
+pub fn count_eq_u32(data: &impl AsRef<DeviceBuffer<u32>>, value: u32) -> Result<usize> {
+    RocThrust::open()?.count_u32(data.as_ref(), value)
 }
 
 /// Returns `true` when at least one `u32` element equals `value`.
-pub fn contains_eq_u32(data: &DeviceBuffer<u32>, value: u32) -> Result<bool> {
+pub fn contains_eq_u32(data: &impl AsRef<DeviceBuffer<u32>>, value: u32) -> Result<bool> {
     Ok(count_eq_u32(data, value)? != 0)
 }
 
@@ -551,7 +661,7 @@ pub fn contains_eq_u32(data: &DeviceBuffer<u32>, value: u32) -> Result<bool> {
 /// number of unique values.
 ///
 /// Values after the returned count are unspecified until overwritten.
-pub fn sort_unique_u32(data: &mut DeviceBuffer<u32>) -> Result<usize> {
+pub fn sort_unique_u32(data: &mut impl AsMut<DeviceBuffer<u32>>) -> Result<usize> {
     sort(data)?;
     unique_u32(data)
 }
@@ -560,12 +670,17 @@ pub fn sort_unique_u32(data: &mut DeviceBuffer<u32>) -> Result<usize> {
 ///
 /// The number of selected elements is written to `selected_count[0]`.
 pub fn select_flagged_u32(
-    input: &DeviceBuffer<u32>,
-    flags: &DeviceBuffer<u8>,
-    output: &DeviceBuffer<u32>,
-    selected_count: &DeviceBuffer<u32>,
+    input: &impl AsRef<DeviceBuffer<u32>>,
+    flags: &impl AsRef<DeviceBuffer<u8>>,
+    output: &impl AsRef<DeviceBuffer<u32>>,
+    selected_count: &impl AsRef<DeviceBuffer<u32>>,
 ) -> Result<()> {
-    RocPrim::open()?.select_flagged_u32(input, flags, output, selected_count)
+    RocPrim::open()?.select_flagged_u32(
+        input.as_ref(),
+        flags.as_ref(),
+        output.as_ref(),
+        selected_count.as_ref(),
+    )
 }
 
 /// Adds `addend` to every `input` element and writes the result to `output`.
@@ -573,24 +688,24 @@ pub fn select_flagged_u32(
 /// This is the first map-like helper over the existing rocPRIM shim. General
 /// closure-based GPU maps remain future work.
 pub fn map_add_u32(
-    input: &DeviceBuffer<u32>,
-    output: &DeviceBuffer<u32>,
+    input: &impl AsRef<DeviceBuffer<u32>>,
+    output: &impl AsRef<DeviceBuffer<u32>>,
     addend: u32,
 ) -> Result<()> {
-    RocPrim::open()?.transform_add_u32(input, output, addend)
+    RocPrim::open()?.transform_add_u32(input.as_ref(), output.as_ref(), addend)
 }
 
 /// Fills a device buffer with zero bytes.
-pub fn fill_zero<T>(buffer: &DeviceBuffer<T>) -> Result<()> {
-    Ok(buffer.set_zero()?)
+pub fn fill_zero<T>(buffer: &impl AsRef<DeviceBuffer<T>>) -> Result<()> {
+    Ok(buffer.as_ref().set_zero()?)
 }
 
 /// Fills a device buffer with a byte pattern.
 ///
 /// Prefer [`fill_zero`] for typed initialization. Nonzero byte patterns are best
 /// suited to byte buffers and debugging sentinels.
-pub fn fill_bytes<T>(buffer: &DeviceBuffer<T>, value: u8) -> Result<()> {
-    Ok(buffer.memset(value)?)
+pub fn fill_bytes<T>(buffer: &impl AsRef<DeviceBuffer<T>>, value: u8) -> Result<()> {
+    Ok(buffer.as_ref().memset(value)?)
 }
 
 #[cfg(test)]
@@ -670,7 +785,39 @@ mod tests {
 
         let input = GpuArray::from_slice(&[1u32, 2, 3, 4]).expect("array upload");
         assert_eq!(input.len(), 4);
+        assert_eq!(input.size(), 4);
+        assert_eq!(input.shape(), [4]);
+        assert_eq!(input.element_size(), std::mem::size_of::<u32>());
+        assert_eq!(input.byte_len(), 4 * std::mem::size_of::<u32>());
         assert_eq!(input.sum().expect("array reduce"), 10);
+        assert_eq!(reduce_sum(&input).expect("free reduce over array"), 10);
+
+        let inclusive = GpuArray::<u32>::empty(input.len()).expect("array inclusive output");
+        input
+            .inclusive_scan_into(&inclusive)
+            .expect("array inclusive scan into");
+        assert_eq!(
+            inclusive.download().expect("inclusive into download"),
+            [1, 3, 6, 10]
+        );
+
+        let free_exclusive = GpuArray::<u32>::empty(input.len()).expect("free exclusive output");
+        exclusive_scan(&input, &free_exclusive, 0).expect("free exclusive over array");
+        assert_eq!(
+            free_exclusive
+                .download()
+                .expect("free exclusive array download"),
+            [0, 1, 3, 6]
+        );
+
+        let exclusive_into = GpuArray::<u32>::empty(input.len()).expect("exclusive into output");
+        input
+            .exclusive_scan_into(&exclusive_into, 0)
+            .expect("exclusive scan into");
+        assert_eq!(
+            exclusive_into.download().expect("exclusive into download"),
+            [0, 1, 3, 6]
+        );
         assert_eq!(
             input
                 .exclusive_scan(0)
@@ -681,15 +828,36 @@ mod tests {
         );
         assert_eq!(
             input
-                .map_add(5)
-                .expect("array map add")
+                .add_scalar(5)
+                .expect("array add scalar")
                 .to_vec()
                 .expect("map download"),
             [6, 7, 8, 9]
         );
 
+        let mapped_into = GpuArray::<u32>::empty(input.len()).expect("mapped into output");
+        input
+            .add_scalar_into(&mapped_into, 7)
+            .expect("array add scalar into");
+        assert_eq!(
+            mapped_into.download().expect("mapped into download"),
+            [8, 9, 10, 11]
+        );
+
+        let free_mapped = GpuArray::<u32>::empty(input.len()).expect("free mapped output");
+        map_add_u32(&input, &free_mapped, 3).expect("free map add over arrays");
+        assert_eq!(
+            free_mapped.download().expect("free mapped download"),
+            [4, 5, 6, 7]
+        );
+
         let zeros = GpuArray::<u32>::zeros(4).expect("zero array");
         assert_eq!(zeros.to_vec().expect("zero download"), [0, 0, 0, 0]);
+        fill_zero(&free_mapped).expect("free fill zero over array");
+        assert_eq!(
+            free_mapped.download().expect("free fill zero download"),
+            [0, 0, 0, 0]
+        );
 
         let flags = GpuArray::from_slice(&[1u8, 0, 1, 0]).expect("array flags upload");
         let (selected, selected_count) = input.select_flagged(&flags).expect("array select");
@@ -708,12 +876,22 @@ mod tests {
 
         let empty = GpuArray::<u32>::empty(3).expect("empty array");
         assert_eq!(empty.len(), 3);
+        assert_eq!(empty.shape(), [3]);
 
         let zeroed = GpuArray::<u32>::zeroed(2).expect("zeroed array");
         assert_eq!(zeroed.download().expect("zeroed download"), [0, 0]);
 
+        let free_zeroed = zeros::<u32>(2).expect("free zeros constructor");
+        assert_eq!(free_zeroed.to_list().expect("free zeros download"), [0, 0]);
+
         let values = GpuArray::from_values([1u32, 2, 3]).expect("values upload");
         assert_eq!(values.download().expect("values download"), [1, 2, 3]);
+
+        let free_values = array([1u32, 2, 3]).expect("free array constructor");
+        assert_eq!(
+            free_values.to_list().expect("free array download"),
+            [1, 2, 3]
+        );
 
         let from_vec = GpuArray::from_vec(vec![4u32, 5, 6]).expect("vec upload");
         let mut host = [0u32; 3];
@@ -722,9 +900,11 @@ mod tests {
 
         from_vec.upload(&[7, 8, 9]).expect("upload alias");
         assert_eq!(from_vec.download().expect("upload download"), [7, 8, 9]);
+        from_vec.assign(&[10, 11, 12]).expect("assign alias");
+        assert_eq!(from_vec.to_list().expect("assign download"), [10, 11, 12]);
 
         let cloned = from_vec.cloned().expect("device clone");
-        assert_eq!(cloned.download().expect("clone download"), [7, 8, 9]);
+        assert_eq!(cloned.download().expect("clone download"), [10, 11, 12]);
 
         let destination = GpuArray::<u32>::zeroed(3).expect("copy destination");
         destination.copy_from(&values).expect("device copy from");
@@ -736,8 +916,17 @@ mod tests {
         let repeated = GpuArray::repeat(42u32, 3).expect("repeat upload");
         assert_eq!(repeated.download().expect("repeat download"), [42, 42, 42]);
 
+        let filled = GpuArray::full(3, 5u32).expect("full method");
+        assert_eq!(filled.to_list().expect("full method download"), [5, 5, 5]);
+        let free_filled = full(3, 6u32).expect("free full constructor");
+        assert_eq!(
+            free_filled.to_list().expect("free full download"),
+            [6, 6, 6]
+        );
+
         let scalar = GpuArray::from_value(11u32).expect("scalar upload");
         assert_eq!(scalar.read().expect("scalar read"), 11);
+        assert_eq!(scalar.item().expect("scalar item"), 11);
         scalar.write(13).expect("scalar write");
         assert_eq!(scalar.read().expect("scalar reread"), 13);
 
