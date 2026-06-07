@@ -62,6 +62,14 @@ All notable ROCm-Oxide changes should be recorded here before a tagged release.
 - Added `cargo rocm-oxide new --git <repo> [--branch|--tag|--rev]` for generated
   projects that use git dependencies while still requiring `rocm-oxide-build`
   through `ROCM_OXIDE_BUILD` or `PATH`.
+- Clarified the project boundary between the core ROCm-Oxide SDK, root
+  examples, larger `demo-projects/`, and downstream application repositories.
+- Expanded demo-project documentation, including the experimental
+  path-reconstruction app, controls, reconstruction semantics, motion/noise
+  behavior, and performance expectations.
+- Added an external consumer plan covering current local/git scaffold flows,
+  path dependency limitations, crates.io blockers, likely publishing order, and
+  a downstream-project checklist.
 
 ### SDK onboarding and diagnostics (2026-06)
 

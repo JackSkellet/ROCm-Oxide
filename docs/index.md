@@ -11,11 +11,15 @@ stay short and link here when a topic needs more detail.
   and build/runtime fixes.
 - [API stability](api-stability.md): stable, experimental, and internal surfaces
   during the `0.x` SDK preview.
+- [Project boundaries](project_boundaries.md): what ROCm-Oxide owns as the core
+  SDK and what belongs in downstream projects.
 - [ROCm library interop](wiki/rocm-library-interop.md): rocBLAS, rocFFT,
   rocPRIM/rocThrust, COMGR, and the high-level `rocm_oxide::gpu` algorithms
   layer.
 - [Project generation](project-generation.md): `cargo rocm-oxide new` scaffold
   layout, path dependencies, and standalone roadmap.
+- [External consumer plan](external_consumer_plan.md): current downstream
+  consumption modes, crates.io blockers, and consumer checklist.
 - [Editor setup](editor-setup.md): rust-analyzer linked projects, VS Code tasks,
   and device-kernel snippets.
 - [Release process](release.md): repeatable gates for preview tags.

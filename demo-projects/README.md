@@ -1,9 +1,17 @@
 # ROCm-Oxide Demo Project Catalogue
 
-This directory contains separated demo projects. Each project owns its own
-manifest, README, run command, source tree, and demo-only dependencies. The root
-SDK crate keeps the smaller examples needed to understand ROCm-Oxide as a
-Rust-first ROCm SDK.
+This directory contains larger downstream-style applications built with
+ROCm-Oxide. Each project owns its own manifest, README, run command, source
+tree, and demo-only dependencies.
+
+The root `examples/` directory is for small SDK examples, diagnostics, and
+release probes. `demo-projects/` is for heavier visual, capture, artifact,
+benchmark, and application-style demos that show how downstream projects can use
+the SDK without moving app-specific dependencies into the core crate.
+
+Demo projects are useful integration coverage, but they are not part of the
+core SDK stability contract. Downstream repositories should depend on
+ROCm-Oxide instead of copying private internals from these demos.
 
 ## Projects
 
@@ -13,7 +21,7 @@ Rust-first ROCm SDK.
 | `demo-projects/spectral-lattice/` | `src/main.rs` | `cd demo-projects/spectral-lattice && cargo run -- --present vulkan --frames 300` | Large generated-kernel workbench with multiple presentation backends, screenshots, library probes, and UI state. |
 | `demo-projects/matrix-lens/` | `src/main.rs` | `cd demo-projects/matrix-lens && cargo run -- --capture auto --resolution 720p --mode matrix` | Capture-heavy desktop lens with PipeWire, Wayland, xcap, dma-buf, Vulkan, and fallback capture paths. |
 | `demo-projects/window-effects-lab/` | `src/main.rs` | `cd demo-projects/window-effects-lab && cargo run -- --present vulkan --frames 300 0` | Captured-window GPU effects pipeline with desktop/window selection and overlay UI. |
-| `demo-projects/path-reconstruction/` | `src/bin/*.rs` | `cd demo-projects/path-reconstruction && ROCM_OXIDE_VISUAL_PRESENT=vulkan cargo run --bin vulkan_path_reconstruction -- --frames 300` | Vulkan-presented path tracing, reconstruction, denoise, interactive motion variants, and a `GpuArray<T>` comparison binary. |
+| `demo-projects/path-reconstruction/` | `src/bin/*.rs` | `cd demo-projects/path-reconstruction && ROCM_OXIDE_VISUAL_PRESENT=vulkan cargo run --bin vulkan_path_reconstruction -- --frames 300` | Experimental application-style Vulkan path tracing, reconstruction, denoise, interactive motion variants, and a `GpuArray<T>` comparison binary. |
 | `demo-projects/orbit-field/` | `src/main.rs` | `cd demo-projects/orbit-field && ROCM_OXIDE_VISUAL_PRESENT=vulkan cargo run -- --frames 300` | Self-contained HIPRTC procedural field rendered through the shared presenter. |
 | `demo-projects/gravity-storm/` | `src/main.rs` | `cd demo-projects/gravity-storm && cargo run` | Vulkan particle app with custom interaction and external-memory presentation details. |
 | `demo-projects/stress-gui/` | `src/bin/*.rs` | `cd demo-projects/stress-gui && cargo run --bin stress_test_gui -- --present vulkan --frames 300` | Bounded 2D and 3D visual stress tools with shared controls and presenter dependencies. |
@@ -51,3 +59,7 @@ The root `examples/` directory intentionally stays small:
 - `rust_device_generated_bindings`
 - `validation_profile`
 - `performance_probe`
+
+For the project-level boundary between the SDK, examples, demo projects, and
+downstream repositories, see
+[`docs/project_boundaries.md`](../docs/project_boundaries.md).

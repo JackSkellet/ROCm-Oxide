@@ -171,8 +171,8 @@ cargo rocm-oxide new my-project --git https://github.com/JackSkellet/ROCm-Oxide 
 ```
 
 This removes the fixed local workspace path from `Cargo.toml`, but it is still
-not full crates.io standalone mode because `rocm-oxide-build` must be available
-through `ROCM_OXIDE_BUILD` or `PATH`.
+not full crates.io standalone mode because generated builds still need
+`rocm-oxide-build` through `ROCM_OXIDE_BUILD` or `PATH`.
 
 `--standalone` is reserved until the runtime, device API, proc macro, and build
 tool can be consumed through crates.io or release artifacts.
@@ -390,7 +390,9 @@ Maintained docs:
 - [docs/getting-started.md](docs/getting-started.md)
 - [docs/troubleshooting.md](docs/troubleshooting.md)
 - [docs/api-stability.md](docs/api-stability.md)
+- [docs/project_boundaries.md](docs/project_boundaries.md)
 - [docs/project-generation.md](docs/project-generation.md)
+- [docs/external_consumer_plan.md](docs/external_consumer_plan.md)
 - [docs/editor-setup.md](docs/editor-setup.md)
 - [docs/release.md](docs/release.md)
 - [docs/visual-demos.md](docs/visual-demos.md)
@@ -420,7 +422,7 @@ cargo run --example validation_profile
 cargo run --features device-spike --example performance_probe -- --json target/performance_probe.json
 ```
 
-Visual and experimental demos:
+Larger downstream-style demo projects:
 
 ```sh
 cd demo-projects/spectral-lattice && cargo run -- --present vulkan --frames 3 --resolution 4k --fps-limit 120
@@ -431,8 +433,9 @@ cd ../stress-gui && cargo run --bin stress_test_gui -- --present vulkan --frames
 
 Examples that use generated Rust-device bindings require
 `device-spike` when run from the source root. Separated demo projects own their
-manifests, README files, and demo-only dependencies. HIPRTC-only examples such
-as `hello_gpu` and `vector_add` do not need demo features.
+manifests, README files, and demo-only dependencies. They are integration demos
+and experiments, not part of the core SDK stability contract. HIPRTC-only
+examples such as `hello_gpu` and `vector_add` do not need demo features.
 
 For the full visual demo table, see:
 
@@ -474,7 +477,7 @@ crates/               device/runtime support crates
 device-spike/         Rust-authored device kernel spike
 tools/                build tool and cargo wrapper
 examples/             lean SDK examples, diagnostics, and release probes
-demo-projects/        separated visual, benchmark, capture, and experiment demos
+demo-projects/        larger downstream-style visual, benchmark, and app demos
 docs/                 design, SDK, runtime, troubleshooting, release docs
 scripts/              verification and compatibility scripts
 ```
